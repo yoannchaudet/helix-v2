@@ -182,7 +182,8 @@ pub struct RepoGroup {
 pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
     let mut stmt = conn.prepare(
         "SELECT r.id, r.full_name, r.private,
-                n.thread_id, n.subject_type, n.subject_title, n.subject_url, n.reason,
+                n.thread_id, n.subject_type, n.subject_title, n.subject_url,
+                COALESCE(n.reason, '') AS reason,
                 n.unread, n.updated_at, n.thread_url,
                 n.subject_number, n.subject_state, n.subject_html_url
          FROM notifications n
@@ -339,6 +340,20 @@ mod tests {
 
         assert_eq!(groups[1].total, 1);
         assert_eq!(groups[1].unread_count, 1);
+    }
+
+    #[test]
+    fn null_reason_does_not_break_listing() {
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/alpha", "Title", true)]).unwrap();
+        // The reason column is nullable; ensure a NULL value still lists cleanly.
+        conn.execute("UPDATE notifications SET reason = NULL WHERE thread_id = '1'", [])
+            .unwrap();
+
+        let groups = list_by_repo(&conn).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].notifications.len(), 1);
+        assert_eq!(groups[0].notifications[0].reason, "");
     }
 
     #[test]
