@@ -1,8 +1,12 @@
 const { invoke } = window.__TAURI__.core;
+const { listen } = window.__TAURI__.event;
 
 const $ = (sel) => document.querySelector(sel);
 
 const STATES = ["pending", "success", "error"];
+
+/** True while a sync is in flight; gates stale sync:progress events. */
+let syncing = false;
 
 /** Apply a color-coded state (green/yellow/red) to a status dot + label. */
 function setStatus(dotId, labelId, state, text) {
@@ -110,6 +114,7 @@ async function signIn(event) {
     const user = await invoke("sign_in", { token });
     renderSignedIn(user.login);
     await loadSettings(); // refresh cached login display
+    await loadSyncStatus();
   } catch (err) {
     renderSignedOut(String(err));
   }
@@ -142,8 +147,93 @@ async function loadAccount() {
   }
 }
 
-/* -------------------------------- Settings ------------------------------- */
+/* ------------------------------ Notifications ----------------------------- */
 
+function fmtTimestamp(value) {
+  if (!value) return "never";
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? value : d.toLocaleString();
+}
+
+function renderSyncStats(status) {
+  const rate =
+    status.rate_remaining === null || status.rate_remaining === undefined
+      ? "—"
+      : status.rate_remaining;
+  $("#sync-stats").innerHTML = `
+    <dt>Last sync</dt>
+    <dd>${escapeHtml(fmtTimestamp(status.last_sync_at))}</dd>
+    <dt>Stored notifications</dt>
+    <dd>${escapeHtml(status.notification_count)}</dd>
+    <dt>API rate remaining</dt>
+    <dd>${escapeHtml(rate)}</dd>`;
+
+  if (status.last_status === "error" && status.last_error) {
+    setStatus("#sync-dot", "#sync-label", "error", "Error");
+    $("#sync-progress").className = "form-msg form-msg--error";
+    $("#sync-progress").textContent = status.last_error;
+  } else if (status.last_status === "success") {
+    setStatus("#sync-dot", "#sync-label", "success", "Synced");
+  } else {
+    setStatus("#sync-dot", "#sync-label", "pending", "Never synced");
+  }
+}
+
+async function loadSyncStatus() {
+  setStatus("#sync-dot", "#sync-label", "pending", "Loading…");
+  try {
+    const status = await invoke("sync_status");
+    renderSyncStats(status);
+  } catch (err) {
+    setStatus("#sync-dot", "#sync-label", "error", "Error");
+    $("#sync-progress").className = "form-msg form-msg--error";
+    $("#sync-progress").textContent = String(err);
+  }
+}
+
+async function syncNow() {
+  const btn = $("#sync-btn");
+  const progress = $("#sync-progress");
+  btn.disabled = true;
+  syncing = true;
+  setStatus("#sync-dot", "#sync-label", "pending", "Syncing…");
+  progress.className = "form-msg";
+  progress.textContent = "Starting…";
+
+  try {
+    const result = await invoke("sync_now");
+    // Stop accepting progress updates before writing the final message, so a
+    // late-delivered sync:progress event can't overwrite it.
+    syncing = false;
+    progress.className = "form-msg form-msg--success";
+    progress.textContent = `Stored ${result.count} notification${
+      result.count === 1 ? "" : "s"
+    }.`;
+    await loadSyncStatus();
+  } catch (err) {
+    syncing = false;
+    setStatus("#sync-dot", "#sync-label", "error", "Error");
+    progress.className = "form-msg form-msg--error";
+    progress.textContent = String(err);
+  } finally {
+    syncing = false;
+    btn.disabled = false;
+  }
+}
+
+/** Live progress from the backend during a sync. */
+function registerSyncEvents() {
+  listen("sync:progress", (event) => {
+    // Ignore stale events delivered after the sync has settled.
+    if (!syncing) return;
+    const { page, fetched } = event.payload ?? {};
+    const progress = $("#sync-progress");
+    progress.className = "form-msg";
+    progress.textContent = `Fetching page ${page}… (${fetched} so far)`;
+  });
+}
+
+/* -------------------------------- Settings ------------------------------- */
 async function loadSettings() {
   setStatus("#settings-dot", "#settings-label", "pending", "Loading…");
   try {
@@ -203,7 +293,10 @@ async function saveSettings(event) {
 
 window.addEventListener("DOMContentLoaded", () => {
   $("#settings-form").addEventListener("submit", saveSettings);
+  $("#sync-btn").addEventListener("click", syncNow);
+  registerSyncEvents();
   loadStorage();
   loadAccount();
+  loadSyncStatus();
   loadSettings();
 });

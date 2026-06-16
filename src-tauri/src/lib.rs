@@ -9,11 +9,13 @@ mod auth;
 mod db;
 mod github;
 mod settings;
+mod sync;
 
 use db::Db;
 use github::GitHubUser;
 use serde::Serialize;
-use tauri::{Manager, State};
+use sync::SyncStatus;
+use tauri::{Emitter, Manager, State};
 
 /// Application-wide state managed by Tauri.
 struct AppState {
@@ -141,6 +143,81 @@ fn save_settings(
     })
 }
 
+/// Result of a successful sync, returned to the caller and emitted as `sync:done`.
+#[derive(Clone, Serialize)]
+struct SyncResult {
+    count: usize,
+    rate_remaining: Option<i64>,
+}
+
+/// Fetch notifications from GitHub and store them locally, emitting progress events.
+///
+/// Emits `sync:started`, `sync:progress` ({ page, fetched }), and `sync:done` /
+/// `sync:error`. The network fetch runs without holding the DB lock; storage happens in a
+/// single transaction afterwards.
+#[tauri::command]
+async fn sync_now(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<SyncResult, String> {
+    let token = auth::read_token()?
+        .ok_or_else(|| "Not connected — add a GitHub token first.".to_string())?;
+
+    let _ = app.emit("sync:started", ());
+
+    let progress_app = app.clone();
+    let outcome = github::fetch_all_notifications(&token, move |page, fetched| {
+        let _ = progress_app.emit(
+            "sync:progress",
+            serde_json::json!({ "page": page, "fetched": fetched }),
+        );
+    })
+    .await;
+
+    let outcome = match outcome {
+        Ok(o) => o,
+        Err(err) => {
+            if let Ok(conn) = state.db.0.lock() {
+                let _ = sync::record_error(&conn, &err);
+            }
+            let _ = app.emit("sync:error", serde_json::json!({ "message": err.clone() }));
+            return Err(err);
+        }
+    };
+
+    // Store the fetched threads and record success. A DB failure here must also be
+    // recorded in sync_state so the UI reflects the real last outcome (not stale state).
+    let store_result = (|| -> Result<usize, String> {
+        let mut guard = state.db.0.lock().map_err(|e| e.to_string())?;
+        let conn: &mut rusqlite::Connection = &mut guard;
+        let n = sync::store_notifications(conn, &outcome.threads).map_err(|e| e.to_string())?;
+        sync::record_success(conn, &outcome.rate).map_err(|e| e.to_string())?;
+        Ok(n)
+    })();
+
+    let count = match store_result {
+        Ok(n) => n,
+        Err(err) => {
+            if let Ok(conn) = state.db.0.lock() {
+                let _ = sync::record_error(&conn, &err);
+            }
+            let _ = app.emit("sync:error", serde_json::json!({ "message": err.clone() }));
+            return Err(err);
+        }
+    };
+
+    let result = SyncResult {
+        count,
+        rate_remaining: outcome.rate.remaining,
+    };
+    let _ = app.emit("sync:done", &result);
+    Ok(result)
+}
+
+/// Read the current sync status (last sync, status/error, rate limit, stored count).
+#[tauri::command]
+fn sync_status(state: State<'_, AppState>) -> Result<SyncStatus, String> {
+    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+    sync::read_status(&conn).map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Install the macOS login-Keychain credential store for keyring-core.
@@ -170,7 +247,9 @@ pub fn run() {
             sign_in,
             sign_out,
             get_settings,
-            save_settings
+            save_settings,
+            sync_now,
+            sync_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

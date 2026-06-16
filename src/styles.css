@@ -399,6 +399,14 @@ input[type="text"]:focus {
   color: var(--accent);
 }
 
+/* Sync */
+.sync-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);
