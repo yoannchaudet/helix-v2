@@ -2,7 +2,10 @@
 
 A personal tool for managing GitHub notifications and automating the workflows around them.
 
-> **Status:** Early stage. This is a vision sketch — implementation details (and a tech stack) are still to come.
+> **Status:** Early development. A macOS desktop app built with [Tauri](https://tauri.app)
+> (Rust core + vanilla HTML/CSS UI). Local SQLite is the source of truth, so the app works
+> offline and loads fast. See [`docs/design.md`](docs/design.md) and
+> [`docs/milestones.md`](docs/milestones.md).
 
 ## Why Helix?
 
@@ -17,7 +20,31 @@ GitHub day.
 - **Automate** — turn repetitive notification-driven chores into hands-off workflows.
 - **Personalize** — encode my own rules and habits, not a one-size-fits-all inbox.
 
-## Roadmap
+## Tech stack
 
-This README captures the purpose. Setup, usage, and architecture will be added once the
-direction takes shape.
+- **[Tauri](https://tauri.app)** — Rust core + webview UI, packaged as a native macOS app.
+- **Vanilla HTML/CSS/JS** — no heavy frontend framework.
+- **SQLite** — primary local state at `~/Library/Application Support/helix/helix.db`
+  (created and migrated on first run).
+
+## Development
+
+Requires [Node.js](https://nodejs.org) and a [Rust](https://rustup.rs) toolchain.
+
+```sh
+npm install        # install the Tauri CLI
+npm run tauri dev  # run the app in development
+npm run tauri build  # produce a release bundle
+```
+
+Run the Rust tests (e.g. the SQLite bootstrap) with:
+
+```sh
+cd src-tauri && cargo test
+```
+
+## Project conventions
+
+Engineering principles (lightweight-first, offline-first, API discipline, color-coded
+live feedback) live in [`AGENT.md`](AGENT.md). The incremental path to v1 is tracked in
+[`docs/milestones.md`](docs/milestones.md).
