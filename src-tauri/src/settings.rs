@@ -1,0 +1,131 @@
+//! Application settings persisted in SQLite.
+//!
+//! Non-secret preferences live here (the PAT lives in the Keychain — see `auth.rs`).
+//! Simple key/value pairs go in the `settings` table; the polling cadence lives in
+//! `sync_state.poll_interval_s` (per the schema in `docs/design.md` §3).
+
+use rusqlite::{Connection, OptionalExtension};
+
+/// Settings keys.
+pub const KEY_DEPENDABOT_ONLY: &str = "dependabot_only";
+pub const KEY_GITHUB_LOGIN: &str = "github_login";
+
+/// Lower bound for the polling interval, to avoid hammering the API.
+pub const MIN_POLL_INTERVAL_S: i64 = 10;
+
+/// Read a string setting, or `None` if unset.
+pub fn get_string(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+        row.get::<_, String>(0)
+    })
+    .optional()
+}
+
+/// Insert or update a string setting.
+pub fn set_string(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )?;
+    Ok(())
+}
+
+/// Delete a setting if present.
+pub fn delete_key(conn: &Connection, key: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM settings WHERE key = ?1", [key])?;
+    Ok(())
+}
+
+/// Read a boolean setting (stored as `"true"`/`"false"`), defaulting when unset or when
+/// the stored value is not a recognized boolean.
+pub fn get_bool(conn: &Connection, key: &str, default: bool) -> rusqlite::Result<bool> {
+    Ok(match get_string(conn, key)?.as_deref() {
+        Some("true") => true,
+        Some("false") => false,
+        _ => default,
+    })
+}
+
+/// Write a boolean setting.
+pub fn set_bool(conn: &Connection, key: &str, value: bool) -> rusqlite::Result<()> {
+    set_string(conn, key, if value { "true" } else { "false" })
+}
+
+/// Current polling interval (seconds) from `sync_state`.
+pub fn get_poll_interval(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row("SELECT poll_interval_s FROM sync_state WHERE id = 1", [], |row| {
+        row.get(0)
+    })
+}
+
+/// Update the polling interval (seconds) in `sync_state`.
+pub fn set_poll_interval(conn: &Connection, seconds: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE sync_state SET poll_interval_s = ?1 WHERE id = 1",
+        [seconds],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db;
+
+    fn mem_conn() -> Connection {
+        // Reuse the real migrations against an in-memory database.
+        let conn = Connection::open_in_memory().unwrap();
+        // open_and_migrate works on a path; replicate its migration step here.
+        let mut version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let migrations = db::migrations();
+        while (version as usize) < migrations.len() {
+            conn.execute_batch(migrations[version as usize]).unwrap();
+            version += 1;
+            conn.pragma_update(None, "user_version", version).unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn string_round_trip_and_delete() {
+        let conn = mem_conn();
+        assert_eq!(get_string(&conn, KEY_GITHUB_LOGIN).unwrap(), None);
+        set_string(&conn, KEY_GITHUB_LOGIN, "octocat").unwrap();
+        assert_eq!(
+            get_string(&conn, KEY_GITHUB_LOGIN).unwrap(),
+            Some("octocat".to_string())
+        );
+        // Upsert overwrites.
+        set_string(&conn, KEY_GITHUB_LOGIN, "monalisa").unwrap();
+        assert_eq!(
+            get_string(&conn, KEY_GITHUB_LOGIN).unwrap(),
+            Some("monalisa".to_string())
+        );
+        delete_key(&conn, KEY_GITHUB_LOGIN).unwrap();
+        assert_eq!(get_string(&conn, KEY_GITHUB_LOGIN).unwrap(), None);
+    }
+
+    #[test]
+    fn bool_default_and_set() {
+        let conn = mem_conn();
+        assert!(!get_bool(&conn, KEY_DEPENDABOT_ONLY, false).unwrap());
+        set_bool(&conn, KEY_DEPENDABOT_ONLY, true).unwrap();
+        assert!(get_bool(&conn, KEY_DEPENDABOT_ONLY, false).unwrap());
+        set_bool(&conn, KEY_DEPENDABOT_ONLY, false).unwrap();
+        assert!(!get_bool(&conn, KEY_DEPENDABOT_ONLY, true).unwrap());
+
+        // An unrecognized stored value falls back to the provided default.
+        set_string(&conn, KEY_DEPENDABOT_ONLY, "garbage").unwrap();
+        assert!(get_bool(&conn, KEY_DEPENDABOT_ONLY, true).unwrap());
+        assert!(!get_bool(&conn, KEY_DEPENDABOT_ONLY, false).unwrap());
+    }
+
+    #[test]
+    fn poll_interval_defaults_and_updates() {
+        let conn = mem_conn();
+        assert_eq!(get_poll_interval(&conn).unwrap(), 60); // seeded default
+        set_poll_interval(&conn, 120).unwrap();
+        assert_eq!(get_poll_interval(&conn).unwrap(), 120);
+    }
+}
