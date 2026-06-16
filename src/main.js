@@ -5,6 +5,9 @@ const $ = (sel) => document.querySelector(sel);
 
 const STATES = ["pending", "success", "error"];
 
+/** True while a sync is in flight; gates stale sync:progress events. */
+let syncing = false;
+
 /** Apply a color-coded state (green/yellow/red) to a status dot + label. */
 function setStatus(dotId, labelId, state, text) {
   const dot = $(dotId);
@@ -192,22 +195,28 @@ async function syncNow() {
   const btn = $("#sync-btn");
   const progress = $("#sync-progress");
   btn.disabled = true;
+  syncing = true;
   setStatus("#sync-dot", "#sync-label", "pending", "Syncing…");
   progress.className = "form-msg";
   progress.textContent = "Starting…";
 
   try {
     const result = await invoke("sync_now");
+    // Stop accepting progress updates before writing the final message, so a
+    // late-delivered sync:progress event can't overwrite it.
+    syncing = false;
     progress.className = "form-msg form-msg--success";
     progress.textContent = `Stored ${result.count} notification${
       result.count === 1 ? "" : "s"
     }.`;
     await loadSyncStatus();
   } catch (err) {
+    syncing = false;
     setStatus("#sync-dot", "#sync-label", "error", "Error");
     progress.className = "form-msg form-msg--error";
     progress.textContent = String(err);
   } finally {
+    syncing = false;
     btn.disabled = false;
   }
 }
@@ -215,6 +224,8 @@ async function syncNow() {
 /** Live progress from the backend during a sync. */
 function registerSyncEvents() {
   listen("sync:progress", (event) => {
+    // Ignore stale events delivered after the sync has settled.
+    if (!syncing) return;
     const { page, fetched } = event.payload ?? {};
     const progress = $("#sync-progress");
     progress.className = "form-msg";
