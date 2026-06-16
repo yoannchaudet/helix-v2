@@ -12,6 +12,12 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded runs for the same ref (e.g. a push and its pull_request event,
+# or rapid successive pushes) to avoid wasting slow/expensive macOS runner minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
