@@ -166,6 +166,15 @@ async function saveSettings(event) {
   const pollIntervalS = Number.parseInt($("#poll-interval").value, 10);
   const dependabotOnly = $("#dependabot-only").checked;
 
+  // Guard against NaN / out-of-range input before invoking the backend (NaN would
+  // serialize to null over IPC and surface a confusing error).
+  if (!Number.isInteger(pollIntervalS) || pollIntervalS < 10) {
+    setStatus("#settings-dot", "#settings-label", "error", "Error");
+    msg.className = "form-msg form-msg--error";
+    msg.textContent = "Enter a whole number of seconds (10 or more).";
+    return;
+  }
+
   btn.disabled = true;
   setStatus("#settings-dot", "#settings-label", "pending", "Saving…");
   msg.className = "form-msg";

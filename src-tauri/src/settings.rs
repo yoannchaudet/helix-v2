@@ -37,11 +37,14 @@ pub fn delete_key(conn: &Connection, key: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Read a boolean setting (stored as `"true"`/`"false"`), defaulting when unset/invalid.
+/// Read a boolean setting (stored as `"true"`/`"false"`), defaulting when unset or when
+/// the stored value is not a recognized boolean.
 pub fn get_bool(conn: &Connection, key: &str, default: bool) -> rusqlite::Result<bool> {
-    Ok(get_string(conn, key)?
-        .map(|v| v == "true")
-        .unwrap_or(default))
+    Ok(match get_string(conn, key)?.as_deref() {
+        Some("true") => true,
+        Some("false") => false,
+        _ => default,
+    })
 }
 
 /// Write a boolean setting.
@@ -111,6 +114,11 @@ mod tests {
         assert!(get_bool(&conn, KEY_DEPENDABOT_ONLY, false).unwrap());
         set_bool(&conn, KEY_DEPENDABOT_ONLY, false).unwrap();
         assert!(!get_bool(&conn, KEY_DEPENDABOT_ONLY, true).unwrap());
+
+        // An unrecognized stored value falls back to the provided default.
+        set_string(&conn, KEY_DEPENDABOT_ONLY, "garbage").unwrap();
+        assert!(get_bool(&conn, KEY_DEPENDABOT_ONLY, true).unwrap());
+        assert!(!get_bool(&conn, KEY_DEPENDABOT_ONLY, false).unwrap());
     }
 
     #[test]
