@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Helix</title>
+    <script type="module" src="/main.js" defer></script>
+  </head>
+
+  <body>
+    <main class="app">
+      <header class="masthead">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">🧬</span>
+          <h1>Helix</h1>
+        </div>
+        <p class="tagline">Manage your GitHub notifications. Automate the busywork.</p>
+      </header>
+
+      <section class="card" id="storage-card" aria-live="polite">
+        <div class="card-head">
+          <span class="status-dot status-dot--pending" id="status-dot"></span>
+          <h2>Local storage</h2>
+          <span class="status-label status-label--pending" id="status-label">
+            Bootstrapping…
+          </span>
+        </div>
+
+        <div class="card-body" id="storage-body">
+          <div class="loader" id="loader">
+            <span class="spinner" aria-hidden="true"></span>
+            <span>Opening the database and applying migrations…</span>
+          </div>
+        </div>
+      </section>
+
+      <footer class="footnote">
+        SQLite is Helix's source of truth — the app works offline and loads fast.
+      </footer>
+    </main>
+  </body>
+</html>
