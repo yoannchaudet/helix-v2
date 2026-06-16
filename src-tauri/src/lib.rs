@@ -1,13 +1,17 @@
 //! Helix application core.
 //!
-//! On startup we resolve the macOS app-data directory, ensure it exists, and bootstrap
-//! the SQLite database (creating it and applying migrations on first run). The frontend
-//! reads storage status via the `db_status` command so it can show live, color-coded
-//! feedback (see `AGENT.md`).
+//! On startup we install the macOS Keychain credential store, resolve the app-data
+//! directory, and bootstrap the SQLite database (creating it and applying migrations on
+//! first run). The frontend drives auth/settings and storage status through the commands
+//! below, always with live, color-coded feedback (see `AGENT.md`).
 
+mod auth;
 mod db;
+mod github;
+mod settings;
 
 use db::Db;
+use github::GitHubUser;
 use serde::Serialize;
 use tauri::{Manager, State};
 
@@ -26,6 +30,21 @@ struct DbStatus {
     tables: Vec<String>,
 }
 
+/// Authentication state, derived from the Keychain + cached login (offline-friendly).
+#[derive(Serialize)]
+struct AuthStatus {
+    authenticated: bool,
+    login: Option<String>,
+}
+
+/// User-facing settings.
+#[derive(Serialize)]
+struct Settings {
+    poll_interval_s: i64,
+    dependabot_only: bool,
+    github_login: Option<String>,
+}
+
 /// Report the local database path, schema version, and tables.
 #[tauri::command]
 fn db_status(state: State<'_, AppState>) -> Result<DbStatus, String> {
@@ -39,8 +58,97 @@ fn db_status(state: State<'_, AppState>) -> Result<DbStatus, String> {
     })
 }
 
+/// Current auth state: a token in the Keychain plus the cached login. Does not hit the
+/// network, so it works offline and loads fast.
+#[tauri::command]
+fn auth_status(state: State<'_, AppState>) -> Result<AuthStatus, String> {
+    let has_token = auth::has_token()?;
+    let login = {
+        let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+        settings::get_string(&conn, settings::KEY_GITHUB_LOGIN).map_err(|e| e.to_string())?
+    };
+    Ok(AuthStatus {
+        authenticated: has_token,
+        login,
+    })
+}
+
+/// Verify a PAT against GitHub, and on success store it in the Keychain and cache the
+/// login. Invalid tokens are rejected and nothing is stored.
+#[tauri::command]
+async fn sign_in(token: String, state: State<'_, AppState>) -> Result<GitHubUser, String> {
+    let token = token.trim().to_string();
+    if token.is_empty() {
+        return Err("Please enter a Personal Access Token.".to_string());
+    }
+
+    // Verify before persisting anything (network call, no locks held).
+    let user = github::fetch_user(&token).await?;
+
+    auth::store_token(&token)?;
+    {
+        let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+        settings::set_string(&conn, settings::KEY_GITHUB_LOGIN, &user.login)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(user)
+}
+
+/// Remove the stored token and cached login.
+#[tauri::command]
+fn sign_out(state: State<'_, AppState>) -> Result<(), String> {
+    auth::delete_token()?;
+    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+    settings::delete_key(&conn, settings::KEY_GITHUB_LOGIN).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Read user-facing settings.
+#[tauri::command]
+fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
+    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+    Ok(Settings {
+        poll_interval_s: settings::get_poll_interval(&conn).map_err(|e| e.to_string())?,
+        dependabot_only: settings::get_bool(&conn, settings::KEY_DEPENDABOT_ONLY, false)
+            .map_err(|e| e.to_string())?,
+        github_login: settings::get_string(&conn, settings::KEY_GITHUB_LOGIN)
+            .map_err(|e| e.to_string())?,
+    })
+}
+
+/// Persist user-facing settings. Rejects a polling interval below the minimum.
+#[tauri::command]
+fn save_settings(
+    poll_interval_s: i64,
+    dependabot_only: bool,
+    state: State<'_, AppState>,
+) -> Result<Settings, String> {
+    if poll_interval_s < settings::MIN_POLL_INTERVAL_S {
+        return Err(format!(
+            "Polling interval must be at least {} seconds.",
+            settings::MIN_POLL_INTERVAL_S
+        ));
+    }
+    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+    settings::set_poll_interval(&conn, poll_interval_s).map_err(|e| e.to_string())?;
+    settings::set_bool(&conn, settings::KEY_DEPENDABOT_ONLY, dependabot_only)
+        .map_err(|e| e.to_string())?;
+    Ok(Settings {
+        poll_interval_s,
+        dependabot_only,
+        github_login: settings::get_string(&conn, settings::KEY_GITHUB_LOGIN)
+            .map_err(|e| e.to_string())?,
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Install the macOS login-Keychain credential store for keyring-core.
+    keyring_core::set_default_store(
+        apple_native_keyring_store::keychain::Store::new()
+            .expect("failed to initialize the macOS Keychain store"),
+    );
+
     tauri::Builder::default()
         .setup(|app| {
             // Resolve `~/Library/Application Support/helix/` on macOS (see design.md §3).
@@ -56,7 +164,14 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![db_status])
+        .invoke_handler(tauri::generate_handler![
+            db_status,
+            auth_status,
+            sign_in,
+            sign_out,
+            get_settings,
+            save_settings
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

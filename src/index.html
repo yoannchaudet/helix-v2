@@ -18,25 +18,79 @@
         <p class="tagline">Manage your GitHub notifications. Automate the busywork.</p>
       </header>
 
+      <!-- Account / authentication -->
+      <section class="card" id="account-card" aria-live="polite">
+        <div class="card-head">
+          <span class="status-dot status-dot--pending" id="auth-dot"></span>
+          <h2>Account</h2>
+          <span class="status-label status-label--pending" id="auth-label">Checking…</span>
+        </div>
+
+        <div class="card-body" id="account-body">
+          <div class="loader">
+            <span class="spinner" aria-hidden="true"></span>
+            <span>Checking the Keychain…</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Settings -->
+      <section class="card" id="settings-card">
+        <div class="card-head">
+          <span class="status-dot status-dot--pending" id="settings-dot"></span>
+          <h2>Settings</h2>
+          <span class="status-label status-label--pending" id="settings-label">Loading…</span>
+        </div>
+
+        <div class="card-body">
+          <form id="settings-form" class="form">
+            <div class="field">
+              <label for="poll-interval">Polling interval (seconds)</label>
+              <input
+                id="poll-interval"
+                name="poll-interval"
+                type="number"
+                min="10"
+                step="5"
+                inputmode="numeric"
+              />
+              <p class="hint">How often Helix syncs in the background. Minimum 10s.</p>
+            </div>
+
+            <div class="field field--row">
+              <label class="switch">
+                <input id="dependabot-only" name="dependabot-only" type="checkbox" />
+                <span class="switch-track" aria-hidden="true"></span>
+                <span>Cleanup: Dependabot only</span>
+              </label>
+            </div>
+
+            <div class="form-actions">
+              <button type="submit" class="btn btn--primary" id="settings-save">Save</button>
+              <span class="form-msg" id="settings-msg"></span>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <!-- Local storage -->
       <section class="card" id="storage-card" aria-live="polite">
         <div class="card-head">
           <span class="status-dot status-dot--pending" id="status-dot"></span>
           <h2>Local storage</h2>
-          <span class="status-label status-label--pending" id="status-label">
-            Bootstrapping…
-          </span>
+          <span class="status-label status-label--pending" id="status-label">Bootstrapping…</span>
         </div>
 
         <div class="card-body" id="storage-body">
-          <div class="loader" id="loader">
+          <div class="loader">
             <span class="spinner" aria-hidden="true"></span>
-            <span>Opening the database and applying migrations…</span>
+            <span>Opening the database…</span>
           </div>
         </div>
       </section>
 
       <footer class="footnote">
-        SQLite is Helix's source of truth — the app works offline and loads fast.
+        Your token is stored in the macOS Keychain — never on disk in plain text.
       </footer>
     </main>
   </body>

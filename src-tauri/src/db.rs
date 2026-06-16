@@ -98,6 +98,12 @@ pub fn schema_version(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row("PRAGMA user_version", [], |row| row.get(0))
 }
 
+/// The ordered migration statements (exposed for tests that build an in-memory DB).
+#[cfg(test)]
+pub fn migrations() -> &'static [&'static str] {
+    MIGRATIONS
+}
+
 /// Names of user tables, sorted, excluding SQLite internal tables.
 pub fn table_names(conn: &Connection) -> rusqlite::Result<Vec<String>> {
     let mut stmt = conn.prepare(
