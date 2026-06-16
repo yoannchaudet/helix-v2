@@ -34,6 +34,23 @@
         </div>
       </section>
 
+      <!-- Notifications / sync -->
+      <section class="card" id="sync-card" aria-live="polite">
+        <div class="card-head">
+          <span class="status-dot status-dot--pending" id="sync-dot"></span>
+          <h2>Notifications</h2>
+          <span class="status-label status-label--pending" id="sync-label">Loading…</span>
+        </div>
+
+        <div class="card-body">
+          <div class="sync-actions">
+            <button type="button" class="btn btn--primary" id="sync-btn">Sync now</button>
+            <span class="form-msg" id="sync-progress"></span>
+          </div>
+          <dl class="kv" id="sync-stats"></dl>
+        </div>
+      </section>
+
       <!-- Settings -->
       <section class="card" id="settings-card">
         <div class="card-head">
