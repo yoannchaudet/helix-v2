@@ -210,6 +210,7 @@ async function syncNow() {
       result.count === 1 ? "" : "s"
     }.`;
     await loadSyncStatus();
+    await loadInbox();
   } catch (err) {
     syncing = false;
     setStatus("#sync-dot", "#sync-label", "error", "Error");
@@ -231,6 +232,105 @@ function registerSyncEvents() {
     progress.className = "form-msg";
     progress.textContent = `Fetching page ${page}… (${fetched} so far)`;
   });
+}
+
+/* ------------------------------ Inbox view -------------------------------- */
+
+const SUBJECT_BADGES = {
+  PullRequest: ["PR", "badge--pr"],
+  Issue: ["Issue", "badge--issue"],
+  Discussion: ["Discussion", "badge--other"],
+  Release: ["Release", "badge--other"],
+  Commit: ["Commit", "badge--other"],
+};
+
+function subjectBadge(type) {
+  const [label, cls] = SUBJECT_BADGES[type] ?? [type, "badge--other"];
+  return `<span class="badge ${cls}">${escapeHtml(label)}</span>`;
+}
+
+function stateClass(state) {
+  return (
+    {
+      merged: "merged",
+      closed: "closed",
+      open: "open",
+      completed: "done",
+      not_planned: "muted",
+    }[state] ?? "muted"
+  );
+}
+
+function relTime(value) {
+  if (!value) return "";
+  const then = new Date(value).getTime();
+  if (Number.isNaN(then)) return value;
+  const s = Math.max(0, Math.floor((Date.now() - then) / 1000));
+  if (s < 60) return "just now";
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  if (d < 30) return `${d}d ago`;
+  const mo = Math.floor(d / 30);
+  return mo < 12 ? `${mo}mo ago` : `${Math.floor(mo / 12)}y ago`;
+}
+
+function notificationRow(n) {
+  const number =
+    n.subject_number != null
+      ? `<span class="n-number">#${escapeHtml(n.subject_number)}</span> `
+      : "";
+  const state = n.subject_state
+    ? `<span class="state state--${stateClass(n.subject_state)}">${escapeHtml(
+        n.subject_state,
+      )}</span>`
+    : "";
+  const reason = escapeHtml(n.reason.replace(/_/g, " "));
+  return `
+    <li class="n-row ${n.unread ? "n-row--unread" : ""}">
+      <span class="n-unread-dot" aria-hidden="true"></span>
+      ${subjectBadge(n.subject_type)}
+      <div class="n-main">
+        <div class="n-title">${number}${escapeHtml(n.subject_title)} ${state}</div>
+        <div class="n-meta">${reason} · ${escapeHtml(relTime(n.updated_at))}</div>
+      </div>
+    </li>`;
+}
+
+function repoSection(group) {
+  const rows = group.notifications.map(notificationRow).join("");
+  const privacy = group.private
+    ? `<span class="badge badge--lock" title="Private repository">private</span>`
+    : "";
+  return `
+    <details class="repo" open>
+      <summary class="repo-summary">
+        <span class="repo-name">${escapeHtml(group.full_name)}</span>
+        ${privacy}
+        <span class="repo-counts">
+          <strong>${escapeHtml(group.unread_count)}</strong> unread · ${escapeHtml(
+            group.total,
+          )}
+        </span>
+      </summary>
+      <ul class="n-list">${rows}</ul>
+    </details>`;
+}
+
+async function loadInbox() {
+  const inbox = $("#inbox");
+  try {
+    const groups = await invoke("list_inbox");
+    if (!groups.length) {
+      inbox.innerHTML = `<p class="inbox-empty">No notifications stored yet — click <strong>Sync now</strong> to load them.</p>`;
+      return;
+    }
+    inbox.innerHTML = groups.map(repoSection).join("");
+  } catch (err) {
+    inbox.innerHTML = `<pre class="error-detail">${escapeHtml(err)}</pre>`;
+  }
 }
 
 /* -------------------------------- Settings ------------------------------- */
@@ -298,5 +398,6 @@ window.addEventListener("DOMContentLoaded", () => {
   loadStorage();
   loadAccount();
   loadSyncStatus();
+  loadInbox();
   loadSettings();
 });

@@ -218,6 +218,13 @@ fn sync_status(state: State<'_, AppState>) -> Result<SyncStatus, String> {
     sync::read_status(&conn).map_err(|e| e.to_string())
 }
 
+/// Read all stored notifications grouped by repository (offline-first local read).
+#[tauri::command]
+fn list_inbox(state: State<'_, AppState>) -> Result<Vec<sync::RepoGroup>, String> {
+    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+    sync::list_by_repo(&conn).map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Install the macOS login-Keychain credential store for keyring-core.
@@ -249,7 +256,8 @@ pub fn run() {
             get_settings,
             save_settings,
             sync_now,
-            sync_status
+            sync_status,
+            list_inbox
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
