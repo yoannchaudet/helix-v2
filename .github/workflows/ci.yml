@@ -12,10 +12,11 @@ on:
 permissions:
   contents: read
 
-# Cancel superseded runs for the same ref (e.g. a push and its pull_request event,
-# or rapid successive pushes) to avoid wasting slow/expensive macOS runner minutes.
+# Cancel superseded runs for the same branch. Using `head_ref || ref_name` collapses a
+# branch push and its pull_request event into one group, so we don't run the same commit
+# twice and rapid re-pushes cancel earlier runs — saving slow/expensive macOS minutes.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 env:
