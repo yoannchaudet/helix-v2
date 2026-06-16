@@ -145,6 +145,97 @@ pub fn count(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row("SELECT COUNT(*) FROM notifications", [], |r| r.get(0))
 }
 
+/* --------------------------------- Inbox ---------------------------------- */
+
+/// A single notification as shown in the by-repo inbox.
+#[derive(Debug, Serialize)]
+pub struct NotificationView {
+    pub thread_id: String,
+    pub subject_type: String,
+    pub subject_title: String,
+    pub subject_url: Option<String>,
+    pub reason: String,
+    pub unread: bool,
+    pub updated_at: String,
+    pub thread_url: Option<String>,
+    /// Resolved subject metadata (populated by M6; may be null until then).
+    pub subject_number: Option<i64>,
+    pub subject_state: Option<String>,
+    pub subject_html_url: Option<String>,
+}
+
+/// Notifications for one repository.
+#[derive(Debug, Serialize)]
+pub struct RepoGroup {
+    pub repo_id: i64,
+    pub full_name: String,
+    pub private: bool,
+    pub unread_count: i64,
+    pub total: i64,
+    pub notifications: Vec<NotificationView>,
+}
+
+/// Read all stored notifications grouped by repository.
+///
+/// Repos are ordered by full name; within a repo, unread first, then most recently
+/// updated. This is a pure local read (offline-first) — the source of truth is SQLite.
+pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
+    let mut stmt = conn.prepare(
+        "SELECT r.id, r.full_name, r.private,
+                n.thread_id, n.subject_type, n.subject_title, n.subject_url,
+                COALESCE(n.reason, '') AS reason,
+                n.unread, n.updated_at, n.thread_url,
+                n.subject_number, n.subject_state, n.subject_html_url
+         FROM notifications n
+         JOIN repos r ON r.id = n.repo_id
+         ORDER BY r.full_name ASC, n.unread DESC, n.updated_at DESC",
+    )?;
+
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,            // repo id
+            r.get::<_, String>(1)?,         // full_name
+            r.get::<_, i64>(2)? != 0,       // private
+            NotificationView {
+                thread_id: r.get(3)?,
+                subject_type: r.get(4)?,
+                subject_title: r.get(5)?,
+                subject_url: r.get(6)?,
+                reason: r.get(7)?,
+                unread: r.get::<_, i64>(8)? != 0,
+                updated_at: r.get(9)?,
+                thread_url: r.get(10)?,
+                subject_number: r.get(11)?,
+                subject_state: r.get(12)?,
+                subject_html_url: r.get(13)?,
+            },
+        ))
+    })?;
+
+    let mut groups: Vec<RepoGroup> = Vec::new();
+    for row in rows {
+        let (repo_id, full_name, private, view) = row?;
+        // Rows are ordered by repo, so we only ever append to the last group.
+        if groups.last().map(|g| g.repo_id) != Some(repo_id) {
+            groups.push(RepoGroup {
+                repo_id,
+                full_name,
+                private,
+                unread_count: 0,
+                total: 0,
+                notifications: Vec::new(),
+            });
+        }
+        let group = groups.last_mut().expect("group just ensured");
+        group.total += 1;
+        if view.unread {
+            group.unread_count += 1;
+        }
+        group.notifications.push(view);
+    }
+    Ok(groups)
+}
+
 /// Look up a repo's full name by id (test/diagnostic helper).
 #[cfg(test)]
 pub fn repo_full_name(conn: &Connection, id: i64) -> rusqlite::Result<Option<String>> {
@@ -220,6 +311,49 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM repos", [], |r| r.get(0))
             .unwrap();
         assert_eq!(repos, 2);
+    }
+
+    #[test]
+    fn groups_notifications_by_repo() {
+        let mut conn = mem_conn();
+        let threads = vec![
+            thread("1", 200, "octo/zeta", "Z one", true),
+            thread("2", 100, "octo/alpha", "A read", false),
+            thread("3", 100, "octo/alpha", "A unread", true),
+        ];
+        store_notifications(&mut conn, &threads).unwrap();
+
+        let groups = list_by_repo(&conn).unwrap();
+        assert_eq!(groups.len(), 2);
+
+        // Repos are ordered by full name: alpha before zeta.
+        assert_eq!(groups[0].full_name, "octo/alpha");
+        assert_eq!(groups[1].full_name, "octo/zeta");
+
+        let alpha = &groups[0];
+        assert_eq!(alpha.total, 2);
+        assert_eq!(alpha.unread_count, 1);
+        // Within a repo, unread sorts before read.
+        assert!(alpha.notifications[0].unread);
+        assert_eq!(alpha.notifications[0].subject_title, "A unread");
+        assert!(!alpha.notifications[1].unread);
+
+        assert_eq!(groups[1].total, 1);
+        assert_eq!(groups[1].unread_count, 1);
+    }
+
+    #[test]
+    fn null_reason_does_not_break_listing() {
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/alpha", "Title", true)]).unwrap();
+        // The reason column is nullable; ensure a NULL value still lists cleanly.
+        conn.execute("UPDATE notifications SET reason = NULL WHERE thread_id = '1'", [])
+            .unwrap();
+
+        let groups = list_by_repo(&conn).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].notifications.len(), 1);
+        assert_eq!(groups[0].notifications[0].reason, "");
     }
 
     #[test]
