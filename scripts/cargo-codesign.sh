@@ -28,13 +28,35 @@ IDENTITY="${HELIX_DEV_SIGN_IDENTITY:-Helix Dev}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$SCRIPT_DIR/../src-tauri/target/debug/helix"
 
-# Code-sign the dev binary, but only with a valid identity. A no-op otherwise so the
-# workflow stays optional and never blocks a build.
+# Resolve the signing identity to a single, stable SHA-1 hash.
+#
+# Two deliberate choices here, both required to keep the Keychain "Always Allow" grant
+# stable across rebuilds:
+#
+#   * We intentionally do NOT use `find-identity -v` (valid-only). A self-signed local
+#     dev cert is untrusted by Gatekeeper (CSSMERR_TP_NOT_TRUSTED) and so is filtered out
+#     by `-v`, yet it still produces a perfectly stable code signature. Trust only matters
+#     for *verification*/Gatekeeper, not for *applying* a signature, which is all we need.
+#   * We sign by SHA-1 hash, not by name. If two certs share the name (easy to end up with
+#     by re-running setup), `codesign --sign "<name>"` fails with "ambiguous". Picking the
+#     first hash from a sorted, de-duplicated list keeps the chosen identity deterministic.
+resolve_identity_hash() {
+  security find-identity -p codesigning 2>/dev/null \
+    | grep -F "\"$IDENTITY\"" \
+    | grep -oE '[0-9A-F]{40}' \
+    | LC_ALL=C sort -u \
+    | head -n1
+}
+
+# Code-sign the dev binary with the resolved identity. A no-op when no matching identity
+# exists, so the workflow stays optional and never blocks a build.
 sign_dev_binary() {
-  if [ -x "$BIN" ] && security find-identity -v -p codesigning 2>/dev/null | grep -qF "$IDENTITY"; then
-    codesign --force --sign "$IDENTITY" "$BIN" >/dev/null 2>&1 \
-      || echo "helix: codesign with '$IDENTITY' failed; Keychain prompts may persist" >&2
-  fi
+  [ -x "$BIN" ] || return 0
+  local hash
+  hash="$(resolve_identity_hash)"
+  [ -n "$hash" ] || return 0
+  codesign --force --sign "$hash" "$BIN" >/dev/null 2>&1 \
+    || echo "helix: codesign with '$IDENTITY' ($hash) failed; Keychain prompts may persist" >&2
 }
 
 # `tauri dev` path: turn `run <flags> -- <app-args>` into `build <flags>`, sign, exec.
