@@ -95,6 +95,16 @@ code,
   background: var(--accent);
 }
 
+.sidebar-resizer:focus-visible {
+  outline: none;
+}
+
+.sidebar-resizer:focus-visible::after {
+  background: var(--accent);
+  width: 2px;
+  left: 3px;
+}
+
 /* ================================ Sidebar ================================= */
 .sidebar {
   display: flex;

@@ -30,4 +30,6 @@ reqwest = { version = "0.13", features = ["json"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 # Translucent NSVisualEffect sidebar — the core "native macOS" cue (vibrant sidebar
 # behind an opaque content pane). macOS-only; gated so other targets don't pull it.
-window-vibrancy = "0.7"
+# Pinned to 0.6 to match the version Tauri already depends on (avoids building two
+# copies of the crate).
+window-vibrancy = "0.6"

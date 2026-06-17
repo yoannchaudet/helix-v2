@@ -561,25 +561,35 @@ function initSidebarResize() {
   const root = document.documentElement;
   const min = parseInt(getComputedStyle(root).getPropertyValue("--sidebar-w"), 10) || 232;
   const max = 520;
-  const setWidth = (w) =>
-    root.style.setProperty("--sidebar-w", `${Math.max(min, Math.min(max, w))}px`);
+  const STEP = 16;
+  let current = min;
+
+  // Single entry point for width changes: clamp, apply, expose to AT, and persist.
+  const setWidth = (w, persist = true) => {
+    current = Math.max(min, Math.min(max, Math.round(w)));
+    root.style.setProperty("--sidebar-w", `${current}px`);
+    resizer.setAttribute("aria-valuenow", String(current));
+    if (persist) localStorage.setItem("helix:sidebar-w", String(current));
+  };
+
+  resizer.setAttribute("aria-valuemin", String(min));
+  resizer.setAttribute("aria-valuemax", String(max));
 
   const saved = Number.parseInt(localStorage.getItem("helix:sidebar-w"), 10);
-  if (Number.isFinite(saved)) setWidth(saved);
+  setWidth(Number.isFinite(saved) ? saved : min, false);
 
   let dragging = false;
   const onMove = (e) => {
     if (!dragging) return;
     // The sidebar starts at the window's left edge, so its width === cursor X.
-    setWidth(e.clientX);
+    setWidth(e.clientX, false);
   };
   const onUp = () => {
     if (!dragging) return;
     dragging = false;
     resizer.classList.remove("sidebar-resizer--dragging");
     document.body.style.cursor = "";
-    const w = parseInt(getComputedStyle(root).getPropertyValue("--sidebar-w"), 10);
-    if (Number.isFinite(w)) localStorage.setItem("helix:sidebar-w", String(w));
+    localStorage.setItem("helix:sidebar-w", String(current));
   };
 
   resizer.addEventListener("mousedown", (e) => {
@@ -590,11 +600,37 @@ function initSidebarResize() {
   });
   window.addEventListener("mousemove", onMove);
   window.addEventListener("mouseup", onUp);
-  // Double-click resets to the default (minimum) width.
-  resizer.addEventListener("dblclick", () => {
-    root.style.setProperty("--sidebar-w", `${min}px`);
-    localStorage.setItem("helix:sidebar-w", String(min));
+  // A mouseup outside the webview is never delivered; terminate on blur so the
+  // drag can't get stuck (cursor left as col-resize).
+  window.addEventListener("blur", onUp);
+
+  // Keyboard operability for the separator (arrows step, Home/End jump).
+  resizer.addEventListener("keydown", (e) => {
+    let next = current;
+    switch (e.key) {
+      case "ArrowLeft":
+      case "ArrowDown":
+        next = current - STEP;
+        break;
+      case "ArrowRight":
+      case "ArrowUp":
+        next = current + STEP;
+        break;
+      case "Home":
+        next = min;
+        break;
+      case "End":
+        next = max;
+        break;
+      default:
+        return;
+    }
+    e.preventDefault();
+    setWidth(next);
   });
+
+  // Double-click resets to the default (minimum) width.
+  resizer.addEventListener("dblclick", () => setWidth(min));
 }
 
 /* --------------------------------- Init ---------------------------------- */
