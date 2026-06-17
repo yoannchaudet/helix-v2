@@ -1,11 +1,13 @@
 :root {
-  --bg: #f6f8fb;
+  --bg: #f4f5f7;
   --surface: #ffffff;
-  --border: #d9dee4;
+  --border: #e1e4e8;
+  --hairline: rgba(31, 35, 40, 0.08);
   --text: #1f2328;
   --muted: #59636e;
   --accent: #7c5cff;
   --accent-strong: #6a48ff;
+  --accent-tint: rgba(124, 92, 255, 0.14);
 
   --success: #1f883d;
   --pending: #9a6700;
@@ -16,6 +18,9 @@
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto,
     Helvetica, Arial, sans-serif;
   --mono: "SF Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+
+  --sidebar-w: 232px;
+  --titlebar-h: 52px;
 }
 
 * {
@@ -26,12 +31,13 @@ html,
 body {
   margin: 0;
   height: 100%;
+  /* Transparent so the native NSVisualEffect (vibrancy) shows through the sidebar. */
+  background: transparent;
 }
 
 body {
   font-family: var(--font);
   color: var(--text);
-  background: radial-gradient(1100px 560px at 50% -8%, #eceefe 0%, var(--bg) 55%);
   color-scheme: light;
   cursor: default;
   -webkit-user-select: none;
@@ -52,109 +58,404 @@ code,
   user-select: text;
 }
 
+/* App shell: vibrant sidebar + opaque content pane, edge to edge, full height. */
 .app {
-  max-width: 760px;
-  margin: 0 auto;
-  padding: 48px 28px;
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--sidebar-w) 1fr;
+  height: 100%;
 }
 
-/* Masthead */
-.masthead {
-  text-align: center;
-  margin-bottom: 36px;
+/* Sidebar resize handle: an invisible hit area straddling the sidebar/content seam,
+   with a hairline that lights up on hover/drag. */
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  left: var(--sidebar-w);
+  width: 8px;
+  height: 100%;
+  margin-left: -4px;
+  z-index: 5;
+  cursor: col-resize;
 }
 
-.brand {
-  display: inline-flex;
-  align-items: center;
-  gap: 12px;
+.sidebar-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 4px;
+  width: 1px;
+  height: 100%;
+  background: transparent;
+  transition: background 0.12s ease;
 }
 
-.brand-mark {
-  font-size: 2.2rem;
-  line-height: 1;
+.sidebar-resizer:hover::after,
+.sidebar-resizer--dragging::after {
+  background: var(--accent);
 }
 
-.masthead h1 {
-  margin: 0;
-  font-size: 2.4rem;
-  letter-spacing: -0.02em;
-  background: linear-gradient(120deg, #1f2328 0%, var(--accent) 125%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-
-.tagline {
-  margin: 10px 0 0;
-  color: var(--muted);
-  font-size: 1.02rem;
-}
-
-/* Tabs / segmented control */
-.tabs {
+/* ================================ Sidebar ================================= */
+.sidebar {
   display: flex;
-  width: fit-content;
-  margin: 0 auto 26px;
-  gap: 4px;
-  padding: 4px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  box-shadow: var(--shadow);
+  flex-direction: column;
+  min-height: 0;
+  /* Translucent so the vibrancy material reads through; falls back to a tint
+     when private-api vibrancy is unavailable. */
+  background: rgba(246, 247, 250, 0.6);
+  border-right: 1px solid var(--hairline);
+  padding: 0 10px 10px;
 }
 
-.tab {
+/* Reserve the traffic-light region (the overlay title bar runs full-height). */
+.sidebar-traffic {
+  height: var(--titlebar-h);
+  flex: none;
+}
+
+.sources {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.source-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.source-group-label {
+  margin: 16px 0 4px;
+  padding: 0 10px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.source {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
   appearance: none;
   border: 0;
   background: transparent;
-  color: var(--muted);
-  font: inherit;
-  font-size: 0.9rem;
-  font-weight: 600;
-  padding: 7px 20px;
-  border-radius: 999px;
-  cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
-}
-
-.tab:hover {
   color: var(--text);
+  font: inherit;
+  font-size: 0.86rem;
+  text-align: left;
+  padding: 6px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.12s ease;
 }
 
-.tab--active,
-.tab--active:hover {
-  background: var(--accent);
-  color: #fff;
+.source:hover {
+  background: rgba(31, 35, 40, 0.05);
 }
 
-.tab:focus-visible {
+.source--active,
+.source--active:hover {
+  background: var(--accent-tint);
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.source:focus-visible {
   outline: none;
   box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.35);
 }
 
-/* Views */
-.view[hidden] {
-  display: none;
+.source-icon {
+  display: inline-flex;
+  width: 16px;
+  color: var(--muted);
+  flex: none;
 }
 
-/* Notifications header (status + sync action above the list) */
-.notif-head {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 0 4px 12px;
+.source--active .source-icon {
+  color: var(--accent-strong);
 }
 
-.notif-head .js-sync-btn {
-  margin-left: auto;
-}
-
-.notif-head .js-sync-progress {
+.source-label {
+  flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.source-count {
+  flex: none;
+  min-width: 18px;
+  text-align: right;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.source-count:empty {
+  display: none;
+}
+
+.source--active .source-count {
+  color: var(--accent-strong);
+}
+
+.source-empty {
+  padding: 4px 10px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.repo-source .source-icon {
+  opacity: 0.85;
+}
+
+.sidebar-footer {
+  flex: none;
+  padding-top: 8px;
+  border-top: 1px solid var(--hairline);
+}
+
+.source--settings .kbd {
+  flex: none;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+/* ================================ Content ================================= */
+.content {
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+}
+
+.pane {
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.pane[hidden] {
+  display: none;
+}
+
+/* Unified toolbar fused with the overlay title bar. */
+.toolbar {
+  flex: none;
+  height: var(--titlebar-h);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--hairline);
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: saturate(180%) blur(14px);
+  -webkit-backdrop-filter: saturate(180%) blur(14px);
+}
+
+.toolbar-title {
+  margin: 0;
+  font-size: 1.02rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* The whole toolbar is a window drag region (data-tauri-drag-region on .toolbar).
+   Tauri only starts a drag when the click lands on the attributed element, so make
+   the non-interactive toolbar content transparent to pointer events — clicks fall
+   through to .toolbar and drag the window regardless of focus. Buttons re-enable
+   pointer events so they stay clickable. */
+.toolbar-title,
+.toolbar-actions {
+  pointer-events: none;
+}
+
+.toolbar .icon-btn {
+  pointer-events: auto;
+}
+
+.sync-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.toolbar .js-sync-progress {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.icon-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.icon-btn:hover {
+  background: #f3f4f8;
+  color: var(--text);
+}
+
+.icon-btn:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+
+/* ================================= Inbox ================================== */
+.inbox {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.inbox-empty {
+  color: var(--muted);
+  font-size: 0.92rem;
+  padding: 40px 24px;
+  text-align: center;
+}
+
+.inbox-empty .btn {
+  margin-top: 12px;
+}
+
+/* Sticky, Mail-style repo section header. */
+.repo-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  background: rgba(238, 240, 244, 0.92);
+  backdrop-filter: saturate(180%) blur(14px);
+  -webkit-backdrop-filter: saturate(180%) blur(14px);
+  border-bottom: 1px solid var(--hairline);
+}
+
+.repo-name {
+  font-weight: 600;
+  font-size: 0.82rem;
+  color: var(--text);
+}
+
+.repo-counts {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.repo-counts strong {
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.n-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* Dense rows with hairline separators. */
+.n-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 16px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.n-unread-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: transparent;
+  flex: none;
+}
+
+.n-row--unread .n-unread-dot {
+  background: var(--accent);
+}
+
+/* Fixed-width, centered slot for the type pill so every title starts at the same x. */
+.n-badge-slot {
+  flex: none;
+  width: 78px;
+  display: flex;
+  justify-content: center;
+}
+
+.n-main {
+  min-width: 0;
+  flex: 1;
+}
+
+.n-title {
+  font-size: 0.86rem;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.n-row--unread .n-title {
+  font-weight: 600;
+}
+
+.n-number {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.82em;
+}
+
+.n-meta {
+  margin-top: 1px;
+  color: var(--muted);
+  font-size: 0.76rem;
+  text-transform: capitalize;
+}
+
+/* ================================ Settings ================================ */
+.settings-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 24px;
+  max-width: 760px;
+  width: 100%;
+  margin: 0 auto;
 }
 
 /* Card */
@@ -182,30 +483,27 @@ code,
 
 /* Color-coded state: green success / yellow pending / red error */
 .status-dot {
-  width: 10px;
-  height: 10px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   flex: none;
 }
 
 .status-dot--success {
   background: var(--success);
-  box-shadow: 0 0 0 4px rgba(31, 136, 61, 0.18);
 }
 
 .status-dot--pending {
   background: var(--pending);
-  box-shadow: 0 0 0 4px rgba(154, 103, 0, 0.18);
   animation: pulse 1.4s ease-in-out infinite;
 }
 
 .status-dot--error {
   background: var(--error);
-  box-shadow: 0 0 0 4px rgba(207, 34, 46, 0.18);
 }
 
 .status-label {
-  font-size: 0.82rem;
+  font-size: 0.78rem;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -227,12 +525,13 @@ code,
   align-items: center;
   gap: 12px;
   color: var(--muted);
-  font-size: 0.95rem;
+  font-size: 0.92rem;
+  padding: 24px 16px;
 }
 
 .spinner {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   border: 2px solid var(--border);
   border-top-color: var(--accent);
   border-radius: 50%;
@@ -487,7 +786,7 @@ input[type="text"]:focus {
   color: var(--accent-strong);
 }
 
-/* Sync */
+/* Sync summary (settings) */
 .sync-actions {
   display: flex;
   align-items: center;
@@ -495,129 +794,12 @@ input[type="text"]:focus {
   margin-bottom: 16px;
 }
 
-/* Inbox */
-.inbox {
-  margin-top: 18px;
-  border-top: 1px solid var(--border);
-  padding-top: 6px;
-}
-
-.inbox-empty {
-  color: var(--muted);
-  font-size: 0.9rem;
-  padding: 14px 2px;
-}
-
-.repo {
-  border-bottom: 1px solid var(--border);
-}
-
-.repo:last-child {
-  border-bottom: none;
-}
-
-.repo-summary {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 4px;
-  cursor: pointer;
-  list-style: none;
-  user-select: none;
-}
-
-.repo-summary::-webkit-details-marker {
-  display: none;
-}
-
-.repo-summary::before {
-  content: "▸";
-  color: var(--muted);
-  font-size: 1.15rem;
-  line-height: 1;
-  transition: transform 0.15s ease;
-}
-
-.repo[open] > .repo-summary::before {
-  transform: rotate(90deg);
-}
-
-.repo-name {
-  font-weight: 600;
-  font-size: 0.98rem;
-}
-
-.repo-counts {
-  margin-left: auto;
-  color: var(--muted);
-  font-size: 0.82rem;
-}
-
-.repo-counts strong {
-  color: var(--accent-strong);
-}
-
-.n-list {
-  list-style: none;
-  margin: 0 0 8px;
-  padding: 0;
-}
-
-.n-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 9px 6px 9px 2px;
-  border-top: 1px solid rgba(31, 35, 40, 0.08);
-}
-
-.n-unread-dot {
-  width: 8px;
-  height: 8px;
-  margin-top: 6px;
-  border-radius: 50%;
-  background: transparent;
-  flex: none;
-}
-
-.n-row--unread .n-unread-dot {
-  background: var(--accent);
-  box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.18);
-}
-
-.n-main {
-  min-width: 0;
-  flex: 1;
-}
-
-.n-title {
-  font-size: 0.93rem;
-  line-height: 1.35;
-}
-
-.n-row--unread .n-title {
-  font-weight: 600;
-}
-
-.n-number {
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 0.85em;
-}
-
-.n-meta {
-  margin-top: 2px;
-  color: var(--muted);
-  font-size: 0.8rem;
-  text-transform: capitalize;
-}
-
 /* Badges */
 .badge {
   flex: none;
-  font-size: 0.72rem;
+  font-size: 0.68rem;
   font-weight: 600;
-  padding: 2px 7px;
+  padding: 1px 6px;
   border-radius: 999px;
   white-space: nowrap;
   border: 1px solid transparent;
@@ -647,9 +829,9 @@ input[type="text"]:focus {
   border-color: rgba(154, 103, 0, 0.3);
 }
 
-/* Subject state label (populated from M6 onward) */
+/* Subject state label */
 .state {
-  font-size: 0.72rem;
+  font-size: 0.68rem;
   font-weight: 600;
   padding: 1px 6px;
   border-radius: 6px;

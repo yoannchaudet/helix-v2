@@ -9,6 +9,7 @@
   },
   "app": {
     "withGlobalTauri": true,
+    "macOSPrivateApi": true,
     "windows": [
       {
         "title": "Helix",
@@ -17,7 +18,9 @@
         "minWidth": 720,
         "minHeight": 700,
         "visible": false,
-        "backgroundColor": "#f6f8fb"
+        "transparent": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ],
     "security": {

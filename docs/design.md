@@ -223,16 +223,32 @@ subject URL), resolve the subject and keep it as a cleanup candidate when:
 
 ## 7. UI / UX
 
+### Shell — native macOS layout
+A vibrant **sidebar + content** layout that fills the window edge-to-edge (no centered
+column, no marketing hero):
+- **Sidebar** (`NSVisualEffect` *Sidebar* vibrancy via the `window-vibrancy` crate):
+  cross-cutting smart filters (**All notifications**, **Unread**, **Mentions**,
+  **Review requests**, **Done**) with live counts, a **Repositories** list of selectable
+  sources, and a **Settings** entry (`⌘,`) pinned to the bottom. Selection is single-active
+  (a smart filter *or* a repository), Mail-style.
+- **Content pane:** an opaque pane with a **unified toolbar** fused into the overlay title
+  bar (`titleBarStyle: "Overlay"`, `hiddenTitle: true`, transparent window +
+  `macOSPrivateApi`). The toolbar shows the active source title (left) and sync
+  status + refresh (right), and stays pinned while the list scrolls.
+- Accent (purple) is applied **sparingly** — selection tint, unread dots, counts — not as
+  large filled buttons (system control styling otherwise).
+
 ### Views (v1)
-- **Notifications by repo:** repos as sections (collapsible), each listing its
-  notifications with subject type (PR/Issue), number, title, reason, and state label.
-  Beautiful typography, generous spacing, scannable hierarchy.
+- **Notifications:** a full-width, dense list with **sticky, Mail-style repo section
+  headers** (repo name, private badge, unread count), each listing its notifications with
+  subject type (PR/Issue), number, title, reason, and state label. Hairline row separators.
 - **Cleanup:** the filtered candidate list (§6) with the dependabot-only toggle, a
   preview grouped by repo, and a confirm → bulk mark-as-done flow with live progress.
-- **Settings:** PAT entry (stored to Keychain), poll interval, dependabot-only default.
+- **Settings:** an in-app pane (reached from the sidebar or `⌘,`) for PAT entry (stored to
+  Keychain), poll interval, and the dependabot-only default.
 
 ### Conventions (see AGENT.md)
-- **Vanilla CSS + modern HTML**, no heavy framework.
+- **Vanilla CSS + modern HTML**, no heavy framework. System font stack only.
 - **Live feedback everywhere:** every async operation shows a loading animation; sync
   progress is visible; nothing happens silently.
 - **Color-coded state:** 🟢 green = success, 🟡 yellow = pending/in-progress,
