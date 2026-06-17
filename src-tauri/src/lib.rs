@@ -258,19 +258,26 @@ fn persist_window_size(window: &tauri::Window) {
     }
 
     let state = window.state::<AppState>();
+    // Skip if unchanged from the last *persisted* size (a resize drag emits a stream
+    // of events).
     {
-        let mut last = match state.last_window_size.lock() {
+        let last = match state.last_window_size.lock() {
             Ok(guard) => guard,
             Err(_) => return,
         };
         if *last == Some((w, h)) {
             return;
         }
-        *last = Some((w, h));
     }
+    // Persist, and only advance the cache on a successful write — otherwise a failed
+    // write would be permanently skipped on subsequent same-size events.
     let lock = state.db.0.lock();
     if let Ok(conn) = lock {
-        let _ = settings::set_window_size(&conn, w, h);
+        if settings::set_window_size(&conn, w, h).is_ok() {
+            if let Ok(mut last) = state.last_window_size.lock() {
+                *last = Some((w, h));
+            }
+        }
     }
 }
 
