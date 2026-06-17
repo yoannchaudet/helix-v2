@@ -2,6 +2,10 @@ const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
 const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => document.querySelectorAll(sel);
+
+/** True once the user is authenticated; drives the signed-out empty state. */
+let authenticated = false;
 
 const STATES = ["pending", "success", "error"];
 
@@ -65,6 +69,7 @@ async function loadStorage() {
 /* -------------------------------- Account -------------------------------- */
 
 function renderSignedIn(login) {
+  authenticated = true;
   setStatus("#auth-dot", "#auth-label", "success", "Signed in");
   $("#account-body").innerHTML = `
     <div class="account-row">
@@ -77,6 +82,7 @@ function renderSignedIn(login) {
 }
 
 function renderSignedOut(message) {
+  authenticated = false;
   setStatus("#auth-dot", "#auth-label", "pending", "Not connected");
   $("#account-body").innerHTML = `
     <form id="signin-form" class="form">
@@ -169,56 +175,76 @@ function renderSyncStats(status) {
     <dd>${escapeHtml(rate)}</dd>`;
 
   if (status.last_status === "error" && status.last_error) {
-    setStatus("#sync-dot", "#sync-label", "error", "Error");
-    $("#sync-progress").className = "form-msg form-msg--error";
-    $("#sync-progress").textContent = status.last_error;
+    setSyncStatus("error", "Error");
+    setSyncProgress(status.last_error, "error");
   } else if (status.last_status === "success") {
-    setStatus("#sync-dot", "#sync-label", "success", "Synced");
+    setSyncStatus("success", "Synced");
   } else {
-    setStatus("#sync-dot", "#sync-label", "pending", "Never synced");
+    setSyncStatus("pending", "Never synced");
   }
 }
 
+/* The sync controls live in two places (the Notifications header and the Settings
+ * summary). These helpers update every instance at once so both stay in lockstep. */
+
+function setSyncStatus(state, text) {
+  for (const dot of $$(".js-sync-dot")) {
+    for (const s of STATES) dot.classList.remove(`status-dot--${s}`);
+    dot.classList.add(`status-dot--${state}`);
+  }
+  for (const label of $$(".js-sync-label")) {
+    for (const s of STATES) label.classList.remove(`status-label--${s}`);
+    label.classList.add(`status-label--${state}`);
+    label.textContent = text;
+  }
+}
+
+function setSyncProgress(text, kind = "") {
+  for (const el of $$(".js-sync-progress")) {
+    el.className = `form-msg js-sync-progress${kind ? ` form-msg--${kind}` : ""}`;
+    el.textContent = text;
+  }
+}
+
+function setSyncBusy(busy) {
+  for (const btn of $$(".js-sync-btn")) btn.disabled = busy;
+}
+
 async function loadSyncStatus() {
-  setStatus("#sync-dot", "#sync-label", "pending", "Loading…");
+  setSyncStatus("pending", "Loading…");
   try {
     const status = await invoke("sync_status");
     renderSyncStats(status);
   } catch (err) {
-    setStatus("#sync-dot", "#sync-label", "error", "Error");
-    $("#sync-progress").className = "form-msg form-msg--error";
-    $("#sync-progress").textContent = String(err);
+    setSyncStatus("error", "Error");
+    setSyncProgress(String(err), "error");
   }
 }
 
 async function syncNow() {
-  const btn = $("#sync-btn");
-  const progress = $("#sync-progress");
-  btn.disabled = true;
+  setSyncBusy(true);
   syncing = true;
-  setStatus("#sync-dot", "#sync-label", "pending", "Syncing…");
-  progress.className = "form-msg";
-  progress.textContent = "Starting…";
+  setSyncStatus("pending", "Syncing…");
+  setSyncProgress("Starting…");
 
   try {
     const result = await invoke("sync_now");
     // Stop accepting progress updates before writing the final message, so a
     // late-delivered sync:progress event can't overwrite it.
     syncing = false;
-    progress.className = "form-msg form-msg--success";
-    progress.textContent = `Stored ${result.count} notification${
-      result.count === 1 ? "" : "s"
-    }.`;
+    setSyncProgress(
+      `Stored ${result.count} notification${result.count === 1 ? "" : "s"}.`,
+      "success",
+    );
     await loadSyncStatus();
     await loadInbox();
   } catch (err) {
     syncing = false;
-    setStatus("#sync-dot", "#sync-label", "error", "Error");
-    progress.className = "form-msg form-msg--error";
-    progress.textContent = String(err);
+    setSyncStatus("error", "Error");
+    setSyncProgress(String(err), "error");
   } finally {
     syncing = false;
-    btn.disabled = false;
+    setSyncBusy(false);
   }
 }
 
@@ -228,9 +254,7 @@ function registerSyncEvents() {
     // Ignore stale events delivered after the sync has settled.
     if (!syncing) return;
     const { page, fetched } = event.payload ?? {};
-    const progress = $("#sync-progress");
-    progress.className = "form-msg";
-    progress.textContent = `Fetching page ${page}… (${fetched} so far)`;
+    setSyncProgress(`Fetching page ${page}… (${fetched} so far)`);
   });
 }
 
@@ -324,7 +348,14 @@ async function loadInbox() {
   try {
     const groups = await invoke("list_inbox");
     if (!groups.length) {
-      inbox.innerHTML = `<p class="inbox-empty">No notifications stored yet — click <strong>Sync now</strong> to load them.</p>`;
+      inbox.innerHTML = authenticated
+        ? `<p class="inbox-empty">No notifications stored yet — click <strong>Sync now</strong> above to load them.</p>`
+        : `<div class="inbox-empty">
+             <p>Connect your GitHub account to start receiving notifications.</p>
+             <button type="button" class="btn js-goto-settings">Open Settings</button>
+           </div>`;
+      const goto = inbox.querySelector(".js-goto-settings");
+      if (goto) goto.addEventListener("click", () => activateView("settings"));
       return;
     }
     inbox.innerHTML = groups.map(repoSection).join("");
@@ -389,17 +420,33 @@ async function saveSettings(event) {
   }
 }
 
+/* ---------------------------------- Tabs --------------------------------- */
+
+/** Switch between the Notifications and Settings views. */
+function activateView(view) {
+  for (const tab of $$(".tab")) {
+    const active = tab.dataset.view === view;
+    tab.classList.toggle("tab--active", active);
+    tab.setAttribute("aria-selected", active ? "true" : "false");
+  }
+  $("#view-notifications").hidden = view !== "notifications";
+  $("#view-settings").hidden = view !== "settings";
+}
+
 /* --------------------------------- Init ---------------------------------- */
 
 window.addEventListener("DOMContentLoaded", () => {
   $("#settings-form").addEventListener("submit", saveSettings);
-  $("#sync-btn").addEventListener("click", syncNow);
+  for (const btn of $$(".js-sync-btn")) btn.addEventListener("click", syncNow);
+  for (const tab of $$(".tab")) {
+    tab.addEventListener("click", () => activateView(tab.dataset.view));
+  }
   registerSyncEvents();
   loadStorage();
-  loadAccount();
   loadSyncStatus();
-  loadInbox();
   loadSettings();
+  // Load the account first so the inbox knows whether to show its signed-out hint.
+  loadAccount().finally(loadInbox);
 
   // The window starts hidden (see tauri.conf.json) to avoid a white flash on
   // launch; reveal it from Rust now that the DOM is built and styled. We do not
