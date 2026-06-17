@@ -225,6 +225,16 @@ fn list_inbox(state: State<'_, AppState>) -> Result<Vec<sync::RepoGroup>, String
     sync::list_by_repo(&conn).map_err(|e| e.to_string())
 }
 
+/// Reveal the main window. The window starts hidden (see `tauri.conf.json`) so the
+/// frontend can paint its shell before we show it, avoiding a white flash on launch.
+/// Driven from Rust because Tauri v2's `withGlobalTauri` does not expose the `window`
+/// API to the frontend.
+#[tauri::command]
+fn show_main_window(window: tauri::WebviewWindow) {
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Install the macOS login-Keychain credential store for keyring-core.
@@ -246,6 +256,20 @@ pub fn run() {
                 db_path: db_path.to_string_lossy().into_owned(),
                 db: Db(std::sync::Mutex::new(conn)),
             });
+
+            // Safety net: the main window starts hidden and is normally revealed by
+            // the frontend (`show_main_window`) once the DOM is ready. If the frontend
+            // fails to load, show it anyway after a short delay so the app is never
+            // stuck as an invisible dock icon.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                if let Some(win) = handle.get_webview_window("main") {
+                    if !win.is_visible().unwrap_or(true) {
+                        let _ = win.show();
+                    }
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -257,7 +281,8 @@ pub fn run() {
             save_settings,
             sync_now,
             sync_status,
-            list_inbox
+            list_inbox,
+            show_main_window
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

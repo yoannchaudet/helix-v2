@@ -43,6 +43,28 @@ Run the Rust tests (e.g. the SQLite bootstrap) with:
 cd src-tauri && cargo test
 ```
 
+### Avoiding repeated Keychain prompts (macOS)
+
+Helix stores its GitHub PAT in the macOS login Keychain, and the Keychain ties its
+"Always Allow" grant to the app's code signature. Every `cargo` rebuild produces a
+binary with a new (ad-hoc) signature, so by default macOS re-prompts to let Helix read
+the PAT on **every** compile.
+
+To stop this, sign each dev build with a stable identity:
+
+```sh
+./scripts/setup-dev-signing.sh   # one-time: create a "Helix Dev" code-signing cert
+```
+
+`codesign` only accepts a code-signing identity created through **Keychain Access →
+Certificate Assistant**, so the script walks you through that one-time GUI step (it can
+open Certificate Assistant for you). Once the `Helix Dev` identity exists,
+[`scripts/cargo-codesign.sh`](scripts/cargo-codesign.sh) — wired up as Tauri's
+`build.runner` — code-signs every debug build with it automatically. The first build
+prompts once or twice (click **Always Allow**); after that, rebuilds are silent. The
+wrapper is a no-op when the identity is absent, so this setup is optional and CI/other
+contributors are unaffected.
+
 ## Project conventions
 
 Engineering principles (lightweight-first, offline-first, API discipline, color-coded

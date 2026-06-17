@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.yoannchaudet.helix",
   "build": {
-    "frontendDist": "../src"
+    "frontendDist": "../src",
+    "runner": "../scripts/cargo-codesign.sh"
   },
   "app": {
     "withGlobalTauri": true,
@@ -12,7 +13,9 @@
       {
         "title": "Helix",
         "width": 1000,
-        "height": 720
+        "height": 720,
+        "visible": false,
+        "backgroundColor": "#0d1117"
       }
     ],
     "security": {
