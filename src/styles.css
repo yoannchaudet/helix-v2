@@ -91,6 +91,72 @@ code,
   font-size: 1.02rem;
 }
 
+/* Tabs / segmented control */
+.tabs {
+  display: flex;
+  width: fit-content;
+  margin: 0 auto 26px;
+  gap: 4px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: var(--shadow);
+}
+
+.tab {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  padding: 7px 20px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.tab:hover {
+  color: var(--text);
+}
+
+.tab--active,
+.tab--active:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+.tab:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.35);
+}
+
+/* Views */
+.view[hidden] {
+  display: none;
+}
+
+/* Notifications header (status + sync action above the list) */
+.notif-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 4px 12px;
+}
+
+.notif-head .js-sync-btn {
+  margin-left: auto;
+}
+
+.notif-head .js-sync-progress {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Card */
 .card {
   background: var(--surface);
@@ -467,7 +533,8 @@ input[type="text"]:focus {
 .repo-summary::before {
   content: "▸";
   color: var(--muted);
-  font-size: 0.8rem;
+  font-size: 1.15rem;
+  line-height: 1;
   transition: transform 0.15s ease;
 }
 

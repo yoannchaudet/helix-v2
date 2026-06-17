@@ -18,104 +18,153 @@
         <p class="tagline">Manage your GitHub notifications. Automate the busywork.</p>
       </header>
 
-      <!-- Account / authentication -->
-      <section class="card" id="account-card" aria-live="polite">
-        <div class="card-head">
-          <span class="status-dot status-dot--pending" id="auth-dot"></span>
-          <h2>Account</h2>
-          <span class="status-label status-label--pending" id="auth-label">Checking…</span>
+      <nav class="tabs" role="tablist" aria-label="Views">
+        <button
+          type="button"
+          class="tab tab--active"
+          id="tab-notifications"
+          role="tab"
+          aria-selected="true"
+          aria-controls="view-notifications"
+          data-view="notifications"
+        >
+          Notifications
+        </button>
+        <button
+          type="button"
+          class="tab"
+          id="tab-settings"
+          role="tab"
+          aria-selected="false"
+          aria-controls="view-settings"
+          data-view="settings"
+        >
+          Settings
+        </button>
+      </nav>
+
+      <!-- ============================ Notifications ============================ -->
+      <section
+        id="view-notifications"
+        class="view"
+        role="tabpanel"
+        aria-labelledby="tab-notifications"
+      >
+        <div class="notif-head">
+          <span class="status-dot status-dot--pending js-sync-dot"></span>
+          <span class="status-label status-label--pending js-sync-label">Loading…</span>
+          <span class="form-msg js-sync-progress"></span>
+          <button type="button" class="btn btn--primary js-sync-btn">Sync now</button>
         </div>
 
-        <div class="card-body" id="account-body">
+        <div class="inbox" id="inbox" aria-live="polite">
           <div class="loader">
             <span class="spinner" aria-hidden="true"></span>
-            <span>Checking the Keychain…</span>
+            <span>Loading notifications…</span>
           </div>
         </div>
       </section>
 
-      <!-- Notifications / sync -->
-      <section class="card" id="sync-card" aria-live="polite">
-        <div class="card-head">
-          <span class="status-dot status-dot--pending" id="sync-dot"></span>
-          <h2>Notifications</h2>
-          <span class="status-label status-label--pending" id="sync-label">Loading…</span>
-        </div>
-
-        <div class="card-body">
-          <div class="sync-actions">
-            <button type="button" class="btn btn--primary" id="sync-btn">Sync now</button>
-            <span class="form-msg" id="sync-progress"></span>
+      <!-- ============================== Settings =============================== -->
+      <section
+        id="view-settings"
+        class="view"
+        role="tabpanel"
+        aria-labelledby="tab-settings"
+        hidden
+      >
+        <!-- Account / authentication -->
+        <section class="card" id="account-card" aria-live="polite">
+          <div class="card-head">
+            <span class="status-dot status-dot--pending" id="auth-dot"></span>
+            <h2>Account</h2>
+            <span class="status-label status-label--pending" id="auth-label">Checking…</span>
           </div>
-          <dl class="kv" id="sync-stats"></dl>
 
-          <div class="inbox" id="inbox" aria-live="polite">
+          <div class="card-body" id="account-body">
             <div class="loader">
               <span class="spinner" aria-hidden="true"></span>
-              <span>Loading notifications…</span>
+              <span>Checking the Keychain…</span>
             </div>
           </div>
-        </div>
-      </section>
+        </section>
 
-      <!-- Settings -->
-      <section class="card" id="settings-card">
-        <div class="card-head">
-          <span class="status-dot status-dot--pending" id="settings-dot"></span>
-          <h2>Settings</h2>
-          <span class="status-label status-label--pending" id="settings-label">Loading…</span>
-        </div>
-
-        <div class="card-body">
-          <form id="settings-form" class="form">
-            <div class="field">
-              <label for="poll-interval">Polling interval (seconds)</label>
-              <input
-                id="poll-interval"
-                name="poll-interval"
-                type="number"
-                min="10"
-                step="5"
-                inputmode="numeric"
-              />
-              <p class="hint">How often Helix syncs in the background. Minimum 10s.</p>
-            </div>
-
-            <div class="field field--row">
-              <label class="switch">
-                <input id="dependabot-only" name="dependabot-only" type="checkbox" />
-                <span class="switch-track" aria-hidden="true"></span>
-                <span>Cleanup: Dependabot only</span>
-              </label>
-            </div>
-
-            <div class="form-actions">
-              <button type="submit" class="btn btn--primary" id="settings-save">Save</button>
-              <span class="form-msg" id="settings-msg"></span>
-            </div>
-          </form>
-        </div>
-      </section>
-
-      <!-- Local storage -->
-      <section class="card" id="storage-card" aria-live="polite">
-        <div class="card-head">
-          <span class="status-dot status-dot--pending" id="status-dot"></span>
-          <h2>Local storage</h2>
-          <span class="status-label status-label--pending" id="status-label">Bootstrapping…</span>
-        </div>
-
-        <div class="card-body" id="storage-body">
-          <div class="loader">
-            <span class="spinner" aria-hidden="true"></span>
-            <span>Opening the database…</span>
+        <!-- Notifications summary (sync status + stats, no list) -->
+        <section class="card" id="sync-card" aria-live="polite">
+          <div class="card-head">
+            <span class="status-dot status-dot--pending js-sync-dot"></span>
+            <h2>Notifications</h2>
+            <span class="status-label status-label--pending js-sync-label">Loading…</span>
           </div>
-        </div>
-      </section>
 
-      <footer class="footnote">
-        Your token is stored in the macOS Keychain — never on disk in plain text.
-      </footer>
+          <div class="card-body">
+            <div class="sync-actions">
+              <button type="button" class="btn btn--primary js-sync-btn">Sync now</button>
+              <span class="form-msg js-sync-progress"></span>
+            </div>
+            <dl class="kv" id="sync-stats"></dl>
+          </div>
+        </section>
+
+        <!-- Settings -->
+        <section class="card" id="settings-card">
+          <div class="card-head">
+            <span class="status-dot status-dot--pending" id="settings-dot"></span>
+            <h2>Settings</h2>
+            <span class="status-label status-label--pending" id="settings-label">Loading…</span>
+          </div>
+
+          <div class="card-body">
+            <form id="settings-form" class="form">
+              <div class="field">
+                <label for="poll-interval">Polling interval (seconds)</label>
+                <input
+                  id="poll-interval"
+                  name="poll-interval"
+                  type="number"
+                  min="10"
+                  step="5"
+                  inputmode="numeric"
+                />
+                <p class="hint">How often Helix syncs in the background. Minimum 10s.</p>
+              </div>
+
+              <div class="field field--row">
+                <label class="switch">
+                  <input id="dependabot-only" name="dependabot-only" type="checkbox" />
+                  <span class="switch-track" aria-hidden="true"></span>
+                  <span>Cleanup: Dependabot only</span>
+                </label>
+              </div>
+
+              <div class="form-actions">
+                <button type="submit" class="btn btn--primary" id="settings-save">Save</button>
+                <span class="form-msg" id="settings-msg"></span>
+              </div>
+            </form>
+          </div>
+        </section>
+
+        <!-- Local storage -->
+        <section class="card" id="storage-card" aria-live="polite">
+          <div class="card-head">
+            <span class="status-dot status-dot--pending" id="status-dot"></span>
+            <h2>Local storage</h2>
+            <span class="status-label status-label--pending" id="status-label">Bootstrapping…</span>
+          </div>
+
+          <div class="card-body" id="storage-body">
+            <div class="loader">
+              <span class="spinner" aria-hidden="true"></span>
+              <span>Opening the database…</span>
+            </div>
+          </div>
+        </section>
+
+        <footer class="footnote">
+          Your token is stored in the macOS Keychain — never on disk in plain text.
+        </footer>
+      </section>
     </main>
   </body>
 </html>
