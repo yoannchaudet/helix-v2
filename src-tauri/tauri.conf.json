@@ -14,8 +14,10 @@
         "title": "Helix",
         "width": 1000,
         "height": 720,
+        "minWidth": 720,
+        "minHeight": 700,
         "visible": false,
-        "backgroundColor": "#0d1117"
+        "backgroundColor": "#f6f8fb"
       }
     ],
     "security": {

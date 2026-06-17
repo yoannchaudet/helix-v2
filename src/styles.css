@@ -1,16 +1,18 @@
 :root {
-  --bg: #0d1117;
-  --surface: #161b22;
-  --border: #2b3340;
-  --text: #e6edf3;
-  --muted: #9aa7b4;
+  --bg: #f6f8fb;
+  --surface: #ffffff;
+  --border: #d9dee4;
+  --text: #1f2328;
+  --muted: #59636e;
   --accent: #7c5cff;
+  --accent-strong: #6a48ff;
 
-  --success: #3fb950;
-  --pending: #d29922;
-  --error: #f85149;
+  --success: #1f883d;
+  --pending: #9a6700;
+  --error: #cf222e;
 
   --radius: 12px;
+  --shadow: 0 1px 2px rgba(31, 35, 40, 0.06), 0 8px 24px rgba(31, 35, 40, 0.06);
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto,
     Helvetica, Arial, sans-serif;
   --mono: "SF Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
@@ -29,8 +31,25 @@ body {
 body {
   font-family: var(--font);
   color: var(--text);
-  background: radial-gradient(1200px 600px at 50% -10%, #1b2330 0%, var(--bg) 60%);
+  background: radial-gradient(1100px 560px at 50% -8%, #eceefe 0%, var(--bg) 55%);
+  color-scheme: light;
+  cursor: default;
+  -webkit-user-select: none;
+  user-select: none;
   -webkit-font-smoothing: antialiased;
+}
+
+/* Re-enable selection only where copying the text is actually useful. */
+input[type="number"],
+input[type="password"],
+input[type="text"],
+code,
+.kv dd,
+.account-id,
+.error-detail,
+.n-title {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .app {
@@ -60,7 +79,7 @@ body {
   margin: 0;
   font-size: 2.4rem;
   letter-spacing: -0.02em;
-  background: linear-gradient(120deg, #fff 0%, var(--accent) 120%);
+  background: linear-gradient(120deg, #1f2328 0%, var(--accent) 125%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -78,7 +97,7 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 22px 24px;
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25);
+  box-shadow: var(--shadow);
 }
 
 .card-head {
@@ -105,18 +124,18 @@ body {
 
 .status-dot--success {
   background: var(--success);
-  box-shadow: 0 0 0 4px rgba(63, 185, 80, 0.18);
+  box-shadow: 0 0 0 4px rgba(31, 136, 61, 0.18);
 }
 
 .status-dot--pending {
   background: var(--pending);
-  box-shadow: 0 0 0 4px rgba(210, 153, 34, 0.18);
+  box-shadow: 0 0 0 4px rgba(154, 103, 0, 0.18);
   animation: pulse 1.4s ease-in-out infinite;
 }
 
 .status-dot--error {
   background: var(--error);
-  box-shadow: 0 0 0 4px rgba(248, 81, 73, 0.18);
+  box-shadow: 0 0 0 4px rgba(207, 34, 46, 0.18);
 }
 
 .status-label {
@@ -177,7 +196,8 @@ body {
 code {
   font-family: var(--mono);
   font-size: 0.88em;
-  background: rgba(124, 92, 255, 0.12);
+  color: var(--accent-strong);
+  background: rgba(124, 92, 255, 0.1);
   padding: 1px 6px;
   border-radius: 6px;
 }
@@ -192,7 +212,8 @@ code {
 }
 
 .tables li code {
-  background: rgba(63, 185, 80, 0.12);
+  color: var(--success);
+  background: rgba(31, 136, 61, 0.1);
 }
 
 /* Error */
@@ -205,10 +226,10 @@ code {
 .error-detail {
   margin: 0;
   padding: 12px;
-  background: rgba(248, 81, 73, 0.08);
-  border: 1px solid rgba(248, 81, 73, 0.3);
+  background: rgba(207, 34, 46, 0.06);
+  border: 1px solid rgba(207, 34, 46, 0.25);
   border-radius: 8px;
-  color: #ffb4ae;
+  color: #86181d;
   font-family: var(--mono);
   font-size: 0.82rem;
   white-space: pre-wrap;
@@ -264,7 +285,7 @@ input[type="text"] {
   font-size: 0.95rem;
   font-family: inherit;
   color: var(--text);
-  background: #0e131b;
+  background: #ffffff;
   border: 1px solid var(--border);
   border-radius: 8px;
   outline: none;
@@ -275,7 +296,7 @@ input[type="number"]:focus,
 input[type="password"]:focus,
 input[type="text"]:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.22);
+  box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.18);
 }
 
 .form-actions {
@@ -287,7 +308,7 @@ input[type="text"]:focus {
 .btn {
   appearance: none;
   border: 1px solid var(--border);
-  background: #1c2330;
+  background: #ffffff;
   color: var(--text);
   font: inherit;
   font-size: 0.9rem;
@@ -299,8 +320,8 @@ input[type="text"]:focus {
 }
 
 .btn:hover {
-  border-color: #3a4556;
-  background: #222b3a;
+  border-color: #c2c9d1;
+  background: #f3f4f8;
 }
 
 .btn:disabled {
@@ -315,8 +336,8 @@ input[type="text"]:focus {
 }
 
 .btn--primary:hover {
-  background: #6a48ff;
-  border-color: #6a48ff;
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
 }
 
 .form-msg {
@@ -354,7 +375,7 @@ input[type="text"]:focus {
   width: 40px;
   height: 22px;
   border-radius: 999px;
-  background: #2b3340;
+  background: #d0d7de;
   transition: background 0.18s ease;
   flex: none;
 }
@@ -368,6 +389,7 @@ input[type="text"]:focus {
   height: 16px;
   border-radius: 50%;
   background: #fff;
+  box-shadow: 0 1px 2px rgba(31, 35, 40, 0.25);
   transition: transform 0.18s ease;
 }
 
@@ -396,7 +418,7 @@ input[type="text"]:focus {
 }
 
 .account-id strong {
-  color: var(--accent);
+  color: var(--accent-strong);
 }
 
 /* Sync */
@@ -465,7 +487,7 @@ input[type="text"]:focus {
 }
 
 .repo-counts strong {
-  color: var(--accent);
+  color: var(--accent-strong);
 }
 
 .n-list {
@@ -479,7 +501,7 @@ input[type="text"]:focus {
   align-items: flex-start;
   gap: 10px;
   padding: 9px 6px 9px 2px;
-  border-top: 1px solid rgba(43, 51, 64, 0.5);
+  border-top: 1px solid rgba(31, 35, 40, 0.08);
 }
 
 .n-unread-dot {
@@ -535,27 +557,27 @@ input[type="text"]:focus {
 }
 
 .badge--pr {
-  color: #c9b8ff;
-  background: rgba(124, 92, 255, 0.16);
-  border-color: rgba(124, 92, 255, 0.35);
+  color: var(--accent-strong);
+  background: rgba(124, 92, 255, 0.12);
+  border-color: rgba(124, 92, 255, 0.3);
 }
 
 .badge--issue {
-  color: #8fe3a3;
-  background: rgba(63, 185, 80, 0.14);
-  border-color: rgba(63, 185, 80, 0.32);
+  color: var(--success);
+  background: rgba(31, 136, 61, 0.12);
+  border-color: rgba(31, 136, 61, 0.3);
 }
 
 .badge--other {
   color: var(--muted);
-  background: rgba(154, 167, 180, 0.12);
-  border-color: rgba(154, 167, 180, 0.25);
+  background: rgba(140, 149, 159, 0.14);
+  border-color: rgba(140, 149, 159, 0.28);
 }
 
 .badge--lock {
-  color: #e3c98f;
-  background: rgba(210, 153, 34, 0.12);
-  border-color: rgba(210, 153, 34, 0.3);
+  color: var(--pending);
+  background: rgba(154, 103, 0, 0.1);
+  border-color: rgba(154, 103, 0, 0.3);
 }
 
 /* Subject state label (populated from M6 onward) */
@@ -568,21 +590,21 @@ input[type="text"]:focus {
 }
 
 .state--merged {
-  color: #c9b8ff;
-  background: rgba(124, 92, 255, 0.16);
+  color: var(--accent-strong);
+  background: rgba(124, 92, 255, 0.14);
 }
 .state--closed {
-  color: #ffb4ae;
-  background: rgba(248, 81, 73, 0.14);
+  color: var(--error);
+  background: rgba(207, 34, 46, 0.12);
 }
 .state--open,
 .state--done {
-  color: #8fe3a3;
-  background: rgba(63, 185, 80, 0.14);
+  color: var(--success);
+  background: rgba(31, 136, 61, 0.12);
 }
 .state--muted {
   color: var(--muted);
-  background: rgba(154, 167, 180, 0.12);
+  background: rgba(140, 149, 159, 0.12);
 }
 
 @keyframes spin {

@@ -22,6 +22,9 @@ struct AppState {
     /// Absolute path to `helix.db`, surfaced to the UI for transparency.
     db_path: String,
     db: Db,
+    /// Last window size persisted to SQLite, cached to skip redundant writes while a
+    /// resize drag emits a stream of events.
+    last_window_size: std::sync::Mutex<Option<(u32, u32)>>,
 }
 
 /// Snapshot of the local storage, returned to the frontend.
@@ -235,6 +238,42 @@ fn show_main_window(window: tauri::WebviewWindow) {
     let _ = window.set_focus();
 }
 
+/// Persist the current window size (logical px) to SQLite so the next launch restores
+/// it. Skips minimized/maximized/fullscreen states and redundant writes (the cache in
+/// `AppState`) so a resize drag doesn't hammer the database.
+fn persist_window_size(window: &tauri::Window) {
+    if window.is_minimized().unwrap_or(false)
+        || window.is_maximized().unwrap_or(false)
+        || window.is_fullscreen().unwrap_or(false)
+    {
+        return;
+    }
+    let Ok(physical) = window.inner_size() else {
+        return;
+    };
+    let logical = physical.to_logical::<f64>(window.scale_factor().unwrap_or(1.0));
+    let (w, h) = (logical.width.round() as u32, logical.height.round() as u32);
+    if w == 0 || h == 0 {
+        return;
+    }
+
+    let state = window.state::<AppState>();
+    {
+        let mut last = match state.last_window_size.lock() {
+            Ok(guard) => guard,
+            Err(_) => return,
+        };
+        if *last == Some((w, h)) {
+            return;
+        }
+        *last = Some((w, h));
+    }
+    let lock = state.db.0.lock();
+    if let Ok(conn) = lock {
+        let _ = settings::set_window_size(&conn, w, h);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Install the macOS login-Keychain credential store for keyring-core.
@@ -244,6 +283,14 @@ pub fn run() {
     );
 
     tauri::Builder::default()
+        .on_window_event(|window, event| {
+            // Persist the window size to SQLite so the next launch reopens at the same
+            // size (macOS/Tauri don't restore it automatically). Resize fires
+            // repeatedly while dragging; `persist_window_size` skips redundant writes.
+            if let tauri::WindowEvent::Resized(_) = event {
+                persist_window_size(window);
+            }
+        })
         .setup(|app| {
             // Resolve `~/Library/Application Support/helix/` on macOS (see design.md §3).
             let data_dir = app.path().data_dir()?.join("helix");
@@ -252,10 +299,19 @@ pub fn run() {
             let db_path = data_dir.join("helix.db");
             let conn = db::open_and_migrate(&db_path)?;
 
+            // Restore the last window size (logical px) before the window is shown, so
+            // there's no visible resize jump. Read it before `conn` is moved into state.
+            let saved_size = settings::get_window_size(&conn).ok().flatten();
+
             app.manage(AppState {
                 db_path: db_path.to_string_lossy().into_owned(),
                 db: Db(std::sync::Mutex::new(conn)),
+                last_window_size: std::sync::Mutex::new(saved_size),
             });
+
+            if let (Some((w, h)), Some(win)) = (saved_size, app.get_webview_window("main")) {
+                let _ = win.set_size(tauri::LogicalSize::new(w as f64, h as f64));
+            }
 
             // Safety net: the main window starts hidden and is normally revealed by
             // the frontend (`show_main_window`) once the DOM is ready. If the frontend

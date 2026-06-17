@@ -9,6 +9,8 @@ use rusqlite::{Connection, OptionalExtension};
 /// Settings keys.
 pub const KEY_DEPENDABOT_ONLY: &str = "dependabot_only";
 pub const KEY_GITHUB_LOGIN: &str = "github_login";
+pub const KEY_WINDOW_WIDTH: &str = "window_width";
+pub const KEY_WINDOW_HEIGHT: &str = "window_height";
 
 /// Lower bound for the polling interval, to avoid hammering the API.
 pub const MIN_POLL_INTERVAL_S: i64 = 10;
@@ -65,6 +67,24 @@ pub fn set_poll_interval(conn: &Connection, seconds: i64) -> rusqlite::Result<()
         "UPDATE sync_state SET poll_interval_s = ?1 WHERE id = 1",
         [seconds],
     )?;
+    Ok(())
+}
+
+/// Read the persisted window size (logical pixels), or `None` if either dimension is
+/// unset or unparseable. Used to restore the window to its last size on launch.
+pub fn get_window_size(conn: &Connection) -> rusqlite::Result<Option<(u32, u32)>> {
+    let width = get_string(conn, KEY_WINDOW_WIDTH)?.and_then(|v| v.parse::<u32>().ok());
+    let height = get_string(conn, KEY_WINDOW_HEIGHT)?.and_then(|v| v.parse::<u32>().ok());
+    Ok(match (width, height) {
+        (Some(w), Some(h)) => Some((w, h)),
+        _ => None,
+    })
+}
+
+/// Persist the window size (logical pixels) so the next launch reopens at the same size.
+pub fn set_window_size(conn: &Connection, width: u32, height: u32) -> rusqlite::Result<()> {
+    set_string(conn, KEY_WINDOW_WIDTH, &width.to_string())?;
+    set_string(conn, KEY_WINDOW_HEIGHT, &height.to_string())?;
     Ok(())
 }
 
@@ -127,5 +147,21 @@ mod tests {
         assert_eq!(get_poll_interval(&conn).unwrap(), 60); // seeded default
         set_poll_interval(&conn, 120).unwrap();
         assert_eq!(get_poll_interval(&conn).unwrap(), 120);
+    }
+
+    #[test]
+    fn window_size_round_trip() {
+        let conn = mem_conn();
+        // Unset until both dimensions are stored.
+        assert_eq!(get_window_size(&conn).unwrap(), None);
+        set_window_size(&conn, 1024, 768).unwrap();
+        assert_eq!(get_window_size(&conn).unwrap(), Some((1024, 768)));
+        // Overwrites on subsequent saves.
+        set_window_size(&conn, 800, 600).unwrap();
+        assert_eq!(get_window_size(&conn).unwrap(), Some((800, 600)));
+
+        // A non-numeric stored value is treated as unset.
+        set_string(&conn, KEY_WINDOW_WIDTH, "garbage").unwrap();
+        assert_eq!(get_window_size(&conn).unwrap(), None);
     }
 }
