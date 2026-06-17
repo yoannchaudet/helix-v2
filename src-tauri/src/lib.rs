@@ -320,6 +320,16 @@ pub fn run() {
                 let _ = win.set_size(tauri::LogicalSize::new(w as f64, h as f64));
             }
 
+            // Native macOS translucency: an NSVisualEffect "Sidebar" material sits behind
+            // the (transparent) webview, so the vibrant sidebar shows through while the
+            // content pane paints an opaque background over it. Best-effort: a failure
+            // here must never block launch (the app simply renders flat).
+            #[cfg(target_os = "macos")]
+            if let Some(win) = app.get_webview_window("main") {
+                use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
+                let _ = apply_vibrancy(&win, NSVisualEffectMaterial::Sidebar, None, None);
+            }
+
             // Safety net: the main window starts hidden and is normally revealed by
             // the frontend (`show_main_window`) once the DOM is ready. If the frontend
             // fails to load, show it anyway after a short delay so the app is never

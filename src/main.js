@@ -266,6 +266,7 @@ const SUBJECT_BADGES = {
   Discussion: ["Discussion", "badge--other"],
   Release: ["Release", "badge--other"],
   Commit: ["Commit", "badge--other"],
+  AgentSessionThread: ["Copilot", "badge--other"],
 };
 
 function subjectBadge(type) {
@@ -315,7 +316,7 @@ function notificationRow(n) {
   return `
     <li class="n-row ${n.unread ? "n-row--unread" : ""}">
       <span class="n-unread-dot" aria-hidden="true"></span>
-      ${subjectBadge(n.subject_type)}
+      <span class="n-badge-slot">${subjectBadge(n.subject_type)}</span>
       <div class="n-main">
         <div class="n-title">${number}${escapeHtml(n.subject_title)} ${state}</div>
         <div class="n-meta">${reason} · ${escapeHtml(relTime(n.updated_at))}</div>
@@ -323,44 +324,165 @@ function notificationRow(n) {
     </li>`;
 }
 
-function repoSection(group) {
-  const rows = group.notifications.map(notificationRow).join("");
+/* The sidebar drives a single active "source": either a smart filter (across all
+ * repos) or a specific repository. Notifications are fetched once into `inboxGroups`
+ * and re-rendered locally as the source changes. */
+
+let inboxGroups = [];
+let activeSource = { kind: "filter", id: "unread" };
+
+/** Smart filters: predicate over a notification + the human label for the toolbar. */
+const FILTERS = {
+  unread: { label: "Unread", match: (n) => n.unread },
+  all: { label: "All notifications", match: () => true },
+  mention: { label: "Mentions", match: (n) => n.reason === "mention" },
+  review_requested: {
+    label: "Review requests",
+    match: (n) => n.reason === "review_requested",
+  },
+  done: { label: "Done", match: (n) => !n.unread },
+};
+
+function repoHeader(group) {
   const privacy = group.private
     ? `<span class="badge badge--lock" title="Private repository">private</span>`
     : "";
+  const unread = group.notifications.filter((n) => n.unread).length;
+  const counts = unread
+    ? `<span class="repo-counts"><strong>${unread}</strong> unread</span>`
+    : `<span class="repo-counts">${group.notifications.length}</span>`;
   return `
-    <details class="repo" open>
-      <summary class="repo-summary">
-        <span class="repo-name">${escapeHtml(group.full_name)}</span>
-        ${privacy}
-        <span class="repo-counts">
-          <strong>${escapeHtml(group.unread_count)}</strong> unread · ${escapeHtml(
-            group.total,
-          )}
-        </span>
-      </summary>
-      <ul class="n-list">${rows}</ul>
-    </details>`;
+    <div class="repo-header">
+      <span class="repo-name">${escapeHtml(group.full_name)}</span>
+      ${privacy}
+      ${counts}
+    </div>`;
+}
+
+function repoSection(group) {
+  const rows = group.notifications.map(notificationRow).join("");
+  return `${repoHeader(group)}<ul class="n-list">${rows}</ul>`;
+}
+
+/** Apply the active source to `inboxGroups`, returning groups with matching rows. */
+function filteredGroups() {
+  if (activeSource.kind === "repo") {
+    const group = inboxGroups.find((g) => g.repo_id === activeSource.id);
+    return group ? [group] : [];
+  }
+  const match = (FILTERS[activeSource.id] ?? FILTERS.unread).match;
+  return inboxGroups
+    .map((g) => ({ ...g, notifications: g.notifications.filter(match) }))
+    .filter((g) => g.notifications.length);
+}
+
+/** Current toolbar title for the active source. */
+function activeTitle() {
+  if (activeSource.kind === "repo") {
+    const group = inboxGroups.find((g) => g.repo_id === activeSource.id);
+    return group ? group.full_name : "Repository";
+  }
+  return (FILTERS[activeSource.id] ?? FILTERS.unread).label;
+}
+
+function emptyInbox() {
+  if (!authenticated) {
+    return `<div class="inbox-empty">
+        <p>Connect your GitHub account to start receiving notifications.</p>
+        <button type="button" class="btn js-goto-settings">Open Settings</button>
+      </div>`;
+  }
+  return `<p class="inbox-empty">Nothing here. Click the refresh button to sync.</p>`;
+}
+
+/** Render the main list for the active source. */
+function renderInbox() {
+  const inbox = $("#inbox");
+  $("#view-title").textContent = activeTitle();
+  const groups = filteredGroups();
+  if (!groups.length) {
+    inbox.innerHTML = emptyInbox();
+    const goto = inbox.querySelector(".js-goto-settings");
+    if (goto) goto.addEventListener("click", () => showSettings(true));
+    return;
+  }
+  inbox.innerHTML = groups.map(repoSection).join("");
+}
+
+/** Update sidebar source selection styling + the smart-filter counts. */
+function renderSidebar() {
+  const all = inboxGroups.flatMap((g) => g.notifications);
+  const counts = {
+    unread: all.filter(FILTERS.unread.match).length,
+    all: all.length,
+    mention: all.filter(FILTERS.mention.match).length,
+    review_requested: all.filter(FILTERS.review_requested.match).length,
+    done: all.filter(FILTERS.done.match).length,
+  };
+  for (const el of $$(".source-count")) {
+    const key = el.dataset.count;
+    const value = counts[key] ?? 0;
+    el.textContent = value ? String(value) : "";
+  }
+
+  // Repositories list (selectable sources), ordered like the inbox.
+  const repoList = $("#repo-list");
+  if (!inboxGroups.length) {
+    repoList.innerHTML = `<li class="source-empty">No repositories yet.</li>`;
+  } else {
+    repoList.innerHTML = inboxGroups
+      .map((g) => {
+        const unread = g.notifications.filter((n) => n.unread).length;
+        const count = unread ? `<span class="source-count">${unread}</span>` : "";
+        const lock = g.private ? " 🔒" : "";
+        return `<li>
+          <button type="button" class="source repo-source" data-repo="${g.repo_id}">
+            <span class="source-icon" aria-hidden="true">
+              <svg viewBox="0 0 16 16" width="15" height="15"><path d="M3 2.5h7.5L13 5v8.5H3z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M5 6h4M5 8.5h6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+            </span>
+            <span class="source-label" title="${escapeHtml(g.full_name)}">${escapeHtml(
+              g.full_name,
+            )}${lock}</span>
+            ${count}
+          </button>
+        </li>`;
+      })
+      .join("");
+    for (const btn of repoList.querySelectorAll(".repo-source")) {
+      btn.addEventListener("click", () =>
+        selectSource({ kind: "repo", id: Number(btn.dataset.repo) }),
+      );
+    }
+  }
+
+  // Reflect the active selection across both source groups.
+  for (const btn of $$(".source[data-filter], .source[data-repo]")) {
+    const isActive =
+      (btn.dataset.filter &&
+        activeSource.kind === "filter" &&
+        btn.dataset.filter === activeSource.id) ||
+      (btn.dataset.repo &&
+        activeSource.kind === "repo" &&
+        Number(btn.dataset.repo) === activeSource.id);
+    btn.classList.toggle("source--active", Boolean(isActive));
+  }
+}
+
+/** Switch the active source and re-render the list + sidebar selection. */
+function selectSource(source) {
+  activeSource = source;
+  showSettings(false);
+  renderSidebar();
+  renderInbox();
 }
 
 async function loadInbox() {
-  const inbox = $("#inbox");
   try {
-    const groups = await invoke("list_inbox");
-    if (!groups.length) {
-      inbox.innerHTML = authenticated
-        ? `<p class="inbox-empty">No notifications stored yet — click <strong>Sync now</strong> above to load them.</p>`
-        : `<div class="inbox-empty">
-             <p>Connect your GitHub account to start receiving notifications.</p>
-             <button type="button" class="btn js-goto-settings">Open Settings</button>
-           </div>`;
-      const goto = inbox.querySelector(".js-goto-settings");
-      if (goto) goto.addEventListener("click", () => activateView("settings"));
-      return;
-    }
-    inbox.innerHTML = groups.map(repoSection).join("");
+    inboxGroups = await invoke("list_inbox");
+    renderSidebar();
+    renderInbox();
   } catch (err) {
-    inbox.innerHTML = `<pre class="error-detail">${escapeHtml(err)}</pre>`;
+    $("#inbox").innerHTML = `<pre class="error-detail">${escapeHtml(err)}</pre>`;
   }
 }
 
@@ -420,17 +542,95 @@ async function saveSettings(event) {
   }
 }
 
-/* ---------------------------------- Tabs --------------------------------- */
+/* --------------------------------- Panes --------------------------------- */
 
-/** Switch between the Notifications and Settings views. */
-function activateView(view) {
-  for (const tab of $$(".tab")) {
-    const active = tab.dataset.view === view;
-    tab.classList.toggle("tab--active", active);
-    tab.setAttribute("aria-selected", active ? "true" : "false");
-  }
-  $("#view-notifications").hidden = view !== "notifications";
-  $("#view-settings").hidden = view !== "settings";
+/** Toggle between the notifications pane and the Settings pane (single window). */
+function showSettings(show) {
+  $("#view-notifications").hidden = show;
+  $("#view-settings").hidden = !show;
+}
+
+/* ----------------------------- Sidebar resize ---------------------------- */
+
+/** Make the sidebar width draggable. The CSS default is treated as the minimum;
+ *  the chosen width is persisted across launches in localStorage. */
+function initSidebarResize() {
+  const resizer = $("#sidebar-resizer");
+  if (!resizer) return;
+
+  const root = document.documentElement;
+  const min = parseInt(getComputedStyle(root).getPropertyValue("--sidebar-w"), 10) || 232;
+  const max = 520;
+  const STEP = 16;
+  let current = min;
+
+  // Single entry point for width changes: clamp, apply, expose to AT, and persist.
+  const setWidth = (w, persist = true) => {
+    current = Math.max(min, Math.min(max, Math.round(w)));
+    root.style.setProperty("--sidebar-w", `${current}px`);
+    resizer.setAttribute("aria-valuenow", String(current));
+    if (persist) localStorage.setItem("helix:sidebar-w", String(current));
+  };
+
+  resizer.setAttribute("aria-valuemin", String(min));
+  resizer.setAttribute("aria-valuemax", String(max));
+
+  const saved = Number.parseInt(localStorage.getItem("helix:sidebar-w"), 10);
+  setWidth(Number.isFinite(saved) ? saved : min, false);
+
+  let dragging = false;
+  const onMove = (e) => {
+    if (!dragging) return;
+    // The sidebar starts at the window's left edge, so its width === cursor X.
+    setWidth(e.clientX, false);
+  };
+  const onUp = () => {
+    if (!dragging) return;
+    dragging = false;
+    resizer.classList.remove("sidebar-resizer--dragging");
+    document.body.style.cursor = "";
+    localStorage.setItem("helix:sidebar-w", String(current));
+  };
+
+  resizer.addEventListener("mousedown", (e) => {
+    e.preventDefault(); // don't start a text/window-drag interaction
+    dragging = true;
+    resizer.classList.add("sidebar-resizer--dragging");
+    document.body.style.cursor = "col-resize";
+  });
+  window.addEventListener("mousemove", onMove);
+  window.addEventListener("mouseup", onUp);
+  // A mouseup outside the webview is never delivered; terminate on blur so the
+  // drag can't get stuck (cursor left as col-resize).
+  window.addEventListener("blur", onUp);
+
+  // Keyboard operability for the separator (arrows step, Home/End jump).
+  resizer.addEventListener("keydown", (e) => {
+    let next = current;
+    switch (e.key) {
+      case "ArrowLeft":
+      case "ArrowDown":
+        next = current - STEP;
+        break;
+      case "ArrowRight":
+      case "ArrowUp":
+        next = current + STEP;
+        break;
+      case "Home":
+        next = min;
+        break;
+      case "End":
+        next = max;
+        break;
+      default:
+        return;
+    }
+    e.preventDefault();
+    setWidth(next);
+  });
+
+  // Double-click resets to the default (minimum) width.
+  resizer.addEventListener("dblclick", () => setWidth(min));
 }
 
 /* --------------------------------- Init ---------------------------------- */
@@ -438,9 +638,26 @@ function activateView(view) {
 window.addEventListener("DOMContentLoaded", () => {
   $("#settings-form").addEventListener("submit", saveSettings);
   for (const btn of $$(".js-sync-btn")) btn.addEventListener("click", syncNow);
-  for (const tab of $$(".tab")) {
-    tab.addEventListener("click", () => activateView(tab.dataset.view));
+
+  initSidebarResize();
+
+  // Sidebar smart filters.
+  for (const btn of $$(".source[data-filter]")) {
+    btn.addEventListener("click", () =>
+      selectSource({ kind: "filter", id: btn.dataset.filter }),
+    );
   }
+
+  // Settings pane: opened from the sidebar or ⌘, ; closed via the back button.
+  $("#open-settings").addEventListener("click", () => showSettings(true));
+  $("#settings-back").addEventListener("click", () => showSettings(false));
+  document.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === ",") {
+      e.preventDefault();
+      showSettings($("#view-settings").hidden);
+    }
+  });
+
   registerSyncEvents();
   loadStorage();
   loadSyncStatus();
@@ -448,11 +665,11 @@ window.addEventListener("DOMContentLoaded", () => {
   // Load the account first so the inbox knows whether to show its signed-out hint.
   loadAccount().finally(loadInbox);
 
-  // The window starts hidden (see tauri.conf.json) to avoid a white flash on
-  // launch; reveal it from Rust now that the DOM is built and styled. We do not
-  // wait on requestAnimationFrame: a hidden macOS WKWebView never paints, so its
-  // rAF callbacks would never fire and the window would stay hidden forever. The
-  // dark window backgroundColor already covers the brief gap until first paint.
-  // The Rust safety-net (see lib.rs) reveals the window if this call ever fails.
+  // The window starts hidden (see tauri.conf.json) to avoid a flash on launch;
+  // reveal it from Rust now that the DOM is built and styled. We do not wait on
+  // requestAnimationFrame: a hidden macOS WKWebView never paints, so its rAF
+  // callbacks would never fire and the window would stay hidden forever. The Rust
+  // safety-net (see lib.rs) reveals the window if this call ever fails.
   invoke("show_main_window").catch(() => {});
 });
+
