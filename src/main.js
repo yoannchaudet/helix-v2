@@ -400,4 +400,12 @@ window.addEventListener("DOMContentLoaded", () => {
   loadSyncStatus();
   loadInbox();
   loadSettings();
+
+  // The window starts hidden (see tauri.conf.json) to avoid a white flash on
+  // launch; reveal it from Rust now that the DOM is built and styled. We do not
+  // wait on requestAnimationFrame: a hidden macOS WKWebView never paints, so its
+  // rAF callbacks would never fire and the window would stay hidden forever. The
+  // dark window backgroundColor already covers the brief gap until first paint.
+  // The Rust safety-net (see lib.rs) reveals the window if this call ever fails.
+  invoke("show_main_window").catch(() => {});
 });
