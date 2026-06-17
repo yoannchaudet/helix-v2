@@ -65,6 +65,14 @@ prompts once or twice (click **Always Allow**); after that, rebuilds are silent.
 wrapper is a no-op when the identity is absent, so this setup is optional and CI/other
 contributors are unaffected.
 
+The signing scripts deliberately resolve the identity by its SHA-1 **hash** rather than
+by name, and do **not** require the cert to be Gatekeeper-trusted: a self-signed dev cert
+shows as untrusted (`CSSMERR_TP_NOT_TRUSTED`) yet still produces a stable signature, which
+is all the Keychain grant needs. This also means a leftover **duplicate** `Helix Dev`
+certificate won't break signing (it would otherwise make `codesign --sign "Helix Dev"`
+fail as *ambiguous*) — `setup-dev-signing.sh` flags duplicates so you can tidy them up in
+Keychain Access, but signing keeps working either way.
+
 ## Project conventions
 
 Engineering principles (lightweight-first, offline-first, API discipline, color-coded

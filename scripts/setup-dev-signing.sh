@@ -17,8 +17,30 @@ set -euo pipefail
 
 IDENTITY="${HELIX_DEV_SIGN_IDENTITY:-Helix Dev}"
 
-if security find-identity -v -p codesigning 2>/dev/null | grep -qF "$IDENTITY"; then
-  echo "✅ Code-signing identity '$IDENTITY' already exists and is valid. Nothing to do."
+# Match by name against ALL code-signing identities, not just `-v` (valid/trusted) ones.
+# A self-signed dev cert is untrusted by Gatekeeper (CSSMERR_TP_NOT_TRUSTED) and so is
+# hidden by `-v`, yet it still signs fine (scripts/cargo-codesign.sh signs by hash). If we
+# checked `-v` here, this script would wrongly report the identity as missing and prompt
+# you to create another one — which is exactly how duplicate "Helix Dev" certs accumulate.
+hashes="$(security find-identity -p codesigning 2>/dev/null \
+  | grep -F "\"$IDENTITY\"" | grep -oE '[0-9A-F]{40}' | sort -u || true)"
+count="$(printf '%s' "$hashes" | grep -c . || true)"
+
+if [ "$count" -gt 1 ]; then
+  echo "⚠️  Found $count code-signing identities named '$IDENTITY':"
+  printf '%s\n' "$hashes" | sed 's/^/      /'
+  cat <<EOF
+Duplicates are harmless — cargo-codesign.sh signs by a single deterministic hash — but you
+can remove the extras in Keychain Access (delete all but one "Helix Dev" certificate) to
+keep things tidy. Signing will keep working either way.
+EOF
+  exit 0
+fi
+
+if [ "$count" -eq 1 ]; then
+  echo "✅ Code-signing identity '$IDENTITY' exists. Nothing to do."
+  echo "   (It may show as untrusted/Gatekeeper-unverified — that's expected and fine for"
+  echo "    local dev signing, which only needs a stable signature, not Gatekeeper trust.)"
   exit 0
 fi
 
