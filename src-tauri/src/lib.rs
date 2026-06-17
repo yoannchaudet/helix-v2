@@ -265,7 +265,9 @@ pub fn run() {
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_secs(3));
                 if let Some(win) = handle.get_webview_window("main") {
-                    if !win.is_visible().unwrap_or(true) {
+                    // Default to *not* visible on error so we err toward showing the
+                    // window rather than leaving it stuck hidden.
+                    if !win.is_visible().unwrap_or(false) {
                         let _ = win.show();
                     }
                 }

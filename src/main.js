@@ -406,5 +406,6 @@ window.addEventListener("DOMContentLoaded", () => {
   // wait on requestAnimationFrame: a hidden macOS WKWebView never paints, so its
   // rAF callbacks would never fire and the window would stay hidden forever. The
   // dark window backgroundColor already covers the brief gap until first paint.
-  invoke("show_main_window");
+  // The Rust safety-net (see lib.rs) reveals the window if this call ever fails.
+  invoke("show_main_window").catch(() => {});
 });
