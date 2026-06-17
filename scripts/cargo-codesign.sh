@@ -44,7 +44,7 @@ resolve_identity_hash() {
   security find-identity -p codesigning 2>/dev/null \
     | grep -F "\"$IDENTITY\"" \
     | grep -oE '[0-9A-F]{40}' \
-    | sort -u \
+    | LC_ALL=C sort -u \
     | head -n1
 }
 

@@ -23,7 +23,7 @@ IDENTITY="${HELIX_DEV_SIGN_IDENTITY:-Helix Dev}"
 # checked `-v` here, this script would wrongly report the identity as missing and prompt
 # you to create another one — which is exactly how duplicate "Helix Dev" certs accumulate.
 hashes="$(security find-identity -p codesigning 2>/dev/null \
-  | grep -F "\"$IDENTITY\"" | grep -oE '[0-9A-F]{40}' | sort -u || true)"
+  | grep -F "\"$IDENTITY\"" | grep -oE '[0-9A-F]{40}' | LC_ALL=C sort -u || true)"
 count="$(printf '%s' "$hashes" | grep -c . || true)"
 
 if [ "$count" -gt 1 ]; then
