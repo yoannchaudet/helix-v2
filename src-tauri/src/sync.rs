@@ -104,7 +104,8 @@ pub fn store_notifications(
 
     // Reconcile: drop notifications no longer returned upstream, then prune repos that
     // ended up with no notifications. Notifications are deleted first to respect the
-    // repos foreign key.
+    // repos foreign key. The inbox mirrors GitHub's unread feed, so a row absent from the
+    // latest fetch was cleared/read/done elsewhere and is removed.
     let removed = tx.execute(
         "DELETE FROM notifications
          WHERE thread_id NOT IN (SELECT thread_id FROM present_threads)",
@@ -286,6 +287,29 @@ pub fn store_resolved_subject(
 /// must be re-evaluated rather than trusting the stale `resolved_at` cache.
 pub fn reset_resolution(conn: &Connection) -> rusqlite::Result<usize> {
     conn.execute("UPDATE notifications SET resolved_at = NULL", [])
+}
+
+/* ------------------------------- Mutations -------------------------------- */
+
+/// Remove the given threads **locally** (for the threads whose network `DELETE` succeeded),
+/// then prune any repo left without notifications so the sidebar doesn't keep an empty
+/// entry. Returns the number of notification rows deleted.
+pub fn mark_done_local(conn: &mut Connection, thread_ids: &[String]) -> rusqlite::Result<usize> {
+    let tx = conn.transaction()?;
+    let mut removed = 0;
+    for id in thread_ids {
+        removed += tx.execute(
+            "DELETE FROM notifications WHERE thread_id = ?1",
+            params![id],
+        )?;
+    }
+    tx.execute(
+        "DELETE FROM repos
+         WHERE id NOT IN (SELECT DISTINCT repo_id FROM notifications)",
+        [],
+    )?;
+    tx.commit()?;
+    Ok(removed)
 }
 
 /* --------------------------------- Inbox ---------------------------------- */
@@ -656,6 +680,30 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state.as_deref(), Some("closed"));
+    }
+
+    #[test]
+    fn mark_done_local_removes_rows_and_prunes_empty_repos() {
+        let mut conn = mem_conn();
+        store_notifications(
+            &mut conn,
+            &[
+                thread("1", 100, "octo/repo-a", "One", true),
+                thread("2", 100, "octo/repo-a", "Two", true),
+                thread("3", 200, "octo/repo-b", "Three", true),
+            ],
+        )
+        .unwrap();
+
+        // Done on thread 3 (the only one in repo-b) removes it and prunes the repo.
+        assert_eq!(mark_done_local(&mut conn, &["3".to_string()]).unwrap(), 1);
+        assert_eq!(count(&conn).unwrap(), 2);
+        assert_eq!(repo_full_name(&conn, 200).unwrap(), None);
+        // repo-a survives because thread 1 and 2 remain.
+        assert_eq!(
+            repo_full_name(&conn, 100).unwrap().as_deref(),
+            Some("octo/repo-a")
+        );
     }
 
     #[test]

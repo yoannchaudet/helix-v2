@@ -323,6 +323,136 @@ fn list_inbox(state: State<'_, AppState>) -> Result<Vec<sync::RepoGroup>, String
     sync::list_by_repo(&conn).map_err(|e| e.to_string())
 }
 
+/// A single thread that failed to mutate, surfaced to the UI so partial failures are
+/// reported without aborting the rest of the batch.
+#[derive(Clone, Serialize)]
+struct FailedThread {
+    thread_id: String,
+    error: String,
+}
+
+/// Outcome of a mark-read / mark-done batch: how many threads succeeded, which failed, and
+/// the post-mutation rate-limit count.
+#[derive(Clone, Serialize)]
+struct MutationResult {
+    ok: usize,
+    failed: Vec<FailedThread>,
+    rate_remaining: Option<i64>,
+}
+
+/// A boxed future returned by a thread mutation call (e.g. done), so `mutate_threads` can
+/// be generic over the GitHub mutation endpoints.
+type ThreadMutationFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<github::RateLimit, String>> + Send>>;
+
+/// A thread-mutation entry point: takes a client, token, and thread id and returns the
+/// boxed future above. Implemented by a thin wrapper around `github::mark_thread_done`.
+type ThreadMutation = fn(reqwest::Client, String, String) -> ThreadMutationFuture;
+
+/// Run a notification-thread mutation across `thread_ids` with bounded concurrency,
+/// applying `apply_local` only to the threads whose network call succeeded.
+///
+/// The DB lock is never held across network I/O (mirrors `resolve_pending_subjects`): the
+/// API calls run first, then a single locked pass records the local change, the most
+/// conservative rate snapshot, and any per-thread failures. The frontend updates its view
+/// optimistically and reloads from SQLite afterwards, so the local pass is authoritative.
+async fn mutate_threads<F>(
+    state: State<'_, AppState>,
+    thread_ids: Vec<String>,
+    call: ThreadMutation,
+    apply_local: F,
+) -> Result<MutationResult, String>
+where
+    F: FnOnce(&mut rusqlite::Connection, &[String]) -> rusqlite::Result<usize>,
+{
+    if thread_ids.is_empty() {
+        return Ok(MutationResult {
+            ok: 0,
+            failed: Vec::new(),
+            rate_remaining: None,
+        });
+    }
+
+    let token = auth::read_token()?
+        .ok_or_else(|| "Not connected — add a GitHub token first.".to_string())?;
+
+    const POOL: usize = 8;
+    let client = reqwest::Client::new();
+    let mut succeeded: Vec<String> = Vec::new();
+    let mut failed: Vec<FailedThread> = Vec::new();
+    // Lowest `remaining` seen across the batch — the truest "after these calls" quota.
+    let mut rate: Option<github::RateLimit> = None;
+
+    for batch in thread_ids.chunks(POOL) {
+        let mut handles = Vec::with_capacity(batch.len());
+        for id in batch {
+            let client = client.clone();
+            let token = token.clone();
+            let id = id.clone();
+            handles.push(tauri::async_runtime::spawn(async move {
+                let res = call(client, token, id.clone()).await;
+                (id, res)
+            }));
+        }
+        for h in handles {
+            let Ok((id, res)) = h.await else { continue };
+            match res {
+                Ok(r) => {
+                    if let Some(remaining) = r.remaining {
+                        if rate
+                            .as_ref()
+                            .and_then(|x| x.remaining)
+                            .is_none_or(|cur| remaining < cur)
+                        {
+                            rate = Some(r.clone());
+                        }
+                    }
+                    succeeded.push(id);
+                }
+                Err(error) => failed.push(FailedThread {
+                    thread_id: id,
+                    error,
+                }),
+            }
+        }
+    }
+
+    let mut guard = state.db.0.lock().map_err(|e| e.to_string())?;
+    let conn: &mut rusqlite::Connection = &mut guard;
+    if !succeeded.is_empty() {
+        apply_local(conn, &succeeded).map_err(|e| e.to_string())?;
+    }
+    if let Some(rate) = &rate {
+        let _ = sync::record_rate(conn, rate);
+    }
+
+    Ok(MutationResult {
+        ok: succeeded.len(),
+        failed,
+        rate_remaining: rate.and_then(|r| r.remaining),
+    })
+}
+
+/// Mark one or more notification threads as **done** on GitHub and locally.
+///
+/// Done threads are removed from the inbox entirely. Per-thread failures are reported
+/// without aborting the batch.
+#[tauri::command]
+async fn mark_threads_done(
+    thread_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<MutationResult, String> {
+    mutate_threads(
+        state,
+        thread_ids,
+        |client, token, id| {
+            Box::pin(async move { github::mark_thread_done(&client, &token, &id).await })
+        },
+        sync::mark_done_local,
+    )
+    .await
+}
+
 /// Reveal the main window. The window starts hidden (see `tauri.conf.json`) so the
 /// frontend can paint its shell before we show it, avoiding a white flash on launch.
 /// Driven from Rust because Tauri v2's `withGlobalTauri` does not expose the `window`
@@ -480,6 +610,7 @@ pub fn run() {
             sync_now,
             sync_status,
             list_inbox,
+            mark_threads_done,
             show_main_window,
             reveal_in_finder
         ])
