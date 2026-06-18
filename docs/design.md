@@ -227,7 +227,7 @@ subject URL), resolve the subject and keep it as a cleanup candidate when:
 A vibrant **sidebar + content** layout that fills the window edge-to-edge (no centered
 column, no marketing hero):
 - **Sidebar** (`NSVisualEffect` *Sidebar* vibrancy via the `window-vibrancy` crate):
-  cross-cutting smart filters (**Unread**, **Mentions**, **Team mentions**, **Review
+  cross-cutting smart filters (**All**, **Mentions**, **Team mentions**, **Review
   requests**, **Assigned**) with live counts, a **Repositories** list of selectable
   sources, and a **Settings** entry (`⌘,`) pinned to the bottom. Selection is single-active
   (a smart filter *or* a repository), Mail-style.

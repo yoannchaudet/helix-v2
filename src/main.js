@@ -398,11 +398,11 @@ function notificationRow(n) {
  * and re-rendered locally as the source changes. */
 
 let inboxGroups = [];
-let activeSource = { kind: "filter", id: "unread" };
+let activeSource = { kind: "filter", id: "all" };
 
 /** Smart filters: predicate over a notification + the human label for the toolbar. */
 const FILTERS = {
-  unread: { label: "Unread", match: (n) => n.unread },
+  all: { label: "All", match: () => true },
   mention: { label: "Mentions", match: (n) => n.reason === "mention" },
   team_mention: {
     label: "Team mentions",
@@ -442,7 +442,7 @@ function filteredGroups() {
     const group = inboxGroups.find((g) => g.repo_id === activeSource.id);
     return group ? [group] : [];
   }
-  const match = (FILTERS[activeSource.id] ?? FILTERS.unread).match;
+  const match = (FILTERS[activeSource.id] ?? FILTERS.all).match;
   return inboxGroups
     .map((g) => ({ ...g, notifications: g.notifications.filter(match) }))
     .filter((g) => g.notifications.length);
@@ -454,7 +454,7 @@ function activeTitle() {
     const group = inboxGroups.find((g) => g.repo_id === activeSource.id);
     return group ? group.full_name : "Repository";
   }
-  return (FILTERS[activeSource.id] ?? FILTERS.unread).label;
+  return (FILTERS[activeSource.id] ?? FILTERS.all).label;
 }
 
 function emptyInbox() {
@@ -485,7 +485,7 @@ function renderInbox() {
 function renderSidebar() {
   const all = inboxGroups.flatMap((g) => g.notifications);
   const counts = {
-    unread: all.filter(FILTERS.unread.match).length,
+    all: all.length,
     mention: all.filter(FILTERS.mention.match).length,
     team_mention: all.filter(FILTERS.team_mention.match).length,
     review_requested: all.filter(FILTERS.review_requested.match).length,

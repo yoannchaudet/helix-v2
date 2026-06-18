@@ -17,12 +17,12 @@
         <nav class="sources" aria-label="Views">
           <ul class="source-list" id="filter-list">
             <li>
-              <button type="button" class="source source--active" data-filter="unread">
+              <button type="button" class="source source--active" data-filter="all">
                 <span class="source-icon" aria-hidden="true">
                   <svg viewBox="0 0 16 16" width="15" height="15"><circle cx="8" cy="8" r="5.25" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M5.5 8l1.6 1.7L10.6 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
                 </span>
-                <span class="source-label">Unread</span>
-                <span class="source-count" data-count="unread"></span>
+                <span class="source-label">All</span>
+                <span class="source-count" data-count="all"></span>
               </button>
             </li>
             <li>
@@ -95,7 +95,7 @@
       <!-- ============================ Notifications ============================ -->
       <section id="view-notifications" class="pane">
         <header class="toolbar" data-tauri-drag-region>
-          <h1 class="toolbar-title" id="view-title">Unread</h1>
+          <h1 class="toolbar-title" id="view-title">All</h1>
           <div class="toolbar-actions">
             <span class="sync-status">
               <span class="status-dot status-dot--pending js-sync-dot"></span>
