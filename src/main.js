@@ -697,6 +697,9 @@ function visibleNotifications() {
 function reportMutation(result, verb) {
   const failed = result.failed ?? [];
   if (failed.length) {
+    // Cancel any pending "clear" timer from an earlier success so it can't wipe this
+    // error message out from under the user.
+    clearTimeout(syncProgressTimer);
     setSyncProgress(
       `${result.ok} ${verb}, ${failed.length} failed: ${failed[0].error}`,
       "error",
@@ -727,6 +730,8 @@ async function markDone(threadIds) {
     const result = await invoke("mark_threads_done", { threadIds: ids });
     reportMutation(result, "marked done");
   } catch (err) {
+    // Cancel any pending "clear" timer so it can't wipe this error out moments later.
+    clearTimeout(syncProgressTimer);
     setSyncProgress(String(err), "error");
   }
   await loadSyncStatus();
@@ -793,6 +798,9 @@ function openContextMenu(x, y, items) {
   menu.style.top = `${Math.max(8, top)}px`;
   openMenu = menu;
   document.addEventListener("keydown", onMenuKeydown, true);
+  // Move focus into the menu so keyboard users can Tab/arrow through it (the trigger,
+  // e.g. the ••• button, otherwise keeps focus and Tab never reaches the popover).
+  menu.querySelector(".context-menu-item:not(:disabled)")?.focus();
 }
 
 /** Right-click a notification row → mark that thread as done. */
@@ -1024,7 +1032,7 @@ window.addEventListener("DOMContentLoaded", () => {
   $("#open-settings").addEventListener("click", () => showSettings(true));
   $("#settings-back").addEventListener("click", () => showSettings(false));
 
-  // Notification actions: right-click a row for read/done; ••• for the visible set.
+  // Notification actions: right-click a row to mark done; ••• for the visible set.
   $("#inbox").addEventListener("contextmenu", onInboxContextMenu);
   $("#bulk-actions-btn").addEventListener("click", (e) => {
     e.stopPropagation();

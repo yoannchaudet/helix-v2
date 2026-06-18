@@ -331,8 +331,8 @@ struct FailedThread {
     error: String,
 }
 
-/// Outcome of a mark-read / mark-done batch: how many threads succeeded, which failed, and
-/// the post-mutation rate-limit count.
+/// Outcome of a mark-as-done batch: how many threads succeeded, which failed, and the
+/// post-mutation rate-limit count.
 #[derive(Clone, Serialize)]
 struct MutationResult {
     ok: usize,
@@ -384,18 +384,31 @@ where
     let mut rate: Option<github::RateLimit> = None;
 
     for batch in thread_ids.chunks(POOL) {
+        // Keep each thread id alongside its task handle so a join failure (panic/cancel)
+        // can still be reported as a failure for that specific thread rather than silently
+        // dropped (which would skew the ok/failed counts shown to the user).
         let mut handles = Vec::with_capacity(batch.len());
         for id in batch {
             let client = client.clone();
             let token = token.clone();
             let id = id.clone();
-            handles.push(tauri::async_runtime::spawn(async move {
-                let res = call(client, token, id.clone()).await;
-                (id, res)
-            }));
+            let task_id = id.clone();
+            let handle = tauri::async_runtime::spawn(async move {
+                call(client, token, task_id).await
+            });
+            handles.push((id, handle));
         }
-        for h in handles {
-            let Ok((id, res)) = h.await else { continue };
+        for (id, handle) in handles {
+            let res = match handle.await {
+                Ok(res) => res,
+                Err(join_err) => {
+                    failed.push(FailedThread {
+                        thread_id: id,
+                        error: format!("task failed: {join_err}"),
+                    });
+                    continue;
+                }
+            };
             match res {
                 Ok(r) => {
                     if let Some(remaining) = r.remaining {
