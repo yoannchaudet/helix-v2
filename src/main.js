@@ -403,7 +403,6 @@ let activeSource = { kind: "filter", id: "unread" };
 /** Smart filters: predicate over a notification + the human label for the toolbar. */
 const FILTERS = {
   unread: { label: "Unread", match: (n) => n.unread },
-  all: { label: "All notifications", match: () => true },
   mention: { label: "Mentions", match: (n) => n.reason === "mention" },
   review_requested: {
     label: "Review requests",
@@ -482,7 +481,6 @@ function renderSidebar() {
   const all = inboxGroups.flatMap((g) => g.notifications);
   const counts = {
     unread: all.filter(FILTERS.unread.match).length,
-    all: all.length,
     mention: all.filter(FILTERS.mention.match).length,
     review_requested: all.filter(FILTERS.review_requested.match).length,
   };
