@@ -56,7 +56,7 @@ async function loadStorage() {
         <span class="srow-value">
           <span class="dbpath" id="db-path" role="button" tabindex="0"
           title="Copy database path" aria-label="Copy database path">${escapeHtml(status.path)}</span>
-          <span class="srow-flash" id="db-copy-flash">Copied</span>
+          <span class="srow-flash" id="db-copy-flash" role="status" aria-live="polite">Copied</span>
           <button type="button" class="icon-btn" id="reveal-db" title="Reveal in Finder" aria-label="Reveal in Finder">
             <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M1.75 5.25V4c0-.7.55-1.25 1.25-1.25h2.8c.33 0 .65.13.88.37l.99.96H13c.7 0 1.25.55 1.25 1.25v6c0 .7-.55 1.25-1.25 1.25H3c-.7 0-1.25-.55-1.25-1.25z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
           </button>
@@ -111,14 +111,21 @@ async function loadStorage() {
 
 function renderSignedIn(login, name) {
   authenticated = true;
+  // Treat a missing or placeholder login as "no avatar": fetching
+  // github.com/(unknown).png would 404 and the fallback letter would be "(".
+  const hasLogin = Boolean(login) && login !== "(unknown)";
   const safeLogin = escapeHtml(login);
   const hasName = Boolean(name);
-  const primary = hasName ? escapeHtml(name) : `@${safeLogin}`;
-  const secondary = hasName ? `<span class="account-login">@${safeLogin}</span>` : "";
+  const primary = hasName ? escapeHtml(name) : hasLogin ? `@${safeLogin}` : "Signed in";
+  const secondary =
+    hasName && hasLogin ? `<span class="account-login">@${safeLogin}</span>` : "";
+  const avatar = hasLogin
+    ? `<img class="avatar" id="account-avatar" alt=""
+        src="https://github.com/${encodeURIComponent(login)}.png?size=96" />`
+    : `<span class="avatar avatar--fallback" aria-hidden="true">?</span>`;
   $("#account-body").innerHTML = `
     <div class="srow srow--account">
-      <img class="avatar" id="account-avatar" alt=""
-        src="https://github.com/${encodeURIComponent(login)}.png?size=96" />
+      ${avatar}
       <div class="account-meta">
         <span class="account-name">${primary}</span>
         ${secondary}
@@ -128,13 +135,15 @@ function renderSignedIn(login, name) {
 
   // Graceful fallback to an initial-letter chip if the avatar image can't load.
   const img = $("#account-avatar");
-  img.addEventListener("error", () => {
-    const fallback = document.createElement("span");
-    fallback.className = "avatar avatar--fallback";
-    fallback.setAttribute("aria-hidden", "true");
-    fallback.textContent = login ? login.charAt(0) : "?";
-    img.replaceWith(fallback);
-  });
+  if (img) {
+    img.addEventListener("error", () => {
+      const fallback = document.createElement("span");
+      fallback.className = "avatar avatar--fallback";
+      fallback.setAttribute("aria-hidden", "true");
+      fallback.textContent = login.charAt(0);
+      img.replaceWith(fallback);
+    });
+  }
   $("#sign-out").addEventListener("click", signOut);
 }
 
@@ -547,6 +556,10 @@ async function loadInbox() {
 /** Debounce timer for the polling-interval stepper (typed values settle before save). */
 let settingsDebounce;
 
+/** Monotonic token so only the latest save_settings response updates the UI (rapid
+ * toggles/edits can otherwise let a slow, stale response overwrite newer state). */
+let settingsApplySeq = 0;
+
 async function loadSettings() {
   try {
     const s = await invoke("get_settings");
@@ -584,13 +597,18 @@ async function applySettings() {
   }
   clearSettingsError();
 
+  const seq = ++settingsApplySeq;
   try {
     const s = await invoke("save_settings", { pollIntervalS, dependabotOnly });
+    // Ignore a stale response superseded by a newer apply, so it can't clobber the
+    // current UI state or show an outdated flash.
+    if (seq !== settingsApplySeq) return;
     // Reflect the toggle (the backend echoes the stored value) without clobbering the
     // number field while the user may still be typing in it.
     $("#dependabot-only").checked = s.dependabot_only;
     flash($("#settings-flash"), "Saved");
   } catch (err) {
+    if (seq !== settingsApplySeq) return;
     setSettingsError(String(err));
   }
 }

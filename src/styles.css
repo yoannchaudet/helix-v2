@@ -609,7 +609,8 @@ code {
 .srow-label {
   font-size: 0.95rem;
   font-weight: 500;
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 /* Right-aligned value/control cluster. */
