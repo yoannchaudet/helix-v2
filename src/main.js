@@ -408,15 +408,14 @@ function subjectBadge(type) {
   return `<span class="badge ${cls}">${escapeHtml(label)}</span>`;
 }
 
-/** Map a resolved subject state to a display pill. Simple labels — Open / Closed / Merged
- *  (issue `completed`/`not_planned` both read as Closed). Returns "" for unresolved or
- *  non-PR/Issue subjects, so no pill is shown. */
+/** Map a resolved subject state to a display pill. `subject_state` is only ever
+ *  `open` / `closed` / `merged` (the backend folds a merged PR into `merged`; issue
+ *  `state_reason` like completed/not_planned lives in a separate column and isn't shown).
+ *  Returns "" for unresolved or non-PR/Issue subjects, so no pill is shown. */
 function stateBadge(state) {
   const map = {
     open: ["Open", "state--open"],
     closed: ["Closed", "state--closed"],
-    completed: ["Closed", "state--closed"],
-    not_planned: ["Closed", "state--closed"],
     merged: ["Merged", "state--merged"],
   };
   const entry = map[state];

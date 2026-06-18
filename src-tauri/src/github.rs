@@ -166,8 +166,11 @@ pub struct ResolveResult {
 
 /// Resolve a notification's subject (PR/Issue) by fetching `subject.url`.
 ///
-/// A 404 means the subject is gone upstream (deleted/inaccessible); we return an empty
-/// [`ResolvedSubject`] so the caller can mark it resolved and stop retrying. Other
+/// A 404 means the subject is currently unreadable (deleted, or private without the right
+/// token scope); we return an empty [`ResolvedSubject`] and the caller still stamps
+/// `resolved_at`, so it won't be re-fetched on every sync. It isn't permanently skipped,
+/// though: `sync::subjects_needing_resolution` retries rows that still have no state about
+/// once an hour, so access granted later (e.g. a broader token) eventually resolves. Other
 /// non-success statuses are surfaced as errors and left unresolved for the next sync. The
 /// response's rate-limit headers are captured in every non-error case.
 pub async fn resolve_subject(
