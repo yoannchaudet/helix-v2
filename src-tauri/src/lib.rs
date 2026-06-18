@@ -341,13 +341,29 @@ struct MutationResult {
 }
 
 /// A boxed future returned by a thread mutation call (e.g. done), so `mutate_threads` can
-/// be generic over the GitHub mutation endpoints.
-type ThreadMutationFuture =
-    std::pin::Pin<Box<dyn std::future::Future<Output = Result<github::RateLimit, String>> + Send>>;
+/// be generic over the GitHub mutation endpoints. Both the success and failure variants
+/// carry a rate-limit snapshot so quota can be folded in either case.
+type ThreadMutationFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<github::RateLimit, github::MutationError>> + Send>,
+>;
 
 /// A thread-mutation entry point: takes a client, token, and thread id and returns the
 /// boxed future above. Implemented by a thin wrapper around `github::mark_thread_done`.
 type ThreadMutation = fn(reqwest::Client, String, String) -> ThreadMutationFuture;
+
+/// Fold a rate-limit snapshot into `current`, keeping the lowest `remaining` seen — the
+/// truest "after these calls" quota across a batch of mutation responses.
+fn fold_rate(current: &mut Option<github::RateLimit>, r: github::RateLimit) {
+    if let Some(remaining) = r.remaining {
+        if current
+            .as_ref()
+            .and_then(|x| x.remaining)
+            .is_none_or(|cur| remaining < cur)
+        {
+            *current = Some(r);
+        }
+    }
+}
 
 /// Run a notification-thread mutation across `thread_ids` with bounded concurrency,
 /// applying `apply_local` only to the threads whose network call succeeded.
@@ -421,21 +437,17 @@ where
             };
             match res {
                 Ok(r) => {
-                    if let Some(remaining) = r.remaining {
-                        if rate
-                            .as_ref()
-                            .and_then(|x| x.remaining)
-                            .is_none_or(|cur| remaining < cur)
-                        {
-                            rate = Some(r.clone());
-                        }
-                    }
+                    fold_rate(&mut rate, r);
                     succeeded.push(id);
                 }
-                Err(error) => failed.push(FailedThread {
-                    thread_id: id,
-                    error,
-                }),
+                Err(err) => {
+                    // A failed request still consumes quota, so fold its rate snapshot too.
+                    fold_rate(&mut rate, err.rate);
+                    failed.push(FailedThread {
+                        thread_id: id,
+                        error: err.message,
+                    });
+                }
             }
         }
     }
