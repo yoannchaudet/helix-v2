@@ -12,17 +12,20 @@ const STATES = ["pending", "success", "error"];
 /** True while a sync is in flight; gates stale sync:progress events. */
 let syncing = false;
 
-/** Apply a color-coded state (green/yellow/red) to a status dot + label. */
-function setStatus(dotId, labelId, state, text) {
-  const dot = $(dotId);
-  const label = $(labelId);
-  for (const s of STATES) {
-    dot.classList.remove(`status-dot--${s}`);
-    label.classList.remove(`status-label--${s}`);
-  }
-  dot.classList.add(`status-dot--${state}`);
-  label.classList.add(`status-label--${state}`);
-  label.textContent = text;
+/** Timer that clears the transient post-sync "Stored N" progress message. */
+let syncProgressTimer;
+
+/** Briefly show a transient confirmation element (e.g. "Saved", "Copied"), then fade it
+ * out. Reuses the `.srow-flash` styling. */
+function flash(el, text) {
+  if (!el) return;
+  if (text != null) el.textContent = text;
+  el.classList.remove("srow-flash--error");
+  el.classList.add("srow-flash--show");
+  clearTimeout(el._flashTimer);
+  el._flashTimer = setTimeout(() => {
+    el.classList.remove("srow-flash--show");
+  }, 1800);
 }
 
 function escapeHtml(value) {
@@ -42,48 +45,86 @@ function escapeHtml(value) {
 /* ----------------------------- Local storage ----------------------------- */
 
 async function loadStorage() {
-  setStatus("#status-dot", "#status-label", "pending", "Bootstrapping…");
   try {
     const status = await invoke("db_status");
-    setStatus("#status-dot", "#status-label", "success", "Ready");
     const tables = status.tables.length
       ? status.tables.map((t) => `<li><code>${escapeHtml(t)}</code></li>`).join("")
       : "<li><em>no tables</em></li>";
     $("#storage-body").innerHTML = `
-      <dl class="kv">
-        <dt>Database</dt>
-        <dd><code>${escapeHtml(status.path)}</code></dd>
-        <dt>Schema version</dt>
-        <dd>v${escapeHtml(status.schema_version)}</dd>
-        <dt>Tables</dt>
-        <dd><ul class="tables">${tables}</ul></dd>
-      </dl>`;
+      <div class="srow">
+        <span class="srow-label">Database</span>
+        <span class="srow-value">
+          <span class="dbpath" id="db-path" title="Click to copy">${escapeHtml(status.path)}</span>
+          <span class="srow-flash" id="db-copy-flash">Copied</span>
+          <button type="button" class="icon-btn" id="reveal-db" title="Reveal in Finder" aria-label="Reveal in Finder">
+            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M1.75 5.25V4c0-.7.55-1.25 1.25-1.25h2.8c.33 0 .65.13.88.37l.99.96H13c.7 0 1.25.55 1.25 1.25v6c0 .7-.55 1.25-1.25 1.25H3c-.7 0-1.25-.55-1.25-1.25z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+          </button>
+        </span>
+      </div>
+      <div class="srow">
+        <span class="srow-label">Schema version</span>
+        <span class="srow-value">v${escapeHtml(status.schema_version)}</span>
+      </div>
+      <div class="srow">
+        <span class="srow-label">Tables</span>
+        <span class="srow-value"><ul class="tables">${tables}</ul></span>
+      </div>`;
+
+    const path = status.path;
+    $("#reveal-db").addEventListener("click", () => {
+      invoke("reveal_in_finder", { path }).catch((err) => console.error(err));
+    });
+    $("#db-path").addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(path);
+        flash($("#db-copy-flash"));
+      } catch (err) {
+        console.error(err);
+      }
+    });
   } catch (err) {
-    setStatus("#status-dot", "#status-label", "error", "Error");
     $("#storage-body").innerHTML = `
-      <p class="error-text">Could not open the local database.</p>
-      <pre class="error-detail">${escapeHtml(err)}</pre>`;
+      <div class="srow">
+        <p class="error-text">Could not open the local database.</p>
+      </div>
+      <div class="srow">
+        <pre class="error-detail">${escapeHtml(err)}</pre>
+      </div>`;
   }
 }
 
 /* -------------------------------- Account -------------------------------- */
 
-function renderSignedIn(login) {
+function renderSignedIn(login, name) {
   authenticated = true;
-  setStatus("#auth-dot", "#auth-label", "success", "Signed in");
+  const safeLogin = escapeHtml(login);
+  const hasName = Boolean(name);
+  const primary = hasName ? escapeHtml(name) : `@${safeLogin}`;
+  const secondary = hasName ? `<span class="account-login">@${safeLogin}</span>` : "";
   $("#account-body").innerHTML = `
-    <div class="account-row">
-      <div class="account-id">
-        Signed in as <strong>@${escapeHtml(login)}</strong>
+    <div class="srow srow--account">
+      <img class="avatar" id="account-avatar" alt=""
+        src="https://github.com/${encodeURIComponent(login)}.png?size=96" />
+      <div class="account-meta">
+        <span class="account-name">${primary}</span>
+        ${secondary}
       </div>
       <button type="button" class="btn" id="sign-out">Sign out</button>
     </div>`;
+
+  // Graceful fallback to an initial-letter chip if the avatar image can't load.
+  const img = $("#account-avatar");
+  img.addEventListener("error", () => {
+    const fallback = document.createElement("span");
+    fallback.className = "avatar avatar--fallback";
+    fallback.textContent = login ? login.charAt(0) : "?";
+    img.replaceWith(fallback);
+  });
   $("#sign-out").addEventListener("click", signOut);
 }
 
 function renderSignedOut(message) {
   authenticated = false;
-  setStatus("#auth-dot", "#auth-label", "pending", "Not connected");
   $("#account-body").innerHTML = `
     <form id="signin-form" class="form">
       <div class="field">
@@ -112,13 +153,12 @@ async function signIn(event) {
   const msg = $("#signin-msg");
 
   btn.disabled = true;
-  setStatus("#auth-dot", "#auth-label", "pending", "Verifying…");
   msg.className = "form-msg";
   msg.textContent = "Verifying with GitHub…";
 
   try {
     const user = await invoke("sign_in", { token });
-    renderSignedIn(user.login);
+    renderSignedIn(user.login, user.name);
     await loadSettings(); // refresh cached login display
     await loadSyncStatus();
   } catch (err) {
@@ -137,7 +177,6 @@ async function signOut() {
 }
 
 async function loadAccount() {
-  setStatus("#auth-dot", "#auth-label", "pending", "Checking…");
   try {
     const status = await invoke("auth_status");
     if (status.authenticated && status.login) {
@@ -148,8 +187,8 @@ async function loadAccount() {
       renderSignedOut();
     }
   } catch (err) {
-    setStatus("#auth-dot", "#auth-label", "error", "Error");
-    $("#account-body").innerHTML = `<pre class="error-detail">${escapeHtml(err)}</pre>`;
+    $("#account-body").innerHTML =
+      `<div class="srow"><pre class="error-detail">${escapeHtml(err)}</pre></div>`;
   }
 }
 
@@ -166,13 +205,10 @@ function renderSyncStats(status) {
     status.rate_remaining === null || status.rate_remaining === undefined
       ? "—"
       : status.rate_remaining;
-  $("#sync-stats").innerHTML = `
-    <dt>Last sync</dt>
-    <dd>${escapeHtml(fmtTimestamp(status.last_sync_at))}</dd>
-    <dt>Stored notifications</dt>
-    <dd>${escapeHtml(status.notification_count)}</dd>
-    <dt>API rate remaining</dt>
-    <dd>${escapeHtml(rate)}</dd>`;
+  const lastEl = $("#last-synced");
+  if (lastEl) lastEl.textContent = fmtTimestamp(status.last_sync_at);
+  const rateEl = $("#rate-remaining");
+  if (rateEl) rateEl.textContent = rate;
 
   if (status.last_status === "error" && status.last_error) {
     setSyncStatus("error", "Error");
@@ -224,6 +260,7 @@ async function loadSyncStatus() {
 async function syncNow() {
   setSyncBusy(true);
   syncing = true;
+  clearTimeout(syncProgressTimer);
   setSyncStatus("pending", "Syncing…");
   setSyncProgress("Starting…");
 
@@ -236,6 +273,10 @@ async function syncNow() {
       `Stored ${result.count} notification${result.count === 1 ? "" : "s"}.`,
       "success",
     );
+    // Transient: the durable record is the "Last synced" row, so clear the inline
+    // "Stored N" message shortly after it appears.
+    clearTimeout(syncProgressTimer);
+    syncProgressTimer = setTimeout(() => setSyncProgress(""), 2600);
     await loadSyncStatus();
     await loadInbox();
   } catch (err) {
@@ -487,58 +528,55 @@ async function loadInbox() {
 }
 
 /* -------------------------------- Settings ------------------------------- */
+
+/** Debounce timer for the polling-interval stepper (typed values settle before save). */
+let settingsDebounce;
+
 async function loadSettings() {
-  setStatus("#settings-dot", "#settings-label", "pending", "Loading…");
   try {
     const s = await invoke("get_settings");
     $("#poll-interval").value = s.poll_interval_s;
     $("#dependabot-only").checked = s.dependabot_only;
-    setStatus("#settings-dot", "#settings-label", "success", "Saved");
-    $("#settings-msg").textContent = "";
+    clearSettingsError();
   } catch (err) {
-    setStatus("#settings-dot", "#settings-label", "error", "Error");
-    $("#settings-msg").className = "form-msg form-msg--error";
-    $("#settings-msg").textContent = String(err);
+    setSettingsError(String(err));
   }
 }
 
-async function saveSettings(event) {
-  event.preventDefault();
-  const btn = $("#settings-save");
-  const msg = $("#settings-msg");
+/** Persist a validation/save error in the polling-interval row (stays until corrected). */
+function setSettingsError(text) {
+  const el = $("#settings-flash");
+  el.textContent = text;
+  clearTimeout(el._flashTimer);
+  el.classList.add("srow-flash--error", "srow-flash--show");
+}
+
+function clearSettingsError() {
+  const el = $("#settings-flash");
+  el.classList.remove("srow-flash--error", "srow-flash--show");
+}
+
+/** Auto-apply: read the current controls, validate, persist, and confirm transiently. */
+async function applySettings() {
   const pollIntervalS = Number.parseInt($("#poll-interval").value, 10);
   const dependabotOnly = $("#dependabot-only").checked;
 
   // Guard against NaN / out-of-range input before invoking the backend (NaN would
   // serialize to null over IPC and surface a confusing error).
   if (!Number.isInteger(pollIntervalS) || pollIntervalS < 10) {
-    setStatus("#settings-dot", "#settings-label", "error", "Error");
-    msg.className = "form-msg form-msg--error";
-    msg.textContent = "Enter a whole number of seconds (10 or more).";
+    setSettingsError("Min 10s");
     return;
   }
-
-  btn.disabled = true;
-  setStatus("#settings-dot", "#settings-label", "pending", "Saving…");
-  msg.className = "form-msg";
-  msg.textContent = "Saving…";
+  clearSettingsError();
 
   try {
-    const s = await invoke("save_settings", {
-      pollIntervalS,
-      dependabotOnly,
-    });
-    $("#poll-interval").value = s.poll_interval_s;
+    const s = await invoke("save_settings", { pollIntervalS, dependabotOnly });
+    // Reflect the toggle (the backend echoes the stored value) without clobbering the
+    // number field while the user may still be typing in it.
     $("#dependabot-only").checked = s.dependabot_only;
-    setStatus("#settings-dot", "#settings-label", "success", "Saved");
-    msg.className = "form-msg form-msg--success";
-    msg.textContent = "Settings saved.";
+    flash($("#settings-flash"), "Saved");
   } catch (err) {
-    setStatus("#settings-dot", "#settings-label", "error", "Error");
-    msg.className = "form-msg form-msg--error";
-    msg.textContent = String(err);
-  } finally {
-    btn.disabled = false;
+    setSettingsError(String(err));
   }
 }
 
@@ -636,7 +674,17 @@ function initSidebarResize() {
 /* --------------------------------- Init ---------------------------------- */
 
 window.addEventListener("DOMContentLoaded", () => {
-  $("#settings-form").addEventListener("submit", saveSettings);
+  // Settings auto-apply: the toggle persists immediately; the stepper debounces typed
+  // values and persists right away on a committed change (blur / arrow click).
+  $("#dependabot-only").addEventListener("change", applySettings);
+  $("#poll-interval").addEventListener("input", () => {
+    clearTimeout(settingsDebounce);
+    settingsDebounce = setTimeout(applySettings, 450);
+  });
+  $("#poll-interval").addEventListener("change", () => {
+    clearTimeout(settingsDebounce);
+    applySettings();
+  });
   for (const btn of $$(".js-sync-btn")) btn.addEventListener("click", syncNow);
 
   initSidebarResize();

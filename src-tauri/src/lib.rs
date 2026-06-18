@@ -238,6 +238,17 @@ fn show_main_window(window: tauri::WebviewWindow) {
     let _ = window.set_focus();
 }
 
+/// Reveal a path in Finder, selecting it in its containing folder (macOS `open -R`).
+/// Args are passed directly to `open` (no shell), so the path needs no escaping.
+#[tauri::command]
+fn reveal_in_finder(path: String) -> Result<(), String> {
+    std::process::Command::new("open")
+        .args(["-R", &path])
+        .status()
+        .map_err(|e| format!("failed to reveal in Finder: {e}"))?;
+    Ok(())
+}
+
 /// Persist the current window size (logical px) to SQLite so the next launch restores
 /// it. Skips minimized/maximized/fullscreen states and redundant writes (the cache in
 /// `AppState`) so a resize drag doesn't hammer the database.
@@ -357,7 +368,8 @@ pub fn run() {
             sync_now,
             sync_status,
             list_inbox,
-            show_main_window
+            show_main_window,
+            reveal_in_finder
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
