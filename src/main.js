@@ -780,6 +780,22 @@ function onMenuKeydown(e) {
   if (e.key === "Escape") {
     e.preventDefault();
     closeMenu();
+    return;
+  }
+  if (!openMenu) return;
+  // ARIA menu semantics: arrow keys (and Home/End) move between enabled items.
+  const items = [...openMenu.querySelectorAll(".context-menu-item:not(:disabled)")];
+  if (!items.length) return;
+  const idx = items.indexOf(document.activeElement);
+  let next = null;
+  if (e.key === "ArrowDown") next = items[idx < 0 ? 0 : (idx + 1) % items.length];
+  else if (e.key === "ArrowUp")
+    next = items[idx <= 0 ? items.length - 1 : idx - 1];
+  else if (e.key === "Home") next = items[0];
+  else if (e.key === "End") next = items[items.length - 1];
+  if (next) {
+    e.preventDefault();
+    next.focus();
   }
 }
 
@@ -839,9 +855,10 @@ function openContextMenu(x, y, items) {
 
 /** Right-click a notification row → mark that thread as done. */
 function onInboxContextMenu(e) {
-  // `e.target` can be a Text node (right-clicking directly on text), which has no
-  // `closest`; optional chaining keeps this from throwing.
-  const row = e.target.closest?.(".n-row");
+  // `e.target` can be a Text node (right-clicking directly on text); normalize to an
+  // Element so `closest` still finds the row wherever inside it the user clicked.
+  const el = e.target instanceof Element ? e.target : e.target?.parentElement;
+  const row = el?.closest(".n-row");
   if (!row) return;
   e.preventDefault();
   const threadId = row.dataset.threadId;
