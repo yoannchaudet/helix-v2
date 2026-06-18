@@ -54,7 +54,8 @@ async function loadStorage() {
       <div class="srow">
         <span class="srow-label">Database</span>
         <span class="srow-value">
-          <span class="dbpath" id="db-path" title="Click to copy">${escapeHtml(status.path)}</span>
+          <span class="dbpath" id="db-path" role="button" tabindex="0"
+          title="Copy database path" aria-label="Copy database path">${escapeHtml(status.path)}</span>
           <span class="srow-flash" id="db-copy-flash">Copied</span>
           <button type="button" class="icon-btn" id="reveal-db" title="Reveal in Finder" aria-label="Reveal in Finder">
             <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M1.75 5.25V4c0-.7.55-1.25 1.25-1.25h2.8c.33 0 .65.13.88.37l.99.96H13c.7 0 1.25.55 1.25 1.25v6c0 .7-.55 1.25-1.25 1.25H3c-.7 0-1.25-.55-1.25-1.25z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
@@ -74,12 +75,21 @@ async function loadStorage() {
     $("#reveal-db").addEventListener("click", () => {
       invoke("reveal_in_finder", { path }).catch((err) => console.error(err));
     });
-    $("#db-path").addEventListener("click", async () => {
+    const copyPath = async () => {
       try {
         await navigator.clipboard.writeText(path);
         flash($("#db-copy-flash"));
       } catch (err) {
         console.error(err);
+      }
+    };
+    const dbPathEl = $("#db-path");
+    dbPathEl.addEventListener("click", copyPath);
+    // Keyboard support for the button-role path (Enter / Space activate copy).
+    dbPathEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        copyPath();
       }
     });
   } catch (err) {

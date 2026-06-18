@@ -184,10 +184,11 @@
               </span>
             </div>
             <div class="srow">
-              <span class="srow-label">Clean up Dependabot notifications</span>
+              <span class="srow-label" id="dependabot-label">Clean up Dependabot notifications</span>
               <span class="srow-value">
                 <label class="switch">
-                  <input id="dependabot-only" name="dependabot-only" type="checkbox" />
+                  <input id="dependabot-only" name="dependabot-only" type="checkbox"
+                    aria-labelledby="dependabot-label" />
                   <span class="switch-track" aria-hidden="true"></span>
                 </label>
               </span>

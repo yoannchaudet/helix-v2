@@ -719,6 +719,13 @@ code {
   color: var(--text);
 }
 
+.dbpath:focus-visible {
+  color: var(--text);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
 /* Small button variant for inline row controls (e.g. Sync now). */
 .btn--sm {
   display: inline-flex;
@@ -733,16 +740,17 @@ code {
   justify-content: flex-end;
 }
 
-/* Transient confirmation (e.g. "Saved", "Stored N", "Copied") that fades out. */
+/* Transient confirmation (e.g. "Saved", "Stored N", "Copied") that fades in. Hidden
+ * via `display: none` so it never reserves layout space (no permanent gap in the row). */
 .srow-flash {
+  display: none;
   font-size: 0.85rem;
   color: var(--success);
-  opacity: 0;
-  transition: opacity 0.25s ease;
 }
 
 .srow-flash--show {
-  opacity: 1;
+  display: inline-block;
+  animation: flash-in 0.22s ease;
 }
 
 .srow-flash--error {
@@ -977,5 +985,14 @@ input[type="text"]:focus {
   }
   50% {
     opacity: 0.45;
+  }
+}
+
+@keyframes flash-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
   }
 }

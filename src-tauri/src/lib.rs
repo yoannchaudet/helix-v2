@@ -240,13 +240,24 @@ fn show_main_window(window: tauri::WebviewWindow) {
 
 /// Reveal a path in Finder, selecting it in its containing folder (macOS `open -R`).
 /// Args are passed directly to `open` (no shell), so the path needs no escaping.
+#[cfg(target_os = "macos")]
 #[tauri::command]
 fn reveal_in_finder(path: String) -> Result<(), String> {
-    std::process::Command::new("open")
+    let status = std::process::Command::new("open")
         .args(["-R", &path])
         .status()
         .map_err(|e| format!("failed to reveal in Finder: {e}"))?;
+    if !status.success() {
+        return Err(format!("could not reveal the path in Finder ({status})"));
+    }
     Ok(())
+}
+
+/// Non-macOS fallback: Reveal in Finder is a macOS-only affordance.
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn reveal_in_finder(_path: String) -> Result<(), String> {
+    Err("Reveal in Finder is only supported on macOS.".to_string())
 }
 
 /// Persist the current window size (logical px) to SQLite so the next launch restores
