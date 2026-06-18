@@ -293,8 +293,12 @@ async function syncNow() {
     // Stop accepting progress updates before writing the final message, so a
     // late-delivered sync:progress event can't overwrite it.
     syncing = false;
+    const removed = result.removed ?? 0;
+    const storedMsg = `Stored ${result.count} notification${result.count === 1 ? "" : "s"}`;
     setSyncProgress(
-      `Stored ${result.count} notification${result.count === 1 ? "" : "s"}.`,
+      removed > 0
+        ? `${storedMsg}, removed ${removed}.`
+        : `${storedMsg}.`,
       "success",
     );
     // Transient: the durable record is the "Last synced" row, so clear the inline

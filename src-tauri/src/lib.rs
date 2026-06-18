@@ -150,6 +150,7 @@ fn save_settings(
 #[derive(Clone, Serialize)]
 struct SyncResult {
     count: usize,
+    removed: usize,
     rate_remaining: Option<i64>,
 }
 
@@ -187,16 +188,16 @@ async fn sync_now(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<S
 
     // Store the fetched threads and record success. A DB failure here must also be
     // recorded in sync_state so the UI reflects the real last outcome (not stale state).
-    let store_result = (|| -> Result<usize, String> {
+    let store_result = (|| -> Result<sync::StoreOutcome, String> {
         let mut guard = state.db.0.lock().map_err(|e| e.to_string())?;
         let conn: &mut rusqlite::Connection = &mut guard;
-        let n = sync::store_notifications(conn, &outcome.threads).map_err(|e| e.to_string())?;
+        let stored = sync::store_notifications(conn, &outcome.threads).map_err(|e| e.to_string())?;
         sync::record_success(conn, &outcome.rate).map_err(|e| e.to_string())?;
-        Ok(n)
+        Ok(stored)
     })();
 
-    let count = match store_result {
-        Ok(n) => n,
+    let stored = match store_result {
+        Ok(s) => s,
         Err(err) => {
             if let Ok(conn) = state.db.0.lock() {
                 let _ = sync::record_error(&conn, &err);
@@ -207,7 +208,8 @@ async fn sync_now(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<S
     };
 
     let result = SyncResult {
-        count,
+        count: stored.stored,
+        removed: stored.removed,
         rate_remaining: outcome.rate.remaining,
     };
     let _ = app.emit("sync:done", &result);
