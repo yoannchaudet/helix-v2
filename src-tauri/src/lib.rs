@@ -238,6 +238,34 @@ fn show_main_window(window: tauri::WebviewWindow) {
     let _ = window.set_focus();
 }
 
+/// Reveal a path in Finder, selecting it in its containing folder (macOS `open -R`).
+/// Args are passed directly to `open` (no shell), so the path needs no escaping.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn reveal_in_finder(path: String) -> Result<(), String> {
+    // `open` parses leading-dash arguments as flags even without a shell, so reject
+    // anything that isn't a plain, non-empty path to avoid option injection.
+    let path = path.trim();
+    if path.is_empty() || path.starts_with('-') {
+        return Err("invalid path to reveal".to_string());
+    }
+    let status = std::process::Command::new("open")
+        .args(["-R", path])
+        .status()
+        .map_err(|e| format!("failed to reveal in Finder: {e}"))?;
+    if !status.success() {
+        return Err(format!("could not reveal the path in Finder ({status})"));
+    }
+    Ok(())
+}
+
+/// Non-macOS fallback: Reveal in Finder is a macOS-only affordance.
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn reveal_in_finder(_path: String) -> Result<(), String> {
+    Err("Reveal in Finder is only supported on macOS.".to_string())
+}
+
 /// Persist the current window size (logical px) to SQLite so the next launch restores
 /// it. Skips minimized/maximized/fullscreen states and redundant writes (the cache in
 /// `AppState`) so a resize drag doesn't hammer the database.
@@ -357,7 +385,8 @@ pub fn run() {
             sync_now,
             sync_status,
             list_inbox,
-            show_main_window
+            show_main_window,
+            reveal_in_finder
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

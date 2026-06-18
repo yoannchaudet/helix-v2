@@ -127,96 +127,95 @@
 
         <div class="settings-scroll">
         <!-- Account / authentication -->
-        <section class="card" id="account-card" aria-live="polite">
-          <div class="card-head">
-            <span class="status-dot status-dot--pending" id="auth-dot"></span>
-            <h2>Account</h2>
-            <span class="status-label status-label--pending" id="auth-label">Checking…</span>
-          </div>
-
-          <div class="card-body" id="account-body">
-            <div class="loader">
-              <span class="spinner" aria-hidden="true"></span>
-              <span>Checking the Keychain…</span>
-            </div>
-          </div>
-        </section>
-
-        <!-- Notifications summary (sync status + stats, no list) -->
-        <section class="card" id="sync-card" aria-live="polite">
-          <div class="card-head">
-            <span class="status-dot status-dot--pending js-sync-dot"></span>
-            <h2>Notifications</h2>
-            <span class="status-label status-label--pending js-sync-label">Loading…</span>
-          </div>
-
-          <div class="card-body">
-            <div class="sync-actions">
-              <button type="button" class="btn btn--primary js-sync-btn">Sync now</button>
-              <span class="form-msg js-sync-progress"></span>
-            </div>
-            <dl class="kv" id="sync-stats"></dl>
-          </div>
-        </section>
-
-        <!-- Settings -->
-        <section class="card" id="settings-card">
-          <div class="card-head">
-            <span class="status-dot status-dot--pending" id="settings-dot"></span>
-            <h2>Settings</h2>
-            <span class="status-label status-label--pending" id="settings-label">Loading…</span>
-          </div>
-
-          <div class="card-body">
-            <form id="settings-form" class="form">
-              <div class="field">
-                <label for="poll-interval">Polling interval (seconds)</label>
-                <input
-                  id="poll-interval"
-                  name="poll-interval"
-                  type="number"
-                  min="10"
-                  step="5"
-                  inputmode="numeric"
-                />
-                <p class="hint">How often Helix syncs in the background. Minimum 10s.</p>
+        <section class="sgroup">
+          <h2 class="sgroup-label">Account</h2>
+          <div class="slist" id="account-body" aria-live="polite">
+            <div class="srow">
+              <div class="loader">
+                <span class="spinner" aria-hidden="true"></span>
+                <span>Checking the Keychain…</span>
               </div>
+            </div>
+          </div>
+        </section>
 
-              <div class="field field--row">
+        <!-- Notifications (sync freshness + rate, no list) -->
+        <section class="sgroup">
+          <h2 class="sgroup-label">Notifications</h2>
+          <div class="slist" aria-live="polite">
+            <div class="srow">
+              <span class="srow-label">Last synced</span>
+              <span class="srow-value">
+                <span class="form-msg js-sync-progress"></span>
+                <span id="last-synced">never</span>
+                <button type="button" class="btn btn--sm js-sync-btn" title="Sync now">
+                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M13.4 7a5.5 5.5 0 10-.5 3.4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M13.6 3.4v3.2h-3.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Sync now
+                </button>
+              </span>
+            </div>
+            <div class="srow">
+              <span class="srow-label">API rate remaining</span>
+              <span class="srow-value" id="rate-remaining">—</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- Syncing preferences (auto-applied) -->
+        <section class="sgroup">
+          <h2 class="sgroup-label">Syncing</h2>
+          <div class="slist">
+            <div class="srow">
+              <span class="srow-label">Polling interval</span>
+              <span class="srow-value">
+                <span class="srow-flash" id="settings-flash" aria-live="polite"></span>
+                <span class="stepper">
+                  <input
+                    id="poll-interval"
+                    name="poll-interval"
+                    type="number"
+                    min="10"
+                    step="5"
+                    inputmode="numeric"
+                    aria-label="Polling interval in seconds"
+                  />
+                  <span class="stepper-unit" aria-hidden="true">s</span>
+                </span>
+              </span>
+            </div>
+            <div class="srow">
+              <span class="srow-label" id="dependabot-label">Clean up Dependabot notifications</span>
+              <span class="srow-value">
                 <label class="switch">
-                  <input id="dependabot-only" name="dependabot-only" type="checkbox" />
+                  <input id="dependabot-only" name="dependabot-only" type="checkbox"
+                    aria-labelledby="dependabot-label" />
                   <span class="switch-track" aria-hidden="true"></span>
-                  <span>Cleanup: Dependabot only</span>
                 </label>
-              </div>
-
-              <div class="form-actions">
-                <button type="submit" class="btn btn--primary" id="settings-save">Save</button>
-                <span class="form-msg" id="settings-msg"></span>
-              </div>
-            </form>
+              </span>
+            </div>
           </div>
+          <p class="sgroup-note" id="settings-note">
+            Helix syncs in the background at this interval. Minimum 10 seconds. Changes
+            apply immediately.
+          </p>
         </section>
 
         <!-- Local storage -->
-        <section class="card" id="storage-card" aria-live="polite">
-          <div class="card-head">
-            <span class="status-dot status-dot--pending" id="status-dot"></span>
-            <h2>Local storage</h2>
-            <span class="status-label status-label--pending" id="status-label">Bootstrapping…</span>
-          </div>
-
-          <div class="card-body" id="storage-body">
-            <div class="loader">
-              <span class="spinner" aria-hidden="true"></span>
-              <span>Opening the database…</span>
+        <section class="sgroup">
+          <h2 class="sgroup-label">Local storage</h2>
+          <div class="slist" id="storage-body" aria-live="polite">
+            <div class="srow">
+              <div class="loader">
+                <span class="spinner" aria-hidden="true"></span>
+                <span>Opening the database…</span>
+              </div>
             </div>
           </div>
+          <p class="sgroup-note">
+            Your token is stored in the macOS Keychain — never written to disk in plain
+            text.
+          </p>
         </section>
-
-        <footer class="footnote">
-          Your token is stored in the macOS Keychain — never on disk in plain text.
-        </footer>
         </div>
       </section>
       </main>
