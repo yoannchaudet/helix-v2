@@ -103,6 +103,114 @@ pub struct Subject {
     pub subject_type: String,
 }
 
+/// Raw subject metadata as returned by the issue/PR REST endpoints (`subject.url`).
+/// Only the fields Helix needs are deserialized; everything else is ignored.
+#[derive(Debug, Deserialize)]
+struct SubjectResponse {
+    number: Option<i64>,
+    /// `open` | `closed`.
+    state: Option<String>,
+    /// Issues only: `completed` | `not_planned` | null.
+    state_reason: Option<String>,
+    /// Pull requests only: set once merged.
+    merged_at: Option<String>,
+    html_url: Option<String>,
+    user: Option<SubjectUser>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubjectUser {
+    login: String,
+}
+
+/// Resolved PR/Issue subject metadata used for the state pill (and the future
+/// cleanup filter). `state` is the **effective** label stored in `subject_state`:
+/// `merged` (when `merged_at` is set), otherwise the API `state` (`open`/`closed`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ResolvedSubject {
+    pub number: Option<i64>,
+    pub state: Option<String>,
+    pub state_reason: Option<String>,
+    pub merged_at: Option<String>,
+    pub html_url: Option<String>,
+    pub author: Option<String>,
+}
+
+impl From<SubjectResponse> for ResolvedSubject {
+    fn from(r: SubjectResponse) -> Self {
+        // A merged PR reports `state == "closed"`; surface it as the distinct `merged`
+        // label the UI colours differently.
+        let state = if r.merged_at.is_some() {
+            Some("merged".to_string())
+        } else {
+            r.state
+        };
+        ResolvedSubject {
+            number: r.number,
+            state,
+            state_reason: r.state_reason,
+            merged_at: r.merged_at,
+            html_url: r.html_url,
+            author: r.user.map(|u| u.login),
+        }
+    }
+}
+
+/// Outcome of resolving a single subject: the metadata plus the rate-limit snapshot read
+/// from that response's headers (so the caller can keep the displayed quota accurate after
+/// these extra calls — see `sync::record_rate`).
+pub struct ResolveResult {
+    pub subject: ResolvedSubject,
+    pub rate: RateLimit,
+}
+
+/// Resolve a notification's subject (PR/Issue) by fetching `subject.url`.
+///
+/// A 404 means the subject is currently unreadable (deleted, or private without the right
+/// token scope); we return an empty [`ResolvedSubject`] and the caller still stamps
+/// `resolved_at`, so it won't be re-fetched on every sync. It isn't permanently skipped,
+/// though: `sync::subjects_needing_resolution` retries rows that still have no state about
+/// once an hour, so access granted later (e.g. a broader token) eventually resolves. Other
+/// non-success statuses are surfaced as errors and left unresolved for the next sync. The
+/// response's rate-limit headers are captured in every non-error case.
+pub async fn resolve_subject(
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+) -> Result<ResolveResult, String> {
+    let resp = authed_get(client, url, token)
+        .send()
+        .await
+        .map_err(|e| format!("network error: {e}"))?;
+
+    let status = resp.status();
+    let mut rate = RateLimit::default();
+    rate.update_from(resp.headers());
+
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(ResolveResult {
+            subject: ResolvedSubject::default(),
+            rate,
+        });
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "GitHub returned {status} resolving subject: {}",
+            body.trim()
+        ));
+    }
+
+    let raw: SubjectResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("failed to parse subject: {e}"))?;
+    Ok(ResolveResult {
+        subject: raw.into(),
+        rate,
+    })
+}
+
 /// Rate-limit snapshot read from response headers.
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct RateLimit {
@@ -247,9 +355,7 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert(
             "link",
-            HeaderValue::from_static(
-                "<https://api.github.com/notifications?page=1>; rel=\"prev\"",
-            ),
+            HeaderValue::from_static("<https://api.github.com/notifications?page=1>; rel=\"prev\""),
         );
         assert_eq!(next_page_url(&h), None);
         assert_eq!(next_page_url(&HeaderMap::new()), None);
@@ -266,5 +372,53 @@ mod tests {
         assert_eq!(rate.remaining, Some(4998));
         assert_eq!(rate.reset, Some(1700000000));
         assert_eq!(rate.poll_interval, Some(60));
+    }
+
+    #[test]
+    fn resolves_open_issue() {
+        let body = r#"{
+            "number": 42,
+            "state": "open",
+            "state_reason": null,
+            "html_url": "https://github.com/o/r/issues/42",
+            "user": { "login": "octocat" }
+        }"#;
+        let raw: SubjectResponse = serde_json::from_str(body).unwrap();
+        let resolved: ResolvedSubject = raw.into();
+        assert_eq!(resolved.number, Some(42));
+        assert_eq!(resolved.state.as_deref(), Some("open"));
+        assert_eq!(resolved.state_reason, None);
+        assert_eq!(resolved.author.as_deref(), Some("octocat"));
+    }
+
+    #[test]
+    fn resolves_closed_not_planned_issue() {
+        let body = r#"{
+            "number": 7,
+            "state": "closed",
+            "state_reason": "not_planned",
+            "user": { "login": "hubot" }
+        }"#;
+        let resolved: ResolvedSubject = serde_json::from_str::<SubjectResponse>(body)
+            .unwrap()
+            .into();
+        assert_eq!(resolved.state.as_deref(), Some("closed"));
+        assert_eq!(resolved.state_reason.as_deref(), Some("not_planned"));
+    }
+
+    #[test]
+    fn merged_pr_reports_merged_state() {
+        // GitHub reports a merged PR as state "closed"; we surface the distinct "merged".
+        let body = r#"{
+            "number": 99,
+            "state": "closed",
+            "merged_at": "2026-01-02T03:04:05Z",
+            "user": { "login": "dev" }
+        }"#;
+        let resolved: ResolvedSubject = serde_json::from_str::<SubjectResponse>(body)
+            .unwrap()
+            .into();
+        assert_eq!(resolved.state.as_deref(), Some("merged"));
+        assert_eq!(resolved.merged_at.as_deref(), Some("2026-01-02T03:04:05Z"));
     }
 }

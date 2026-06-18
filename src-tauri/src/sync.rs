@@ -7,7 +7,7 @@
 use rusqlite::{params, Connection};
 use serde::Serialize;
 
-use crate::github::{NotificationThread, RateLimit};
+use crate::github::{NotificationThread, RateLimit, ResolvedSubject};
 
 /// Outcome of a store + reconcile pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,8 +22,8 @@ pub struct StoreOutcome {
 ///
 /// `threads` must be the full current set of unread notifications (GitHub only returns
 /// currently-unread threads). Existing rows are updated in place; the subject-resolution
-/// columns (`subject_state`, `resolved_at`, …) populated in M6 are intentionally left
-/// untouched.
+/// columns (`subject_state`, `resolved_at`, …) are intentionally left untouched here — they
+/// are populated separately by `store_resolved_subject` after subjects are resolved.
 ///
 /// Reconciliation (M5): any locally-stored notification absent from this fetch was cleared
 /// (marked done/read) upstream, so it is deleted — v1 keeps the inbox = currently-unread
@@ -138,6 +138,19 @@ pub fn record_success(conn: &Connection, rate: &RateLimit) -> rusqlite::Result<(
     Ok(())
 }
 
+/// Update only the rate-limit snapshot, without touching sync status/timestamp.
+///
+/// Used after background subject resolution makes its extra API calls, so the quota shown
+/// in the UI reflects the *total* requests this sync spent (list fetch + resolutions),
+/// rather than the optimistic snapshot taken before resolution ran.
+pub fn record_rate(conn: &Connection, rate: &RateLimit) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE sync_state SET rate_remaining = ?1, rate_reset_at = ?2 WHERE id = 1",
+        params![rate.remaining, rate.reset.map(|r| r.to_string())],
+    )?;
+    Ok(())
+}
+
 /// Record a failed sync (status + message); leaves the last successful data intact.
 pub fn record_error(conn: &Connection, message: &str) -> rusqlite::Result<()> {
     conn.execute(
@@ -193,6 +206,88 @@ pub fn count(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row("SELECT COUNT(*) FROM notifications", [], |r| r.get(0))
 }
 
+/* ----------------------------- Subject resolution ------------------------- */
+
+/// A notification whose PR/Issue subject metadata still needs resolving.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingSubject {
+    pub thread_id: String,
+    pub subject_url: String,
+}
+
+/// Find notifications whose PR/Issue subject should be resolved.
+///
+/// Smart caching — a row qualifies when it is a PullRequest/Issue with a `subject_url`
+/// AND any of:
+///   * never resolved (`resolved_at IS NULL`), or
+///   * changed upstream since last resolution (`updated_at > resolved_at`), or
+///   * still has no state and was last attempted over an hour ago — a bounded retry so
+///     subjects that couldn't be read before (e.g. private repos the token gained access
+///     to after a scope upgrade) eventually resolve, without re-fetching them every sync.
+///
+/// Successfully-resolved, unchanged rows are skipped so we don't spend an API call per
+/// subject on every sync.
+pub fn subjects_needing_resolution(conn: &Connection) -> rusqlite::Result<Vec<PendingSubject>> {
+    let mut stmt = conn.prepare(
+        "SELECT thread_id, subject_url
+         FROM notifications
+         WHERE subject_type IN ('PullRequest', 'Issue')
+           AND subject_url IS NOT NULL
+           AND (
+                 resolved_at IS NULL
+              OR updated_at > resolved_at
+              OR (subject_state IS NULL
+                  AND resolved_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1 hour'))
+           )",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(PendingSubject {
+            thread_id: r.get(0)?,
+            subject_url: r.get(1)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Persist resolved subject metadata and stamp `resolved_at` so smart caching can skip
+/// the row until its `updated_at` changes again.
+pub fn store_resolved_subject(
+    conn: &Connection,
+    thread_id: &str,
+    subject: &ResolvedSubject,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE notifications SET
+           subject_number       = ?2,
+           subject_state        = ?3,
+           subject_state_reason = ?4,
+           subject_merged_at    = ?5,
+           subject_author       = ?6,
+           subject_html_url     = ?7,
+           resolved_at          = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+         WHERE thread_id = ?1",
+        params![
+            thread_id,
+            subject.number,
+            subject.state,
+            subject.state_reason,
+            subject.merged_at,
+            subject.author,
+            subject.html_url,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Clear cached subject resolution so every PR/Issue is re-resolved on the next sync.
+///
+/// Called when credentials change (sign-in): a new token may have broader scope (e.g.
+/// gained `repo`, unlocking private-repo subjects that previously 404'd), so resolution
+/// must be re-evaluated rather than trusting the stale `resolved_at` cache.
+pub fn reset_resolution(conn: &Connection) -> rusqlite::Result<usize> {
+    conn.execute("UPDATE notifications SET resolved_at = NULL", [])
+}
+
 /* --------------------------------- Inbox ---------------------------------- */
 
 /// A single notification as shown in the by-repo inbox.
@@ -206,7 +301,8 @@ pub struct NotificationView {
     pub unread: bool,
     pub updated_at: String,
     pub thread_url: Option<String>,
-    /// Resolved subject metadata (populated by M6; may be null until then).
+    /// Resolved subject metadata (populated by background subject resolution; null until
+    /// the first resolution lands for this notification).
     pub subject_number: Option<i64>,
     pub subject_state: Option<String>,
     pub subject_html_url: Option<String>,
@@ -241,9 +337,9 @@ pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
 
     let rows = stmt.query_map([], |r| {
         Ok((
-            r.get::<_, i64>(0)?,            // repo id
-            r.get::<_, String>(1)?,         // full_name
-            r.get::<_, i64>(2)? != 0,       // private
+            r.get::<_, i64>(0)?,      // repo id
+            r.get::<_, String>(1)?,   // full_name
+            r.get::<_, i64>(2)? != 0, // private
             NotificationView {
                 thread_id: r.get(3)?,
                 subject_type: r.get(4)?,
@@ -298,11 +394,13 @@ pub fn repo_full_name(conn: &Connection, id: i64) -> rusqlite::Result<Option<Str
 mod tests {
     use super::*;
     use crate::db;
-    use crate::github::{MinimalRepo, NotificationThread, RepoOwner, Subject};
+    use crate::github::{MinimalRepo, NotificationThread, RepoOwner, ResolvedSubject, Subject};
 
     fn mem_conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        let mut version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let mut version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         let migrations = db::migrations();
         while (version as usize) < migrations.len() {
             conn.execute_batch(migrations[version as usize]).unwrap();
@@ -396,8 +494,11 @@ mod tests {
         let mut conn = mem_conn();
         store_notifications(&mut conn, &[thread("1", 100, "octo/alpha", "Title", true)]).unwrap();
         // The reason column is nullable; ensure a NULL value still lists cleanly.
-        conn.execute("UPDATE notifications SET reason = NULL WHERE thread_id = '1'", [])
-            .unwrap();
+        conn.execute(
+            "UPDATE notifications SET reason = NULL WHERE thread_id = '1'",
+            [],
+        )
+        .unwrap();
 
         let groups = list_by_repo(&conn).unwrap();
         assert_eq!(groups.len(), 1);
@@ -408,8 +509,11 @@ mod tests {
     #[test]
     fn upsert_is_idempotent_and_updates_mutable_fields() {
         let mut conn = mem_conn();
-        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "Old title", true)])
-            .unwrap();
+        store_notifications(
+            &mut conn,
+            &[thread("1", 100, "octo/repo-a", "Old title", true)],
+        )
+        .unwrap();
 
         // Re-store the same thread id with a changed title + read state.
         store_notifications(
@@ -443,7 +547,11 @@ mod tests {
         .unwrap();
 
         // A subsequent sync must not clobber the resolved columns.
-        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "Title v2", true)]).unwrap();
+        store_notifications(
+            &mut conn,
+            &[thread("1", 100, "octo/repo-a", "Title v2", true)],
+        )
+        .unwrap();
         let (state, resolved): (Option<String>, Option<String>) = conn
             .query_row(
                 "SELECT subject_state, resolved_at FROM notifications WHERE thread_id = '1'",
@@ -471,7 +579,8 @@ mod tests {
 
         // A later full sync only returns thread 1 (2 and 3 were cleared on github.com).
         let outcome =
-            store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One", true)]).unwrap();
+            store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One", true)])
+                .unwrap();
         assert_eq!(outcome.stored, 1);
         assert_eq!(outcome.removed, 2);
         assert_eq!(count(&conn).unwrap(), 1);
@@ -536,7 +645,8 @@ mod tests {
 
         // Next sync drops thread 2 but keeps thread 1 — its resolved column must persist.
         let outcome =
-            store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One", true)]).unwrap();
+            store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One", true)])
+                .unwrap();
         assert_eq!(outcome.removed, 1);
         let state: Option<String> = conn
             .query_row(
@@ -567,5 +677,212 @@ mod tests {
         let s = read_status(&conn).unwrap();
         assert_eq!(s.last_status.as_deref(), Some("error"));
         assert_eq!(s.last_error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn record_rate_updates_only_the_quota_snapshot() {
+        let conn = mem_conn();
+        record_success(
+            &conn,
+            &RateLimit {
+                remaining: Some(5000),
+                reset: Some(1700000000),
+                poll_interval: Some(60),
+            },
+        )
+        .unwrap();
+
+        // Resolution spent more quota: record only the rate, leaving status/timestamp.
+        record_rate(
+            &conn,
+            &RateLimit {
+                remaining: Some(4900),
+                reset: Some(1700000500),
+                poll_interval: None,
+            },
+        )
+        .unwrap();
+
+        let s = read_status(&conn).unwrap();
+        assert_eq!(s.rate_remaining, Some(4900));
+        assert_eq!(s.rate_reset_at.as_deref(), Some("1700000500"));
+        // Status and sync timestamp from record_success are untouched.
+        assert_eq!(s.last_status.as_deref(), Some("success"));
+        assert!(s.last_sync_at.is_some());
+    }
+
+    #[test]
+    fn needs_resolution_skips_resolved_unchanged_and_includes_changed() {
+        let mut conn = mem_conn();
+        store_notifications(
+            &mut conn,
+            &[
+                thread("1", 100, "octo/repo-a", "One", true),
+                thread("2", 100, "octo/repo-a", "Two", true),
+            ],
+        )
+        .unwrap();
+
+        // Both are unresolved PR/Issue subjects to start.
+        let pending = subjects_needing_resolution(&conn).unwrap();
+        assert_eq!(pending.len(), 2);
+
+        // Resolve thread 1 — its resolved_at is "now", later than its updated_at.
+        store_resolved_subject(
+            &conn,
+            "1",
+            &ResolvedSubject {
+                state: Some("closed".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let pending = subjects_needing_resolution(&conn).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].thread_id, "2");
+
+        // A later upstream change (updated_at moves past resolved_at) re-queues it.
+        conn.execute(
+            "UPDATE notifications SET updated_at = '2099-01-01T00:00:00Z' WHERE thread_id = '1'",
+            [],
+        )
+        .unwrap();
+        let pending = subjects_needing_resolution(&conn).unwrap();
+        let ids: Vec<&str> = pending.iter().map(|p| p.thread_id.as_str()).collect();
+        assert!(ids.contains(&"1"));
+        assert!(ids.contains(&"2"));
+
+        // Non PR/Issue subjects are never resolved.
+        conn.execute(
+            "UPDATE notifications SET subject_type = 'Release' WHERE thread_id = '2'",
+            [],
+        )
+        .unwrap();
+        let pending = subjects_needing_resolution(&conn).unwrap();
+        let ids: Vec<&str> = pending.iter().map(|p| p.thread_id.as_str()).collect();
+        assert!(!ids.contains(&"2"));
+    }
+
+    #[test]
+    fn needs_resolution_retries_unresolved_subjects_after_an_hour() {
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One", true)]).unwrap();
+
+        // Simulate a failed resolution (e.g. private repo 404 before a scope upgrade):
+        // resolved_at is stamped but no state was stored.
+        store_resolved_subject(&conn, "1", &ResolvedSubject::default()).unwrap();
+        // Just-attempted, still unresolved → not retried yet (avoids per-sync hammering).
+        assert!(subjects_needing_resolution(&conn).unwrap().is_empty());
+
+        // Backdate the attempt past the one-hour window → it becomes eligible again.
+        conn.execute(
+            "UPDATE notifications SET resolved_at = '2026-03-01T00:00:00Z' WHERE thread_id = '1'",
+            [],
+        )
+        .unwrap();
+        let pending = subjects_needing_resolution(&conn).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].thread_id, "1");
+
+        // A successfully-resolved (state set) old row is NOT retried.
+        store_resolved_subject(
+            &conn,
+            "1",
+            &ResolvedSubject {
+                state: Some("open".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE notifications SET resolved_at = '2026-03-01T00:00:00Z' WHERE thread_id = '1'",
+            [],
+        )
+        .unwrap();
+        assert!(subjects_needing_resolution(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reset_resolution_requeues_everything() {
+        let mut conn = mem_conn();
+        store_notifications(
+            &mut conn,
+            &[
+                thread("1", 100, "octo/repo-a", "One", true),
+                thread("2", 100, "octo/repo-a", "Two", true),
+            ],
+        )
+        .unwrap();
+        // Both resolved (one with state, one a prior failure) — neither would re-resolve.
+        store_resolved_subject(
+            &conn,
+            "1",
+            &ResolvedSubject {
+                state: Some("open".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        store_resolved_subject(&conn, "2", &ResolvedSubject::default()).unwrap();
+        assert!(subjects_needing_resolution(&conn).unwrap().is_empty());
+
+        // After a credential change, everything is eligible again.
+        assert_eq!(reset_resolution(&conn).unwrap(), 2);
+        assert_eq!(subjects_needing_resolution(&conn).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn store_resolved_subject_persists_fields_and_stamps_resolved_at() {
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "PR", true)]).unwrap();
+
+        store_resolved_subject(
+            &conn,
+            "1",
+            &ResolvedSubject {
+                number: Some(99),
+                state: Some("merged".to_string()),
+                state_reason: None,
+                merged_at: Some("2026-01-02T03:04:05Z".to_string()),
+                html_url: Some("https://github.com/octo/repo-a/pull/99".to_string()),
+                author: Some("dev".to_string()),
+            },
+        )
+        .unwrap();
+
+        let (number, state, merged_at, author, html_url, resolved_at): (
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT subject_number, subject_state, subject_merged_at, subject_author,
+                        subject_html_url, resolved_at
+                 FROM notifications WHERE thread_id = '1'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(number, Some(99));
+        assert_eq!(state.as_deref(), Some("merged"));
+        assert_eq!(merged_at.as_deref(), Some("2026-01-02T03:04:05Z"));
+        assert_eq!(author.as_deref(), Some("dev"));
+        assert_eq!(
+            html_url.as_deref(),
+            Some("https://github.com/octo/repo-a/pull/99")
+        );
+        assert!(resolved_at.is_some());
     }
 }

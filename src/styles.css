@@ -519,6 +519,11 @@ code,
   text-transform: capitalize;
 }
 
+/* State pill on its own line under the title (Open / Closed / Merged). */
+.n-state {
+  margin-top: 4px;
+}
+
 /* ================================ Settings ================================ */
 .settings-scroll {
   flex: 1;
@@ -1015,6 +1020,7 @@ input[type="text"]:focus {
 
 /* Subject state label */
 .state {
+  display: inline-block;
   font-size: 0.68rem;
   font-weight: 600;
   padding: 1px 6px;

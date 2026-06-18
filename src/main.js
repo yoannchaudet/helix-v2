@@ -380,6 +380,13 @@ function registerSyncEvents() {
     const { page, fetched } = event.payload ?? {};
     setSyncProgress(`Fetching page ${page}… (${fetched} so far)`);
   });
+  // Subject states (Open/Closed/Merged pills) resolve in the background after a sync;
+  // reload the inbox once they land so the pills appear without another sync, and refresh
+  // the sync stats so the rate-limit count reflects the extra resolution calls.
+  listen("subjects:resolved", () => {
+    loadInbox();
+    loadSyncStatus();
+  });
 }
 
 /* ------------------------------ Inbox view -------------------------------- */
@@ -401,16 +408,20 @@ function subjectBadge(type) {
   return `<span class="badge ${cls}">${escapeHtml(label)}</span>`;
 }
 
-function stateClass(state) {
-  return (
-    {
-      merged: "merged",
-      closed: "closed",
-      open: "open",
-      completed: "done",
-      not_planned: "muted",
-    }[state] ?? "muted"
-  );
+/** Map a resolved subject state to a display pill. `subject_state` is only ever
+ *  `open` / `closed` / `merged` (the backend folds a merged PR into `merged`; issue
+ *  `state_reason` like completed/not_planned lives in a separate column and isn't shown).
+ *  Returns "" for unresolved or non-PR/Issue subjects, so no pill is shown. */
+function stateBadge(state) {
+  const map = {
+    open: ["Open", "state--open"],
+    closed: ["Closed", "state--closed"],
+    merged: ["Merged", "state--merged"],
+  };
+  const entry = map[state];
+  if (!entry) return "";
+  const [label, cls] = entry;
+  return `<span class="state ${cls}">${label}</span>`;
 }
 
 function relTime(value) {
@@ -434,18 +445,16 @@ function notificationRow(n) {
     n.subject_number != null
       ? `<span class="n-number">#${escapeHtml(n.subject_number)}</span> `
       : "";
-  const state = n.subject_state
-    ? `<span class="state state--${stateClass(n.subject_state)}">${escapeHtml(
-        n.subject_state,
-      )}</span>`
-    : "";
+  const badge = stateBadge(n.subject_state);
+  const stateLine = badge ? `<div class="n-state">${badge}</div>` : "";
   const reason = escapeHtml(n.reason.replace(/_/g, " "));
   return `
     <li class="n-row ${n.unread ? "n-row--unread" : ""}">
       <span class="n-unread-dot"${n.unread ? ' role="img" title="Unread" aria-label="Unread"' : ' aria-hidden="true"'}></span>
       <span class="n-badge-slot">${subjectBadge(n.subject_type)}</span>
       <div class="n-main">
-        <div class="n-title">${number}${escapeHtml(n.subject_title)} ${state}</div>
+        <div class="n-title">${number}${escapeHtml(n.subject_title)}</div>
+        ${stateLine}
         <div class="n-meta">${reason} · ${escapeHtml(relTime(n.updated_at))}</div>
       </div>
     </li>`;
