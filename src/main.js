@@ -15,6 +15,15 @@ let syncing = false;
 /** Timer that clears the transient post-sync "Stored N" progress message. */
 let syncProgressTimer;
 
+/* ----------------------------- Poll state -------------------------------- */
+
+/** 1-second tick driving the automatic poll + the refresh-button clock sweep. */
+let pollTimer = null;
+/** Configured polling cadence (seconds); kept in sync with the saved setting. */
+let pollIntervalSeconds = 60;
+/** Seconds elapsed since the last sync; reset to 0 after every sync. */
+let pollElapsed = 0;
+
 /** Briefly show a transient confirmation element (e.g. "Saved", "Copied"), then fade it
  * out. Reuses the `.srow-flash` styling. Pass `kind = "error"` for a red message. */
 function flash(el, text, kind) {
@@ -111,6 +120,8 @@ async function loadStorage() {
 
 function renderSignedIn(login, name) {
   authenticated = true;
+  // Signed in → begin the automatic poll loop (idempotent; restarts the countdown).
+  startPolling();
   // Treat a missing or placeholder login as "no avatar": fetching
   // github.com/(unknown).png would 404 and the fallback letter would be "(".
   const hasLogin = Boolean(login) && login !== "(unknown)";
@@ -149,6 +160,8 @@ function renderSignedIn(login, name) {
 
 function renderSignedOut(message) {
   authenticated = false;
+  // Signed out → stop polling so we never hit the API without a token.
+  stopPolling();
   $("#account-body").innerHTML = `
     <form id="signin-form" class="form">
       <div class="field">
@@ -268,6 +281,8 @@ function setSyncProgress(text, kind = "") {
 
 function setSyncBusy(busy) {
   for (const btn of $$(".js-sync-btn")) btn.disabled = busy;
+  // The toolbar button turns the accent color while a sync is in flight (due state).
+  $("#sync-btn")?.classList.toggle("is-due", busy);
 }
 
 async function loadSyncStatus() {
@@ -314,7 +329,47 @@ async function syncNow() {
   } finally {
     syncing = false;
     setSyncBusy(false);
+    // Restart the countdown so the next automatic poll is measured from the most
+    // recent sync, whether it was triggered manually or by the poll loop.
+    resetPollCountdown();
   }
+}
+
+/* ------------------------------ Poll countdown ---------------------------- */
+
+/** Write the current fraction (0–1) into the refresh button's clock sweep. */
+function setPollProgress(frac) {
+  $("#sync-btn")?.style.setProperty("--poll-progress", String(frac));
+}
+
+function resetPollCountdown() {
+  pollElapsed = 0;
+  setPollProgress(0);
+}
+
+/** One-second tick: advance the sweep and fire an automatic sync when due. */
+function pollTick() {
+  // Hold the countdown while signed out or while a sync is already running.
+  if (!authenticated || syncing) return;
+  pollElapsed += 1;
+  const interval = Math.max(pollIntervalSeconds, 10);
+  setPollProgress(Math.min(pollElapsed / interval, 1));
+  if (pollElapsed >= interval) syncNow();
+}
+
+/** Begin (or restart) the automatic poll loop. Safe to call repeatedly. */
+function startPolling() {
+  stopPolling();
+  resetPollCountdown();
+  pollTimer = setInterval(pollTick, 1000);
+}
+
+function stopPolling() {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+  resetPollCountdown();
 }
 
 /** Live progress from the backend during a sync. */
@@ -387,7 +442,7 @@ function notificationRow(n) {
   const reason = escapeHtml(n.reason.replace(/_/g, " "));
   return `
     <li class="n-row ${n.unread ? "n-row--unread" : ""}">
-      <span class="n-unread-dot" aria-hidden="true"></span>
+      <span class="n-unread-dot"${n.unread ? ' role="img" title="Unread" aria-label="Unread"' : ' aria-hidden="true"'}></span>
       <span class="n-badge-slot">${subjectBadge(n.subject_type)}</span>
       <div class="n-main">
         <div class="n-title">${number}${escapeHtml(n.subject_title)} ${state}</div>
@@ -575,6 +630,7 @@ async function loadSettings() {
     const s = await invoke("get_settings");
     $("#poll-interval").value = s.poll_interval_s;
     $("#dependabot-only").checked = s.dependabot_only;
+    pollIntervalSeconds = s.poll_interval_s;
     clearSettingsError();
   } catch (err) {
     setSettingsError(String(err));
@@ -617,6 +673,12 @@ async function applySettings() {
     // number field while the user may still be typing in it.
     $("#dependabot-only").checked = s.dependabot_only;
     flash($("#settings-flash"), "Saved");
+    // Adopt the new cadence immediately and restart the countdown so the change is
+    // reflected without waiting out the previous interval.
+    if (s.poll_interval_s !== pollIntervalSeconds) {
+      pollIntervalSeconds = s.poll_interval_s;
+      if (authenticated) startPolling();
+    }
   } catch (err) {
     if (seq !== settingsApplySeq) return;
     setSettingsError(String(err));

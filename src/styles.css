@@ -124,6 +124,18 @@ code,
   flex: none;
 }
 
+/* Native macOS source-list header: subtle, uppercase, muted. */
+.sidebar-title {
+  margin: 0 0 8px;
+  padding: 0 12px;
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+  user-select: none;
+}
+
 .sources {
   flex: 1;
   min-height: 0;
@@ -340,6 +352,43 @@ code,
 .icon-btn:disabled {
   opacity: 0.5;
   cursor: progress;
+}
+
+/* The toolbar refresh button doubles as a poll countdown: a conic "clock" sweep
+   fills clockwise as the next automatic sync approaches, and the whole button
+   switches to the accent color while a sync is in flight (the "due" state). */
+#sync-btn {
+  position: relative;
+  overflow: hidden;
+}
+
+#sync-btn .poll-sweep {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: conic-gradient(
+    var(--accent) calc(var(--poll-progress, 0) * 360deg),
+    transparent 0
+  );
+  opacity: 0.2;
+  pointer-events: none;
+}
+
+#sync-btn > svg {
+  position: relative;
+  z-index: 1;
+}
+
+#sync-btn.is-due {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  /* The button is disabled (opacity 0.5) while syncing; keep the accent crisp. */
+  opacity: 1;
+}
+
+#sync-btn.is-due .poll-sweep {
+  opacity: 0;
 }
 
 /* ================================= Inbox ================================== */

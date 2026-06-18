@@ -14,6 +14,8 @@
       <aside class="sidebar">
         <div class="sidebar-traffic" data-tauri-drag-region aria-hidden="true"></div>
 
+        <p class="sidebar-title">Helix</p>
+
         <nav class="sources" aria-label="Views">
           <ul class="source-list" id="filter-list">
             <li>
@@ -102,7 +104,8 @@
               <span class="status-label status-label--pending js-sync-label">Loading…</span>
             </span>
             <span class="form-msg js-sync-progress"></span>
-            <button type="button" class="icon-btn js-sync-btn" title="Sync now" aria-label="Sync now">
+            <button type="button" class="icon-btn js-sync-btn" id="sync-btn" title="Sync now" aria-label="Sync now">
+              <span class="poll-sweep" aria-hidden="true"></span>
               <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M13.4 7a5.5 5.5 0 10-.5 3.4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M13.6 3.4v3.2h-3.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </button>
           </div>
