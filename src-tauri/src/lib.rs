@@ -243,8 +243,14 @@ fn show_main_window(window: tauri::WebviewWindow) {
 #[cfg(target_os = "macos")]
 #[tauri::command]
 fn reveal_in_finder(path: String) -> Result<(), String> {
+    // `open` parses leading-dash arguments as flags even without a shell, so reject
+    // anything that isn't a plain, non-empty path to avoid option injection.
+    let path = path.trim();
+    if path.is_empty() || path.starts_with('-') {
+        return Err("invalid path to reveal".to_string());
+    }
     let status = std::process::Command::new("open")
-        .args(["-R", &path])
+        .args(["-R", path])
         .status()
         .map_err(|e| format!("failed to reveal in Finder: {e}"))?;
     if !status.success() {

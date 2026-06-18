@@ -16,11 +16,11 @@ let syncing = false;
 let syncProgressTimer;
 
 /** Briefly show a transient confirmation element (e.g. "Saved", "Copied"), then fade it
- * out. Reuses the `.srow-flash` styling. */
-function flash(el, text) {
+ * out. Reuses the `.srow-flash` styling. Pass `kind = "error"` for a red message. */
+function flash(el, text, kind) {
   if (!el) return;
   if (text != null) el.textContent = text;
-  el.classList.remove("srow-flash--error");
+  el.classList.toggle("srow-flash--error", kind === "error");
   el.classList.add("srow-flash--show");
   clearTimeout(el._flashTimer);
   el._flashTimer = setTimeout(() => {
@@ -73,14 +73,18 @@ async function loadStorage() {
 
     const path = status.path;
     $("#reveal-db").addEventListener("click", () => {
-      invoke("reveal_in_finder", { path }).catch((err) => console.error(err));
+      invoke("reveal_in_finder", { path }).catch((err) => {
+        console.error(err);
+        flash($("#db-copy-flash"), "Reveal failed", "error");
+      });
     });
     const copyPath = async () => {
       try {
         await navigator.clipboard.writeText(path);
-        flash($("#db-copy-flash"));
+        flash($("#db-copy-flash"), "Copied");
       } catch (err) {
         console.error(err);
+        flash($("#db-copy-flash"), "Copy failed", "error");
       }
     };
     const dbPathEl = $("#db-path");
@@ -127,6 +131,7 @@ function renderSignedIn(login, name) {
   img.addEventListener("error", () => {
     const fallback = document.createElement("span");
     fallback.className = "avatar avatar--fallback";
+    fallback.setAttribute("aria-hidden", "true");
     fallback.textContent = login ? login.charAt(0) : "?";
     img.replaceWith(fallback);
   });
