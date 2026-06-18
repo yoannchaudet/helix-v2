@@ -442,7 +442,7 @@ function notificationRow(n) {
   const reason = escapeHtml(n.reason.replace(/_/g, " "));
   return `
     <li class="n-row ${n.unread ? "n-row--unread" : ""}">
-      <span class="n-unread-dot"${n.unread ? ' title="Unread"' : ' aria-hidden="true"'}></span>
+      <span class="n-unread-dot"${n.unread ? ' role="img" title="Unread" aria-label="Unread"' : ' aria-hidden="true"'}></span>
       <span class="n-badge-slot">${subjectBadge(n.subject_type)}</span>
       <div class="n-main">
         <div class="n-title">${number}${escapeHtml(n.subject_title)} ${state}</div>

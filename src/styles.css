@@ -383,6 +383,8 @@ code,
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
+  /* The button is disabled (opacity 0.5) while syncing; keep the accent crisp. */
+  opacity: 1;
 }
 
 #sync-btn.is-due .poll-sweep {
