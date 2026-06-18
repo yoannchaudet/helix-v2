@@ -336,6 +336,9 @@ const SUBJECT_BADGES = {
   Release: ["Release", "badge--other"],
   Commit: ["Commit", "badge--other"],
   AgentSessionThread: ["Copilot", "badge--other"],
+  CheckSuite: ["Check", "badge--other"],
+  RepositoryVulnerabilityAlert: ["Alert", "badge--alert"],
+  RepositoryInvitation: ["Invite", "badge--other"],
 };
 
 function subjectBadge(type) {
@@ -398,18 +401,21 @@ function notificationRow(n) {
  * and re-rendered locally as the source changes. */
 
 let inboxGroups = [];
-let activeSource = { kind: "filter", id: "unread" };
+let activeSource = { kind: "filter", id: "all" };
 
 /** Smart filters: predicate over a notification + the human label for the toolbar. */
 const FILTERS = {
-  unread: { label: "Unread", match: (n) => n.unread },
-  all: { label: "All notifications", match: () => true },
+  all: { label: "All", match: () => true },
   mention: { label: "Mentions", match: (n) => n.reason === "mention" },
+  team_mention: {
+    label: "Team mentions",
+    match: (n) => n.reason === "team_mention",
+  },
   review_requested: {
     label: "Review requests",
     match: (n) => n.reason === "review_requested",
   },
-  done: { label: "Done", match: (n) => !n.unread },
+  assign: { label: "Assigned", match: (n) => n.reason === "assign" },
 };
 
 function repoHeader(group) {
@@ -439,7 +445,7 @@ function filteredGroups() {
     const group = inboxGroups.find((g) => g.repo_id === activeSource.id);
     return group ? [group] : [];
   }
-  const match = (FILTERS[activeSource.id] ?? FILTERS.unread).match;
+  const match = (FILTERS[activeSource.id] ?? FILTERS.all).match;
   return inboxGroups
     .map((g) => ({ ...g, notifications: g.notifications.filter(match) }))
     .filter((g) => g.notifications.length);
@@ -451,7 +457,7 @@ function activeTitle() {
     const group = inboxGroups.find((g) => g.repo_id === activeSource.id);
     return group ? group.full_name : "Repository";
   }
-  return (FILTERS[activeSource.id] ?? FILTERS.unread).label;
+  return (FILTERS[activeSource.id] ?? FILTERS.all).label;
 }
 
 function emptyInbox() {
@@ -482,11 +488,11 @@ function renderInbox() {
 function renderSidebar() {
   const all = inboxGroups.flatMap((g) => g.notifications);
   const counts = {
-    unread: all.filter(FILTERS.unread.match).length,
     all: all.length,
     mention: all.filter(FILTERS.mention.match).length,
+    team_mention: all.filter(FILTERS.team_mention.match).length,
     review_requested: all.filter(FILTERS.review_requested.match).length,
-    done: all.filter(FILTERS.done.match).length,
+    assign: all.filter(FILTERS.assign.match).length,
   };
   for (const el of $$(".source-count")) {
     const key = el.dataset.count;
