@@ -336,6 +336,9 @@ const SUBJECT_BADGES = {
   Release: ["Release", "badge--other"],
   Commit: ["Commit", "badge--other"],
   AgentSessionThread: ["Copilot", "badge--other"],
+  CheckSuite: ["Check", "badge--other"],
+  RepositoryVulnerabilityAlert: ["Alert", "badge--alert"],
+  RepositoryInvitation: ["Invite", "badge--other"],
 };
 
 function subjectBadge(type) {

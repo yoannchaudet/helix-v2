@@ -940,6 +940,12 @@ input[type="text"]:focus {
   border-color: rgba(140, 149, 159, 0.28);
 }
 
+.badge--alert {
+  color: var(--error);
+  background: rgba(207, 34, 46, 0.12);
+  border-color: rgba(207, 34, 46, 0.3);
+}
+
 .badge--lock {
   color: var(--pending);
   background: rgba(154, 103, 0, 0.1);
