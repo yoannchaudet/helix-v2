@@ -165,6 +165,9 @@ function renderSignedIn(login, name) {
 
 function renderSignedOut(message) {
   authenticated = false;
+  // A new session must re-prove a successful sync before the status pill goes green
+  // again, so a stale persisted "success" doesn't show as green after re-signing in.
+  syncedThisSession = false;
   // Signed out → stop polling so we never hit the API without a token.
   stopPolling();
   $("#account-body").innerHTML = `
@@ -714,6 +717,11 @@ function reportMutation(result, verb) {
 /** Mark the given thread ids as done: optimistically remove them, call the backend, then
  *  reconcile from SQLite. */
 async function markDone(threadIds) {
+  if (!authenticated) {
+    clearTimeout(syncProgressTimer);
+    setSyncProgress("Connect a GitHub token to mark notifications as done.", "error");
+    return;
+  }
   const ids = [...new Set(threadIds)];
   if (!ids.length) return;
   // Optimistic: drop the rows locally so they disappear immediately.
