@@ -404,10 +404,15 @@ let activeSource = { kind: "filter", id: "unread" };
 const FILTERS = {
   unread: { label: "Unread", match: (n) => n.unread },
   mention: { label: "Mentions", match: (n) => n.reason === "mention" },
+  team_mention: {
+    label: "Team mentions",
+    match: (n) => n.reason === "team_mention",
+  },
   review_requested: {
     label: "Review requests",
     match: (n) => n.reason === "review_requested",
   },
+  assign: { label: "Assigned", match: (n) => n.reason === "assign" },
 };
 
 function repoHeader(group) {
@@ -482,7 +487,9 @@ function renderSidebar() {
   const counts = {
     unread: all.filter(FILTERS.unread.match).length,
     mention: all.filter(FILTERS.mention.match).length,
+    team_mention: all.filter(FILTERS.team_mention.match).length,
     review_requested: all.filter(FILTERS.review_requested.match).length,
+    assign: all.filter(FILTERS.assign.match).length,
   };
   for (const el of $$(".source-count")) {
     const key = el.dataset.count;
