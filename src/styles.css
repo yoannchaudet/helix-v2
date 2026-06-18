@@ -296,6 +296,18 @@ code,
   white-space: nowrap;
 }
 
+/* Breadcrumb shown when a repo refines the active filter: "Filter › owner/repo". */
+.crumb-sep {
+  margin: 0 8px;
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.crumb-repo {
+  color: var(--muted);
+  font-weight: 600;
+}
+
 .toolbar-actions {
   display: flex;
   align-items: center;

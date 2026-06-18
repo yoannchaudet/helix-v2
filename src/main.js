@@ -451,12 +451,16 @@ function notificationRow(n) {
     </li>`;
 }
 
-/* The sidebar drives a single active "source": either a smart filter (across all
- * repos) or a specific repository. Notifications are fetched once into `inboxGroups`
- * and re-rendered locally as the source changes. */
+/* The sidebar now drives two orthogonal selections: a single notification *type*
+ * filter (top group, always exactly one active) and an optional *repository*
+ * refinement. Notifications are fetched once into `inboxGroups` and re-rendered
+ * locally as either selection changes. */
 
 let inboxGroups = [];
-let activeSource = { kind: "filter", id: "all" };
+/** Active notification-type filter (always set); one of the FILTERS keys. */
+let activeFilter = "all";
+/** Optional repository refinement: a repo_id, or null for "all repositories". */
+let activeRepo = null;
 
 /** Smart filters: predicate over a notification + the human label for the toolbar. */
 const FILTERS = {
@@ -494,25 +498,46 @@ function repoSection(group) {
   return `${repoHeader(group)}<ul class="n-list">${rows}</ul>`;
 }
 
-/** Apply the active source to `inboxGroups`, returning groups with matching rows. */
-function filteredGroups() {
-  if (activeSource.kind === "repo") {
-    const group = inboxGroups.find((g) => g.repo_id === activeSource.id);
-    return group ? [group] : [];
-  }
-  const match = (FILTERS[activeSource.id] ?? FILTERS.all).match;
-  return inboxGroups
-    .map((g) => ({ ...g, notifications: g.notifications.filter(match) }))
-    .filter((g) => g.notifications.length);
+/** Notifications in `group` matching the given type filter. */
+function repoMatches(group, filterId) {
+  const match = (FILTERS[filterId] ?? FILTERS.all).match;
+  return group.notifications.filter(match);
 }
 
-/** Current toolbar title for the active source. */
-function activeTitle() {
-  if (activeSource.kind === "repo") {
-    const group = inboxGroups.find((g) => g.repo_id === activeSource.id);
-    return group ? group.full_name : "Repository";
+/** Apply the active filter, then the optional repo refinement, to `inboxGroups`. */
+function filteredGroups() {
+  let groups = inboxGroups
+    .map((g) => ({ ...g, notifications: repoMatches(g, activeFilter) }))
+    .filter((g) => g.notifications.length);
+  if (activeRepo != null) {
+    groups = groups.filter((g) => g.repo_id === activeRepo);
   }
-  return (FILTERS[activeSource.id] ?? FILTERS.all).label;
+  return groups;
+}
+
+/** Current toolbar breadcrumb: the filter label, plus the repo when refined. */
+function activeTitleHtml() {
+  const label = escapeHtml((FILTERS[activeFilter] ?? FILTERS.all).label);
+  if (activeRepo != null) {
+    const group = inboxGroups.find((g) => g.repo_id === activeRepo);
+    if (group) {
+      return `${label}<span class="crumb-sep" aria-hidden="true">›</span><span class="crumb-repo">${escapeHtml(
+        group.full_name,
+      )}</span>`;
+    }
+  }
+  return label;
+}
+
+/** Plain-text accessible name for the breadcrumb (the visual `›` separator is
+ *  hidden from assistive tech, so spell out the hierarchy in words here). */
+function activeTitleLabel() {
+  const label = (FILTERS[activeFilter] ?? FILTERS.all).label;
+  if (activeRepo != null) {
+    const group = inboxGroups.find((g) => g.repo_id === activeRepo);
+    if (group) return `${label}, repository ${group.full_name}`;
+  }
+  return label;
 }
 
 function emptyInbox() {
@@ -525,10 +550,13 @@ function emptyInbox() {
   return `<p class="inbox-empty">Nothing here. Click the refresh button to sync.</p>`;
 }
 
-/** Render the main list for the active source. */
+/** Render the main list for the active filter (and optional repo refinement). */
 function renderInbox() {
   const inbox = $("#inbox");
-  $("#view-title").textContent = activeTitle();
+  const title = $("#view-title");
+  title.innerHTML = activeTitleHtml();
+  // The visual `›` is aria-hidden, so give the heading a spelled-out accessible name.
+  title.setAttribute("aria-label", activeTitleLabel());
   const groups = filteredGroups();
   if (!groups.length) {
     inbox.innerHTML = emptyInbox();
@@ -539,7 +567,7 @@ function renderInbox() {
   inbox.innerHTML = groups.map(repoSection).join("");
 }
 
-/** Update sidebar source selection styling + the smart-filter counts. */
+/** Update sidebar filter/repo selection styling + the smart-filter counts. */
 function renderSidebar() {
   const all = inboxGroups.flatMap((g) => g.notifications);
   const counts = {
@@ -555,14 +583,18 @@ function renderSidebar() {
     el.textContent = value ? String(value) : "";
   }
 
-  // Repositories list (selectable sources), ordered like the inbox.
+  // Repositories list — filtered to repos that have notifications matching the
+  // active type filter, with counts that reflect that filter.
   const repoList = $("#repo-list");
-  if (!inboxGroups.length) {
+  const visibleRepos = inboxGroups
+    .map((g) => ({ group: g, matches: repoMatches(g, activeFilter) }))
+    .filter((x) => x.matches.length);
+  if (!visibleRepos.length) {
     repoList.innerHTML = `<li class="source-empty">No repositories yet.</li>`;
   } else {
-    repoList.innerHTML = inboxGroups
-      .map((g) => {
-        const unread = g.notifications.filter((n) => n.unread).length;
+    repoList.innerHTML = visibleRepos
+      .map(({ group: g, matches }) => {
+        const unread = matches.filter((n) => n.unread).length;
         const count = unread ? `<span class="source-count">${unread}</span>` : "";
         const lock = g.private ? " 🔒" : "";
         return `<li>
@@ -579,28 +611,38 @@ function renderSidebar() {
       })
       .join("");
     for (const btn of repoList.querySelectorAll(".repo-source")) {
-      btn.addEventListener("click", () =>
-        selectSource({ kind: "repo", id: Number(btn.dataset.repo) }),
-      );
+      btn.addEventListener("click", () => selectRepo(Number(btn.dataset.repo)));
     }
   }
 
-  // Reflect the active selection across both source groups.
-  for (const btn of $$(".source[data-filter], .source[data-repo]")) {
-    const isActive =
-      (btn.dataset.filter &&
-        activeSource.kind === "filter" &&
-        btn.dataset.filter === activeSource.id) ||
-      (btn.dataset.repo &&
-        activeSource.kind === "repo" &&
-        Number(btn.dataset.repo) === activeSource.id);
-    btn.classList.toggle("source--active", Boolean(isActive));
+  // Filter and repo are independent selections, so each is highlighted on its own.
+  for (const btn of $$(".source[data-filter]")) {
+    btn.classList.toggle("source--active", btn.dataset.filter === activeFilter);
+  }
+  for (const btn of $$(".source[data-repo]")) {
+    btn.classList.toggle(
+      "source--active",
+      activeRepo != null && Number(btn.dataset.repo) === activeRepo,
+    );
   }
 }
 
-/** Switch the active source and re-render the list + sidebar selection. */
-function selectSource(source) {
-  activeSource = source;
+/** Choose the notification-type filter. Drops a repo refinement that no longer has
+ *  any matching notifications under the new filter (per the agreed UX). */
+function selectFilter(filterId) {
+  activeFilter = filterId;
+  if (activeRepo != null) {
+    const group = inboxGroups.find((g) => g.repo_id === activeRepo);
+    if (!group || !repoMatches(group, activeFilter).length) activeRepo = null;
+  }
+  showSettings(false);
+  renderSidebar();
+  renderInbox();
+}
+
+/** Toggle the repository refinement: select it, or clear it if already active. */
+function selectRepo(repoId) {
+  activeRepo = activeRepo === repoId ? null : repoId;
   showSettings(false);
   renderSidebar();
   renderInbox();
@@ -609,6 +651,10 @@ function selectSource(source) {
 async function loadInbox() {
   try {
     inboxGroups = await invoke("list_inbox");
+    // Drop a repo refinement whose repository is no longer present after a sync.
+    if (activeRepo != null && !inboxGroups.some((g) => g.repo_id === activeRepo)) {
+      activeRepo = null;
+    }
     renderSidebar();
     renderInbox();
   } catch (err) {
@@ -796,9 +842,7 @@ window.addEventListener("DOMContentLoaded", () => {
 
   // Sidebar smart filters.
   for (const btn of $$(".source[data-filter]")) {
-    btn.addEventListener("click", () =>
-      selectSource({ kind: "filter", id: btn.dataset.filter }),
-    );
+    btn.addEventListener("click", () => selectFilter(btn.dataset.filter));
   }
 
   // Settings pane: opened from the sidebar or ⌘, ; closed via the back button.
