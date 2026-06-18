@@ -1074,9 +1074,12 @@ window.addEventListener("DOMContentLoaded", () => {
     if (openMenu) closeMenu();
     else openBulkMenu(e.currentTarget);
   });
-  // Dismiss the popover on any outside click or scroll.
+  // Dismiss the popover on any outside click or scroll. Ignore the ••• trigger itself —
+  // its own click handler toggles the menu, and closing here first (mousedown precedes
+  // click) would let the click immediately reopen it, making it impossible to close.
   document.addEventListener("mousedown", (e) => {
-    if (openMenu && !openMenu.contains(e.target)) closeMenu();
+    const onTrigger = e.target.closest?.("#bulk-actions-btn");
+    if (openMenu && !openMenu.contains(e.target) && !onTrigger) closeMenu();
   });
   window.addEventListener("blur", closeMenu);
   $("#inbox").addEventListener("scroll", closeMenu, true);
