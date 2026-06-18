@@ -215,10 +215,9 @@ pub async fn resolve_subject(
 
 /// Mark a notification thread as **done** (`DELETE /notifications/threads/{thread_id}`).
 ///
-/// GitHub answers `204 No Content` (or `205`) on success; the thread is removed from the
-/// inbox entirely. `304 Not Modified` (already in the target state) is also treated as
-/// success. Returns the response's rate-limit snapshot so the caller can keep the displayed
-/// quota accurate.
+/// GitHub answers `204 No Content` on success; the thread is removed from the inbox
+/// entirely. Returns the response's rate-limit snapshot so the caller can keep the
+/// displayed quota accurate.
 pub async fn mark_thread_done(
     client: &reqwest::Client,
     token: &str,
@@ -234,7 +233,7 @@ pub async fn mark_thread_done(
     let mut rate = RateLimit::default();
     rate.update_from(resp.headers());
 
-    if status.is_success() || status == reqwest::StatusCode::NOT_MODIFIED {
+    if status.is_success() {
         return Ok(rate);
     }
     if status == reqwest::StatusCode::UNAUTHORIZED {

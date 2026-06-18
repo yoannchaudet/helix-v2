@@ -297,11 +297,12 @@ pub fn reset_resolution(conn: &Connection) -> rusqlite::Result<usize> {
 pub fn mark_done_local(conn: &mut Connection, thread_ids: &[String]) -> rusqlite::Result<usize> {
     let tx = conn.transaction()?;
     let mut removed = 0;
-    for id in thread_ids {
-        removed += tx.execute(
-            "DELETE FROM notifications WHERE thread_id = ?1",
-            params![id],
-        )?;
+    {
+        // Prepare once and reuse across ids to avoid re-parsing the statement per row.
+        let mut stmt = tx.prepare("DELETE FROM notifications WHERE thread_id = ?1")?;
+        for id in thread_ids {
+            removed += stmt.execute(params![id])?;
+        }
     }
     tx.execute(
         "DELETE FROM repos

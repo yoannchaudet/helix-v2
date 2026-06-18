@@ -373,6 +373,16 @@ where
         });
     }
 
+    // Dedupe up front: a repeated id would issue a second DELETE that can fail (the thread
+    // is already gone), which would otherwise be reported as a misleading partial failure.
+    let thread_ids: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        thread_ids
+            .into_iter()
+            .filter(|id| seen.insert(id.clone()))
+            .collect()
+    };
+
     let token = auth::read_token()?
         .ok_or_else(|| "Not connected — add a GitHub token first.".to_string())?;
 

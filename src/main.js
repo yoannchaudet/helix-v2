@@ -748,6 +748,8 @@ function closeMenu() {
     openMenu.remove();
     openMenu = null;
     document.removeEventListener("keydown", onMenuKeydown, true);
+    // Reflect the collapsed state on the ••• trigger for assistive tech.
+    $("#bulk-actions-btn")?.setAttribute("aria-expanded", "false");
   }
 }
 
@@ -798,8 +800,8 @@ function openContextMenu(x, y, items) {
   menu.style.top = `${Math.max(8, top)}px`;
   openMenu = menu;
   document.addEventListener("keydown", onMenuKeydown, true);
-  // Move focus into the menu so keyboard users can Tab/arrow through it (the trigger,
-  // e.g. the ••• button, otherwise keeps focus and Tab never reaches the popover).
+  // Move focus into the menu so keyboard users land in the popover (the trigger, e.g. the
+  // ••• button, otherwise keeps focus and Tab never reaches it). Escape closes the menu.
   menu.querySelector(".context-menu-item:not(:disabled)")?.focus();
 }
 
@@ -821,6 +823,7 @@ function onInboxContextMenu(e) {
 
 /** The ••• toolbar menu: bulk mark-done over the currently visible (filtered) set. */
 function openBulkMenu(anchorEl) {
+  anchorEl.setAttribute("aria-expanded", "true");
   const allIds = visibleNotifications().map((n) => n.thread_id);
   const rect = anchorEl.getBoundingClientRect();
   openContextMenu(rect.left, rect.bottom + 4, [
