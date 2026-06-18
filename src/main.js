@@ -839,7 +839,9 @@ function openContextMenu(x, y, items) {
 
 /** Right-click a notification row → mark that thread as done. */
 function onInboxContextMenu(e) {
-  const row = e.target.closest(".n-row");
+  // `e.target` can be a Text node (right-clicking directly on text), which has no
+  // `closest`; optional chaining keeps this from throwing.
+  const row = e.target.closest?.(".n-row");
   if (!row) return;
   e.preventDefault();
   const threadId = row.dataset.threadId;
