@@ -750,14 +750,23 @@ async function markDone(threadIds) {
 
 /** The open popover menu element, if any (single-instance; closed on any outside action). */
 let openMenu = null;
+/** The element that had focus before the menu opened, so focus can return there on close
+ *  (otherwise removing the focused menu item dumps focus to <body>). */
+let menuReturnFocus = null;
 
-function closeMenu() {
-  if (openMenu) {
-    openMenu.remove();
-    openMenu = null;
-    document.removeEventListener("keydown", onMenuKeydown, true);
-    // Reflect the collapsed state on the ••• trigger for assistive tech.
-    $("#bulk-actions-btn")?.setAttribute("aria-expanded", "false");
+/** Close the open menu. By default returns focus to wherever it was before the menu opened;
+ *  pass `restoreFocus = false` when immediately reopening, to avoid a focus flicker. */
+function closeMenu(restoreFocus = true) {
+  if (!openMenu) return;
+  openMenu.remove();
+  openMenu = null;
+  document.removeEventListener("keydown", onMenuKeydown, true);
+  // Reflect the collapsed state on the ••• trigger for assistive tech.
+  $("#bulk-actions-btn")?.setAttribute("aria-expanded", "false");
+  const target = menuReturnFocus;
+  if (restoreFocus) {
+    menuReturnFocus = null;
+    if (target && document.contains(target)) target.focus();
   }
 }
 
@@ -771,7 +780,16 @@ function onMenuKeydown(e) {
 /** Open a popover menu of `items` ({ label, danger?, disabled?, action }) anchored at the
  *  given viewport point, clamped to stay on-screen. */
 function openContextMenu(x, y, items) {
-  closeMenu();
+  // Capture the pre-menu focus target before we move focus into the popover. When a menu
+  // is already open (reopening), keep the original target and close without restoring it,
+  // so focus lands directly in the new menu rather than flickering back to the trigger.
+  const reopening = openMenu != null;
+  const previouslyFocused = document.activeElement;
+  closeMenu(false);
+  if (!reopening) {
+    menuReturnFocus =
+      previouslyFocused instanceof HTMLElement ? previouslyFocused : null;
+  }
   const menu = document.createElement("div");
   menu.className = "context-menu";
   menu.setAttribute("role", "menu");
