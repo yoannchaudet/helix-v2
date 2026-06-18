@@ -1,26 +1,56 @@
 //! Notification sync: persist fetched threads into SQLite and track sync state.
 //!
 //! SQLite is the source of truth (see `docs/design.md` §3/§5). This module upserts repos
-//! and notifications and records the outcome (status, error, rate-limit snapshot) in
-//! `sync_state`. Reconciliation of threads that disappeared upstream is a later milestone
-//! (M5); here we only fetch + store.
+//! and notifications, reconciles away rows that disappeared upstream (M5), and records the
+//! outcome (status, error, rate-limit snapshot) in `sync_state`.
 
 use rusqlite::{params, Connection};
 use serde::Serialize;
 
 use crate::github::{NotificationThread, RateLimit};
 
-/// Upsert repos + notifications from a fetch into SQLite in a single transaction.
+/// Outcome of a store + reconcile pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoreOutcome {
+    /// Notifications upserted from the latest fetch.
+    pub stored: usize,
+    /// Local notifications removed because they were no longer present upstream.
+    pub removed: usize,
+}
+
+/// Upsert repos + notifications from a **complete** fetch and reconcile local state.
 ///
-/// Existing rows are updated in place; the subject-resolution columns
-/// (`subject_state`, `resolved_at`, …) populated in M6 are intentionally left untouched.
-/// Returns the number of threads stored.
+/// `threads` must be the full current set of unread notifications (GitHub only returns
+/// currently-unread threads). Existing rows are updated in place; the subject-resolution
+/// columns (`subject_state`, `resolved_at`, …) populated in M6 are intentionally left
+/// untouched.
+///
+/// Reconciliation (M5): any locally-stored notification absent from this fetch was cleared
+/// (marked done/read) upstream, so it is deleted — v1 keeps the inbox = currently-unread
+/// only (see `docs/design.md` §"Reconcile vs. retain"). Repos left without any
+/// notifications are pruned so the table doesn't accumulate orphans. Stale rows are
+/// identified by the exact set of fetched thread ids rather than a timestamp watermark, so
+/// reconciliation is correct even when two syncs land within the same clock tick.
 pub fn store_notifications(
     conn: &mut Connection,
     threads: &[NotificationThread],
-) -> rusqlite::Result<usize> {
+) -> rusqlite::Result<StoreOutcome> {
     let tx = conn.transaction()?;
+
+    // Record the thread ids seen in this fetch so we can delete everything else below.
+    // A connection-scoped temp table avoids SQLite's bound-variable cap on large `NOT IN`
+    // lists; it is cleared (not recreated) so repeated syncs on the long-lived connection
+    // stay cheap.
+    tx.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS present_threads (thread_id TEXT PRIMARY KEY);
+         DELETE FROM present_threads;",
+    )?;
+
     for t in threads {
+        tx.execute(
+            "INSERT OR IGNORE INTO present_threads (thread_id) VALUES (?1)",
+            params![t.id],
+        )?;
         tx.execute(
             "INSERT INTO repos (id, full_name, owner, name, private, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -71,8 +101,26 @@ pub fn store_notifications(
             ],
         )?;
     }
+
+    // Reconcile: drop notifications no longer returned upstream, then prune repos that
+    // ended up with no notifications. Notifications are deleted first to respect the
+    // repos foreign key.
+    let removed = tx.execute(
+        "DELETE FROM notifications
+         WHERE thread_id NOT IN (SELECT thread_id FROM present_threads)",
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM repos
+         WHERE id NOT IN (SELECT DISTINCT repo_id FROM notifications)",
+        [],
+    )?;
+
     tx.commit()?;
-    Ok(threads.len())
+    Ok(StoreOutcome {
+        stored: threads.len(),
+        removed,
+    })
 }
 
 /// Record a successful sync: timestamp, status, and the rate-limit snapshot.
@@ -300,7 +348,8 @@ mod tests {
             thread("3", 200, "octo/repo-b", "Third", true),
         ];
         let n = store_notifications(&mut conn, &threads).unwrap();
-        assert_eq!(n, 3);
+        assert_eq!(n.stored, 3);
+        assert_eq!(n.removed, 0);
         assert_eq!(count(&conn).unwrap(), 3);
         assert_eq!(
             repo_full_name(&conn, 100).unwrap().as_deref(),
@@ -404,6 +453,99 @@ mod tests {
             .unwrap();
         assert_eq!(state.as_deref(), Some("closed"));
         assert_eq!(resolved.as_deref(), Some("2026-01-03T00:00:00Z"));
+    }
+
+    #[test]
+    fn reconcile_removes_threads_absent_from_latest_fetch() {
+        let mut conn = mem_conn();
+        store_notifications(
+            &mut conn,
+            &[
+                thread("1", 100, "octo/repo-a", "One", true),
+                thread("2", 100, "octo/repo-a", "Two", true),
+                thread("3", 200, "octo/repo-b", "Three", true),
+            ],
+        )
+        .unwrap();
+        assert_eq!(count(&conn).unwrap(), 3);
+
+        // A later full sync only returns thread 1 (2 and 3 were cleared on github.com).
+        let outcome =
+            store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One", true)]).unwrap();
+        assert_eq!(outcome.stored, 1);
+        assert_eq!(outcome.removed, 2);
+        assert_eq!(count(&conn).unwrap(), 1);
+
+        let survives: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM notifications WHERE thread_id = '1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(survives, 1);
+
+        // repo-b only held thread 3, so it is pruned; repo-a still has thread 1.
+        assert_eq!(repo_full_name(&conn, 200).unwrap(), None);
+        assert_eq!(
+            repo_full_name(&conn, 100).unwrap().as_deref(),
+            Some("octo/repo-a")
+        );
+    }
+
+    #[test]
+    fn reconcile_empty_fetch_clears_inbox() {
+        let mut conn = mem_conn();
+        store_notifications(
+            &mut conn,
+            &[
+                thread("1", 100, "octo/repo-a", "One", true),
+                thread("2", 200, "octo/repo-b", "Two", true),
+            ],
+        )
+        .unwrap();
+
+        let outcome = store_notifications(&mut conn, &[]).unwrap();
+        assert_eq!(outcome.stored, 0);
+        assert_eq!(outcome.removed, 2);
+        assert_eq!(count(&conn).unwrap(), 0);
+
+        let repos: i64 = conn
+            .query_row("SELECT COUNT(*) FROM repos", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(repos, 0);
+    }
+
+    #[test]
+    fn reconcile_keeps_resolved_columns_on_surviving_rows() {
+        let mut conn = mem_conn();
+        store_notifications(
+            &mut conn,
+            &[
+                thread("1", 100, "octo/repo-a", "One", true),
+                thread("2", 100, "octo/repo-a", "Two", true),
+            ],
+        )
+        .unwrap();
+        // Simulate M6 resolution on the thread that will survive the next sync.
+        conn.execute(
+            "UPDATE notifications SET subject_state = 'closed' WHERE thread_id = '1'",
+            [],
+        )
+        .unwrap();
+
+        // Next sync drops thread 2 but keeps thread 1 — its resolved column must persist.
+        let outcome =
+            store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One", true)]).unwrap();
+        assert_eq!(outcome.removed, 1);
+        let state: Option<String> = conn
+            .query_row(
+                "SELECT subject_state FROM notifications WHERE thread_id = '1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(state.as_deref(), Some("closed"));
     }
 
     #[test]
