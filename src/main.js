@@ -409,7 +409,6 @@ const FILTERS = {
     label: "Review requests",
     match: (n) => n.reason === "review_requested",
   },
-  done: { label: "Done", match: (n) => !n.unread },
 };
 
 function repoHeader(group) {
@@ -486,7 +485,6 @@ function renderSidebar() {
     all: all.length,
     mention: all.filter(FILTERS.mention.match).length,
     review_requested: all.filter(FILTERS.review_requested.match).length,
-    done: all.filter(FILTERS.done.match).length,
   };
   for (const el of $$(".source-count")) {
     const key = el.dataset.count;
