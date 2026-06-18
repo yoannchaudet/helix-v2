@@ -732,6 +732,12 @@ async function markDone(threadIds) {
       notifications: g.notifications.filter((n) => !idSet.has(n.thread_id)),
     }))
     .filter((g) => g.notifications.length);
+  // If the refined repo just lost its last visible notification, clear the refinement so
+  // renderInbox doesn't show the empty state while other repos still have notifications
+  // (loadInbox would otherwise only fix this once the round-trip completes).
+  if (activeRepo != null && !inboxGroups.some((g) => g.repo_id === activeRepo)) {
+    activeRepo = null;
+  }
   renderSidebar();
   renderInbox();
   try {
