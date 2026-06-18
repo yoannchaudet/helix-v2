@@ -474,6 +474,17 @@ function activeTitleHtml() {
   return label;
 }
 
+/** Plain-text accessible name for the breadcrumb (the visual `›` separator is
+ *  hidden from assistive tech, so spell out the hierarchy in words here). */
+function activeTitleLabel() {
+  const label = (FILTERS[activeFilter] ?? FILTERS.all).label;
+  if (activeRepo != null) {
+    const group = inboxGroups.find((g) => g.repo_id === activeRepo);
+    if (group) return `${label}, repository ${group.full_name}`;
+  }
+  return label;
+}
+
 function emptyInbox() {
   if (!authenticated) {
     return `<div class="inbox-empty">
@@ -484,10 +495,13 @@ function emptyInbox() {
   return `<p class="inbox-empty">Nothing here. Click the refresh button to sync.</p>`;
 }
 
-/** Render the main list for the active source. */
+/** Render the main list for the active filter (and optional repo refinement). */
 function renderInbox() {
   const inbox = $("#inbox");
-  $("#view-title").innerHTML = activeTitleHtml();
+  const title = $("#view-title");
+  title.innerHTML = activeTitleHtml();
+  // The visual `›` is aria-hidden, so give the heading a spelled-out accessible name.
+  title.setAttribute("aria-label", activeTitleLabel());
   const groups = filteredGroups();
   if (!groups.length) {
     inbox.innerHTML = emptyInbox();
@@ -498,7 +512,7 @@ function renderInbox() {
   inbox.innerHTML = groups.map(repoSection).join("");
 }
 
-/** Update sidebar source selection styling + the smart-filter counts. */
+/** Update sidebar filter/repo selection styling + the smart-filter counts. */
 function renderSidebar() {
   const all = inboxGroups.flatMap((g) => g.notifications);
   const counts = {
