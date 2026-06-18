@@ -95,6 +95,8 @@ async fn sign_in(token: String, state: State<'_, AppState>) -> Result<GitHubUser
         let conn = state.db.0.lock().map_err(|e| e.to_string())?;
         settings::set_string(&conn, settings::KEY_GITHUB_LOGIN, &user.login)
             .map_err(|e| e.to_string())?;
+        // New credentials may have broader scope — re-resolve all subjects on next sync.
+        let _ = sync::reset_resolution(&conn);
     }
     Ok(user)
 }
@@ -191,7 +193,8 @@ async fn sync_now(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<S
     let store_result = (|| -> Result<sync::StoreOutcome, String> {
         let mut guard = state.db.0.lock().map_err(|e| e.to_string())?;
         let conn: &mut rusqlite::Connection = &mut guard;
-        let stored = sync::store_notifications(conn, &outcome.threads).map_err(|e| e.to_string())?;
+        let stored =
+            sync::store_notifications(conn, &outcome.threads).map_err(|e| e.to_string())?;
         sync::record_success(conn, &outcome.rate).map_err(|e| e.to_string())?;
         Ok(stored)
     })();
@@ -213,7 +216,97 @@ async fn sync_now(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<S
         rate_remaining: outcome.rate.remaining,
     };
     let _ = app.emit("sync:done", &result);
+
+    // Resolve PR/Issue subject states (the Open/Closed/Merged pills) in the background so
+    // the sync returns immediately. Best-effort: the inbox is already stored and shown, and
+    // a `subjects:resolved` event tells the UI to reload once states land.
+    let resolve_app = app.clone();
+    let resolve_token = token.clone();
+    tauri::async_runtime::spawn(async move {
+        resolve_pending_subjects(resolve_app, resolve_token).await;
+    });
+
     Ok(result)
+}
+
+/// Resolve outstanding PR/Issue subjects (state, number, author, …) so the UI can show
+/// Open/Closed/Merged pills. Smart caching (`subjects_needing_resolution`) keeps this cheap
+/// after the first sync. Per-subject failures are logged and retried on a future sync; the
+/// DB lock is never held across network I/O. Emits `subjects:resolved` when anything changed.
+async fn resolve_pending_subjects(app: tauri::AppHandle, token: String) {
+    let state = app.state::<AppState>();
+
+    // Snapshot the work under the lock, then release it before any network I/O.
+    let pending = {
+        let Ok(conn) = state.db.0.lock() else {
+            return;
+        };
+        match sync::subjects_needing_resolution(&conn) {
+            Ok(p) => p,
+            Err(_) => return,
+        }
+    };
+    if pending.is_empty() {
+        return;
+    }
+
+    const POOL: usize = 8;
+    let client = reqwest::Client::new();
+    let mut changed = 0usize;
+    // The most conservative (lowest `remaining`) rate snapshot seen across the resolution
+    // calls, so the UI's quota reflects what these extra requests actually consumed.
+    let mut rate: Option<github::RateLimit> = None;
+
+    for batch in pending.chunks(POOL) {
+        let mut handles = Vec::with_capacity(batch.len());
+        for p in batch {
+            let client = client.clone();
+            let token = token.clone();
+            let url = p.subject_url.clone();
+            let thread_id = p.thread_id.clone();
+            handles.push(tauri::async_runtime::spawn(async move {
+                let res = github::resolve_subject(&client, &url, &token).await;
+                (thread_id, res)
+            }));
+        }
+        for h in handles {
+            let Ok((thread_id, res)) = h.await else {
+                continue;
+            };
+            match res {
+                Ok(result) => {
+                    // Track the lowest remaining (most recent within the window).
+                    if let Some(remaining) = result.rate.remaining {
+                        if rate
+                            .as_ref()
+                            .and_then(|r| r.remaining)
+                            .is_none_or(|cur| remaining < cur)
+                        {
+                            rate = Some(result.rate.clone());
+                        }
+                    }
+                    if let Ok(conn) = state.db.0.lock() {
+                        if sync::store_resolved_subject(&conn, &thread_id, &result.subject).is_ok()
+                        {
+                            changed += 1;
+                        }
+                    }
+                }
+                Err(err) => eprintln!("subject resolution failed for {thread_id}: {err}"),
+            }
+        }
+    }
+
+    // Persist the post-resolution quota so Settings shows the true remaining count.
+    if let Some(rate) = &rate {
+        if let Ok(conn) = state.db.0.lock() {
+            let _ = sync::record_rate(&conn, rate);
+        }
+    }
+
+    if changed > 0 {
+        let _ = app.emit("subjects:resolved", serde_json::json!({ "count": changed }));
+    }
 }
 
 /// Read the current sync status (last sync, status/error, rate limit, stored count).
