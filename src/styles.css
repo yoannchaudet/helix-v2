@@ -470,6 +470,22 @@ code,
   border-bottom: 1px solid var(--hairline);
 }
 
+/* Rows with a resolved web URL are clickable; give them a clear, on-brand hover
+   highlight (matching the context-menu / active-source treatment). */
+.n-row--openable {
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.n-row--openable:hover {
+  background: var(--accent-tint);
+}
+
+.n-row--openable:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 /* Fixed-width, centered slot for the type pill so every title starts at the same x. */
 .n-badge-slot {
   flex: none;
@@ -902,6 +918,35 @@ code {
 
 .srow-flash--error {
   color: var(--error);
+}
+
+/* Transient toast for context-menu actions (e.g. "Copied URL"). Bottom-centered,
+   above the context menu (z-index 50), fades in/out via opacity. */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 22px;
+  transform: translateX(-50%) translateY(6px);
+  z-index: 80;
+  max-width: 80vw;
+  padding: 7px 14px;
+  border-radius: 8px;
+  background: rgba(31, 35, 40, 0.92);
+  color: #fff;
+  font-size: 0.85rem;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.22);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+
+.toast--show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.toast--error {
+  background: var(--error);
 }
 
 /* Forms */

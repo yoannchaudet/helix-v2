@@ -502,6 +502,43 @@ fn reveal_in_finder(_path: String) -> Result<(), String> {
     Err("Reveal in Finder is only supported on macOS.".to_string())
 }
 
+/// Open an `http(s)` URL in the user's default browser.
+///
+/// The URL is passed directly to `open` (no shell), so it needs no escaping, but we
+/// still restrict it to `http`/`https` so a crafted value can't make `open` launch an
+/// arbitrary URL handler (e.g. a custom app scheme) or be parsed as a flag.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    let url = url.trim();
+    if url.is_empty() || url.starts_with('-') {
+        return Err("invalid URL to open".to_string());
+    }
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("only http(s) URLs can be opened".to_string());
+    }
+    // A well-formed URL has no whitespace or control characters; reject them defensively
+    // so nothing surprising is ever handed to `open`.
+    if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("URL contains invalid characters".to_string());
+    }
+    let status = std::process::Command::new("open")
+        .arg(url)
+        .status()
+        .map_err(|e| format!("failed to open URL: {e}"))?;
+    if !status.success() {
+        return Err(format!("could not open the URL ({status})"));
+    }
+    Ok(())
+}
+
+/// Non-macOS fallback for [`open_url`].
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn open_url(_url: String) -> Result<(), String> {
+    Err("Opening URLs is only supported on macOS.".to_string())
+}
+
 /// Persist the current window size (logical px) to SQLite so the next launch restores
 /// it. Skips minimized/maximized/fullscreen states and redundant writes (the cache in
 /// `AppState`) so a resize drag doesn't hammer the database.
@@ -623,7 +660,8 @@ pub fn run() {
             list_inbox,
             mark_threads_done,
             show_main_window,
-            reveal_in_finder
+            reveal_in_finder,
+            open_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
