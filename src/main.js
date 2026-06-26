@@ -1177,8 +1177,23 @@ async function applySettings() {
 
 /** Toggle between the notifications pane and the Settings pane (single window). */
 function showSettings(show) {
+  // Detect an actual pane transition: selectFilter/selectRepo call showSettings(false)
+  // while already in Notifications, and we must not steal focus in that case.
+  const wasShown = !$("#view-settings").hidden;
   $("#view-notifications").hidden = show;
   $("#view-settings").hidden = !show;
+  // Settings is a focused, full-width pane: hide the sidebar (and its resizer) so the
+  // content spans the whole window. CSS also insets the toolbar past the traffic lights.
+  document.querySelector(".app")?.classList.toggle("app--settings", show);
+  if (show === wasShown) return;
+  // The sidebar (and its #open-settings trigger) is hidden in Settings, so keyboard focus
+  // would otherwise fall to <body>. Move focus to a sensible target on each transition:
+  // into the pane when opening, back to the sidebar trigger when closing.
+  if (show) {
+    $("#settings-back")?.focus();
+  } else {
+    $("#open-settings")?.focus();
+  }
 }
 
 /* ----------------------------- Sidebar resize ---------------------------- */
@@ -1267,6 +1282,11 @@ function initSidebarResize() {
 /* --------------------------------- Init ---------------------------------- */
 
 window.addEventListener("DOMContentLoaded", () => {
+  // Tag the platform so macOS-only chrome (e.g. the traffic-light toolbar inset) is scoped
+  // to macOS and doesn't apply on Windows/Linux (the app bundles for all targets).
+  if (navigator.userAgent.includes("Macintosh")) {
+    document.documentElement.dataset.platform = "macos";
+  }
   // Settings auto-apply: the toggle persists immediately; the stepper debounces typed
   // values and persists right away on a committed change (blur / arrow click).
   $("#dependabot-only").addEventListener("change", applySettings);

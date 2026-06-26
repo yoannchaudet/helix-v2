@@ -53,3 +53,16 @@ When we call the GitHub API:
 A change is done when it: works offline against SQLite, handles API errors and rate
 limits, paginates, gives the user live visual feedback, follows the color conventions,
 and adds no unjustified dependency.
+
+## Change workflow
+Every change follows the same loop:
+
+1. **Rubber-duck it.** Before opening a PR, have the change reviewed (rubber-duck pass)
+   to catch bugs, logic errors, and design flaws.
+2. **Open the PR.** Branch off a fresh `main`, commit, and open a pull request.
+3. **Track Copilot review.** Request the Copilot reviewer and monitor the PR for its
+   comments.
+4. **Decide whether to iterate.** Read Copilot's feedback and judge whether it warrants
+   changes. Iterate on the PR if it does; otherwise leave it as-is. Not every comment
+   requires a change — use judgment.
+

@@ -68,6 +68,24 @@ code,
   height: 100%;
 }
 
+/* Settings is a focused full-width pane: collapse the sidebar column and hide the
+   sidebar + its resizer so the content spans the whole window. */
+.app--settings {
+  grid-template-columns: 1fr;
+}
+
+.app--settings .sidebar,
+.app--settings .sidebar-resizer {
+  display: none;
+}
+
+/* With the sidebar gone, the toolbar slides under the macOS traffic lights — inset
+   its left padding so the back button clears them (macOS only; other platforms have
+   no overlaid traffic lights). */
+[data-platform="macos"] .app--settings #view-settings .toolbar {
+  padding-left: 80px;
+}
+
 /* Sidebar resize handle: an invisible hit area straddling the sidebar/content seam,
    with a hairline that lights up on hover/drag. */
 .sidebar-resizer {
@@ -530,10 +548,15 @@ code,
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 24px;
+}
+
+/* Centered, width-capped content column. The scroller itself spans the full pane so its
+   scrollbar sits flush against the window's right edge, not the content box. */
+.settings-inner {
   max-width: 760px;
   width: 100%;
   margin: 0 auto;
+  padding: 24px;
 }
 
 /* Color-coded state: green success / yellow pending / red error */
