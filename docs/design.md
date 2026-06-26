@@ -130,12 +130,13 @@ CREATE TABLE sync_state (
 
 ### Reconciliation model
 - **Upsert:** each synced notification is `INSERT ... ON CONFLICT(thread_id) DO UPDATE`.
-- **Deletion/reconcile:** GitHub only returns currently-unread notifications. After a
-  full sync pass we mark local rows not present in the latest result as no longer unread
-  (or remove them), so the local inbox matches GitHub. A `fetched_at` watermark per
-  sync run identifies stale rows.
-- **Optimistic local mutation:** when the user marks a thread done, we update SQLite
-  immediately (UI reflects it), call the API, then confirm/rollback on the result.
+- **Deletion/reconcile:** GitHub only returns currently-unread notifications. After a full
+  sync pass we delete local rows not present in the latest result, so the local inbox
+  matches GitHub's unread feed. The set of fetched thread ids (a temp table) identifies
+  stale rows. The inbox is unread-only: there is no separate "read but retained" state.
+- **Optimistic local mutation:** when the user marks a thread done, the UI updates
+  immediately; the core calls the API for each thread (bounded concurrency), then deletes
+  the local rows for the threads that succeeded and reports per-thread failures.
 - The token is **not** stored in SQLite — see §8.
 
 ## 4. GitHub integration

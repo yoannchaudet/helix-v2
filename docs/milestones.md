@@ -73,9 +73,20 @@ the `yoann-em` logic.
 **Done when:** Bulk clearing works end-to-end; failures are surfaced in red without
 aborting the rest of the batch.
 
+## M7.1 — Per-thread & per-view mark-as-done
+**Objective:** Let the user clear notifications directly from the inbox, not just via the
+cleanup view.
+**Deliverables:**
+- `DELETE /notifications/threads/{id}` with bounded concurrency and per-thread failure
+  reporting (`mark_threads_done`).
+- Right-click context menu on a notification (Mark as done) and a toolbar ••• menu that
+  marks the currently visible/filtered set as done (confirm first).
+**Done when:** Marking done removes a notification (locally + on GitHub) for both a single
+thread and the filtered set, failures surface in red without aborting the batch, and a
+later sync does not resurrect a done item.
+
 ---
 
 ### Deferred (post-v1)
-Per-thread actions (mark-read, mute, unsubscribe, open-in-browser), search,
-user-defined custom filter rules, background polling with a menu-bar badge, and
-cross-platform support.
+Per-thread mark-as-read, mute, unsubscribe; search; user-defined custom filter rules;
+background polling with a menu-bar badge; and cross-platform support.

@@ -7,10 +7,15 @@ const $$ = (sel) => document.querySelectorAll(sel);
 /** True once the user is authenticated; drives the signed-out empty state. */
 let authenticated = false;
 
-const STATES = ["pending", "success", "error"];
+const STATES = ["pending", "success", "error", "neutral"];
 
 /** True while a sync is in flight; gates stale sync:progress events. */
 let syncing = false;
+
+/** True once a sync has succeeded *in this session*. Until then the status pill stays
+ *  neutral: at launch we only show cached local state and haven't confirmed Keychain or
+ *  network access, so an affirmative green "Synced" would be misleading. */
+let syncedThisSession = false;
 
 /** Timer that clears the transient post-sync "Stored N" progress message. */
 let syncProgressTimer;
@@ -160,6 +165,9 @@ function renderSignedIn(login, name) {
 
 function renderSignedOut(message) {
   authenticated = false;
+  // A new session must re-prove a successful sync before the status pill goes green
+  // again, so a stale persisted "success" doesn't show as green after re-signing in.
+  syncedThisSession = false;
   // Signed out → stop polling so we never hit the API without a token.
   stopPolling();
   $("#account-body").innerHTML = `
@@ -214,6 +222,8 @@ async function signOut() {
 }
 
 async function loadAccount() {
+  const body = $("#account-body");
+  body.classList.remove("slist--error");
   try {
     const status = await invoke("auth_status");
     if (status.authenticated && status.login) {
@@ -224,8 +234,8 @@ async function loadAccount() {
       renderSignedOut();
     }
   } catch (err) {
-    $("#account-body").innerHTML =
-      `<div class="srow"><pre class="error-detail">${escapeHtml(err)}</pre></div>`;
+    body.classList.add("slist--error");
+    body.innerHTML = `<div class="srow"><span class="srow-error">${escapeHtml(err)}</span></div>`;
   }
 }
 
@@ -251,7 +261,12 @@ function renderSyncStats(status) {
     setSyncStatus("error", "Error");
     setSyncProgress(status.last_error, "error");
   } else if (status.last_status === "success") {
-    setSyncStatus("success", "Synced");
+    // Green only confirms a sync that happened in this session. On launch we're showing
+    // cached local state, so the same "success" record renders neutral with its age.
+    const label = status.last_sync_at
+      ? `Synced ${relTime(status.last_sync_at)}`
+      : "Synced";
+    setSyncStatus(syncedThisSession ? "success" : "neutral", label);
   } else {
     setSyncStatus("pending", "Never synced");
   }
@@ -308,6 +323,7 @@ async function syncNow() {
     // Stop accepting progress updates before writing the final message, so a
     // late-delivered sync:progress event can't overwrite it.
     syncing = false;
+    syncedThisSession = true;
     const removed = result.removed ?? 0;
     const storedMsg = `Stored ${result.count} notification${result.count === 1 ? "" : "s"}`;
     setSyncProgress(
@@ -322,6 +338,9 @@ async function syncNow() {
     syncProgressTimer = setTimeout(() => setSyncProgress(""), 2600);
     await loadSyncStatus();
     await loadInbox();
+    // A successful sync proves the Keychain is now readable, so refresh the account
+    // section to clear any stale "failed to read token" error from an earlier cancel.
+    await loadAccount();
   } catch (err) {
     syncing = false;
     setSyncStatus("error", "Error");
@@ -449,8 +468,7 @@ function notificationRow(n) {
   const stateLine = badge ? `<div class="n-state">${badge}</div>` : "";
   const reason = escapeHtml(n.reason.replace(/_/g, " "));
   return `
-    <li class="n-row ${n.unread ? "n-row--unread" : ""}">
-      <span class="n-unread-dot"${n.unread ? ' role="img" title="Unread" aria-label="Unread"' : ' aria-hidden="true"'}></span>
+    <li class="n-row ${n.unread ? "n-row--unread" : ""}" data-thread-id="${escapeHtml(n.thread_id)}">
       <span class="n-badge-slot">${subjectBadge(n.subject_type)}</span>
       <div class="n-main">
         <div class="n-title">${number}${escapeHtml(n.subject_title)}</div>
@@ -671,6 +689,216 @@ async function loadInbox() {
   }
 }
 
+/* -------------------------------- Mark done ------------------------------- */
+
+/** Flatten the currently visible (filtered) notifications into a flat list. */
+function visibleNotifications() {
+  return filteredGroups().flatMap((g) => g.notifications);
+}
+
+/** Transient confirmation of how a done batch went, surfaced in the toolbar. */
+function reportMutation(result, verb) {
+  const failed = result.failed ?? [];
+  if (failed.length) {
+    // Cancel any pending "clear" timer from an earlier success so it can't wipe this
+    // error message out from under the user.
+    clearTimeout(syncProgressTimer);
+    setSyncProgress(
+      `${result.ok} ${verb}, ${failed.length} failed: ${failed[0].error}`,
+      "error",
+    );
+  } else if (result.ok > 0) {
+    setSyncProgress(`${result.ok} ${verb}.`, "success");
+    clearTimeout(syncProgressTimer);
+    syncProgressTimer = setTimeout(() => setSyncProgress(""), 2600);
+  }
+}
+
+/** Mark the given thread ids as done: optimistically remove them, call the backend, then
+ *  reconcile from SQLite. */
+async function markDone(threadIds) {
+  if (!authenticated) {
+    clearTimeout(syncProgressTimer);
+    setSyncProgress("Connect a GitHub token to mark notifications as done.", "error");
+    return;
+  }
+  const ids = [...new Set(threadIds)];
+  if (!ids.length) return;
+  // Optimistic: drop the rows locally so they disappear immediately.
+  const idSet = new Set(ids);
+  inboxGroups = inboxGroups
+    .map((g) => ({
+      ...g,
+      notifications: g.notifications.filter((n) => !idSet.has(n.thread_id)),
+    }))
+    .filter((g) => g.notifications.length);
+  // If the refined repo just lost its last visible notification, clear the refinement so
+  // renderInbox doesn't show the empty state while other repos still have notifications
+  // (loadInbox would otherwise only fix this once the round-trip completes).
+  if (activeRepo != null && !inboxGroups.some((g) => g.repo_id === activeRepo)) {
+    activeRepo = null;
+  }
+  renderSidebar();
+  renderInbox();
+  try {
+    const result = await invoke("mark_threads_done", { threadIds: ids });
+    reportMutation(result, "marked done");
+  } catch (err) {
+    // Cancel any pending "clear" timer so it can't wipe this error out moments later.
+    clearTimeout(syncProgressTimer);
+    setSyncProgress(String(err), "error");
+  }
+  await loadSyncStatus();
+  await loadInbox();
+}
+
+/* ------------------------------ Context menu ------------------------------ */
+
+/** The open popover menu element, if any (single-instance; closed on any outside action). */
+let openMenu = null;
+/** The element that had focus before the menu opened, so focus can return there on close
+ *  (otherwise removing the focused menu item dumps focus to <body>). */
+let menuReturnFocus = null;
+
+/** Close the open menu. By default returns focus to wherever it was before the menu opened;
+ *  pass `restoreFocus = false` when immediately reopening, to avoid a focus flicker. */
+function closeMenu(restoreFocus = true) {
+  if (!openMenu) return;
+  openMenu.remove();
+  openMenu = null;
+  document.removeEventListener("keydown", onMenuKeydown, true);
+  // Reflect the collapsed state on the ••• trigger for assistive tech.
+  $("#bulk-actions-btn")?.setAttribute("aria-expanded", "false");
+  const target = menuReturnFocus;
+  if (restoreFocus) {
+    menuReturnFocus = null;
+    if (target && document.contains(target)) target.focus();
+  }
+}
+
+function onMenuKeydown(e) {
+  if (e.key === "Escape") {
+    e.preventDefault();
+    closeMenu();
+    return;
+  }
+  if (!openMenu) return;
+  // ARIA menu semantics: arrow keys (and Home/End) move between enabled items.
+  const items = [...openMenu.querySelectorAll(".context-menu-item:not(:disabled)")];
+  if (!items.length) return;
+  const idx = items.indexOf(document.activeElement);
+  let next = null;
+  if (e.key === "ArrowDown") next = items[idx < 0 ? 0 : (idx + 1) % items.length];
+  else if (e.key === "ArrowUp")
+    next = items[idx <= 0 ? items.length - 1 : idx - 1];
+  else if (e.key === "Home") next = items[0];
+  else if (e.key === "End") next = items[items.length - 1];
+  if (next) {
+    e.preventDefault();
+    next.focus();
+  }
+}
+
+/** Open a popover menu of `items` ({ label, danger?, disabled?, action }) anchored at the
+ *  given viewport point, clamped to stay on-screen. */
+function openContextMenu(x, y, items) {
+  // Capture the pre-menu focus target before we move focus into the popover. When a menu
+  // is already open (reopening), keep the original target and close without restoring it,
+  // so focus lands directly in the new menu rather than flickering back to the trigger.
+  const reopening = openMenu != null;
+  const previouslyFocused = document.activeElement;
+  closeMenu(false);
+  if (!reopening) {
+    menuReturnFocus =
+      previouslyFocused instanceof HTMLElement ? previouslyFocused : null;
+  }
+  const menu = document.createElement("div");
+  menu.className = "context-menu";
+  menu.setAttribute("role", "menu");
+  for (const item of items) {
+    if (item.separator) {
+      const sep = document.createElement("div");
+      sep.className = "context-menu-sep";
+      menu.appendChild(sep);
+      continue;
+    }
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `context-menu-item${item.danger ? " context-menu-item--danger" : ""}`;
+    btn.setAttribute("role", "menuitem");
+    btn.textContent = item.label;
+    if (item.disabled) {
+      btn.disabled = true;
+    } else {
+      btn.addEventListener("click", () => {
+        closeMenu();
+        item.action();
+      });
+    }
+    menu.appendChild(btn);
+  }
+  // Place off-screen first to measure, then clamp into the viewport.
+  menu.style.left = "0px";
+  menu.style.top = "0px";
+  document.body.appendChild(menu);
+  const { width, height } = menu.getBoundingClientRect();
+  const left = Math.min(x, window.innerWidth - width - 8);
+  const top = Math.min(y, window.innerHeight - height - 8);
+  menu.style.left = `${Math.max(8, left)}px`;
+  menu.style.top = `${Math.max(8, top)}px`;
+  openMenu = menu;
+  document.addEventListener("keydown", onMenuKeydown, true);
+  // Move focus into the menu so keyboard users land in the popover (the trigger, e.g. the
+  // ••• button, otherwise keeps focus and Tab never reaches it). Escape closes the menu.
+  menu.querySelector(".context-menu-item:not(:disabled)")?.focus();
+}
+
+/** Right-click a notification row → mark that thread as done. */
+function onInboxContextMenu(e) {
+  // `e.target` can be a Text node (right-clicking directly on text); normalize to an
+  // Element so `closest` still finds the row wherever inside it the user clicked.
+  const el = e.target instanceof Element ? e.target : e.target?.parentElement;
+  const row = el?.closest(".n-row");
+  if (!row) return;
+  e.preventDefault();
+  const threadId = row.dataset.threadId;
+  if (!threadId) return;
+  openContextMenu(e.clientX, e.clientY, [
+    {
+      label: "Mark as done",
+      danger: true,
+      action: () => markDone([threadId]),
+    },
+  ]);
+}
+
+/** The ••• toolbar menu: bulk mark-done over the currently visible (filtered) set. */
+function openBulkMenu(anchorEl) {
+  anchorEl.setAttribute("aria-expanded", "true");
+  const allIds = visibleNotifications().map((n) => n.thread_id);
+  const rect = anchorEl.getBoundingClientRect();
+  openContextMenu(rect.left, rect.bottom + 4, [
+    {
+      label: `Mark all as done${allIds.length ? ` (${allIds.length})` : ""}`,
+      danger: true,
+      disabled: allIds.length === 0,
+      action: () => {
+        const n = allIds.length;
+        if (
+          window.confirm(
+            `Mark ${n} notification${n === 1 ? "" : "s"} as done? This clears ${
+              n === 1 ? "it" : "them"
+            } on GitHub.`,
+          )
+        ) {
+          markDone(allIds);
+        }
+      },
+    },
+  ]);
+}
+
+
 /* -------------------------------- Settings ------------------------------- */
 
 /** Debounce timer for the polling-interval stepper (typed values settle before save). */
@@ -857,6 +1085,23 @@ window.addEventListener("DOMContentLoaded", () => {
   // Settings pane: opened from the sidebar or ⌘, ; closed via the back button.
   $("#open-settings").addEventListener("click", () => showSettings(true));
   $("#settings-back").addEventListener("click", () => showSettings(false));
+
+  // Notification actions: right-click a row to mark done; ••• for the visible set.
+  $("#inbox").addEventListener("contextmenu", onInboxContextMenu);
+  $("#bulk-actions-btn").addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (openMenu) closeMenu();
+    else openBulkMenu(e.currentTarget);
+  });
+  // Dismiss the popover on any outside click or scroll. Ignore the ••• trigger itself —
+  // its own click handler toggles the menu, and closing here first (mousedown precedes
+  // click) would let the click immediately reopen it, making it impossible to close.
+  document.addEventListener("mousedown", (e) => {
+    const onTrigger = e.target.closest?.("#bulk-actions-btn");
+    if (openMenu && !openMenu.contains(e.target) && !onTrigger) closeMenu();
+  });
+  window.addEventListener("blur", closeMenu);
+  $("#inbox").addEventListener("scroll", closeMenu, true);
   document.addEventListener("keydown", (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === ",") {
       e.preventDefault();

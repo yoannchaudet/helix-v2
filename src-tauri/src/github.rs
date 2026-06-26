@@ -211,6 +211,56 @@ pub async fn resolve_subject(
     })
 }
 
+/* -------------------------------- Mutations ------------------------------- */
+
+/// Failure from a thread mutation that still carries the rate-limit snapshot. A failed
+/// request consumes quota too, so the caller folds this `rate` into the displayed remaining
+/// count to keep it accurate even when some/all mutations fail.
+pub struct MutationError {
+    pub rate: RateLimit,
+    pub message: String,
+}
+
+/// Mark a notification thread as **done** (`DELETE /notifications/threads/{thread_id}`).
+///
+/// GitHub answers `204 No Content` on success; the thread is removed from the inbox
+/// entirely. The response's rate-limit snapshot is returned on success and carried in
+/// [`MutationError`] on failure (failed requests still consume quota). A transport error
+/// before any response carries a default (empty) snapshot.
+pub async fn mark_thread_done(
+    client: &reqwest::Client,
+    token: &str,
+    thread_id: &str,
+) -> Result<RateLimit, MutationError> {
+    let url = format!("{API_BASE}/notifications/threads/{thread_id}");
+    let resp = authed(client.delete(&url), token)
+        .send()
+        .await
+        .map_err(|e| MutationError {
+            rate: RateLimit::default(),
+            message: format!("network error: {e}"),
+        })?;
+
+    let status = resp.status();
+    let mut rate = RateLimit::default();
+    rate.update_from(resp.headers());
+
+    if status.is_success() {
+        return Ok(rate);
+    }
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(MutationError {
+            rate,
+            message: "Invalid or expired token — GitHub returned 401.".to_string(),
+        });
+    }
+    let body = resp.text().await.unwrap_or_default();
+    Err(MutationError {
+        rate,
+        message: format!("GitHub returned {status}: {}", body.trim()),
+    })
+}
+
 /// Rate-limit snapshot read from response headers.
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct RateLimit {
@@ -299,14 +349,19 @@ where
     Ok(FetchOutcome { threads, rate })
 }
 
-/// Build an authenticated GET request with the standard GitHub headers.
-fn authed_get(client: &reqwest::Client, url: &str, token: &str) -> reqwest::RequestBuilder {
-    client
-        .get(url)
+/// Apply the standard GitHub headers (auth, accept, pinned API version, user-agent) to a
+/// request builder. Shared by every verb so the discipline in `AGENT.md` is applied once.
+fn authed(builder: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
+    builder
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", API_VERSION)
         .header("User-Agent", USER_AGENT)
+}
+
+/// Build an authenticated GET request with the standard GitHub headers.
+fn authed_get(client: &reqwest::Client, url: &str, token: &str) -> reqwest::RequestBuilder {
+    authed(client.get(url), token)
 }
 
 /// Parse an integer response header.
