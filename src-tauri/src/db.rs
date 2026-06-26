@@ -91,10 +91,12 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE notifications DROP COLUMN unread;
     ALTER TABLE notifications DROP COLUMN last_read_at;
     "#,
-    // v4 — short-lived tombstones for threads just marked done. A sync's network fetch may
-    // predate a mark-done, then re-insert the (already deleted) thread from its stale result.
-    // store_notifications consults this table to suppress such re-inserts until GitHub stops
-    // returning the thread (or the thread genuinely re-surfaces with newer activity).
+    // v4 — durable local record of threads the user marked done. GitHub's `DELETE`
+    // ("done") only removes a thread from the *unread* list; `all=true` (which we fetch)
+    // keeps returning done threads as "read", so we must remember "done" locally.
+    // store_notifications consults this table to keep such threads out of the inbox until the
+    // thread genuinely re-surfaces with newer activity or GitHub stops listing it. `done_at`
+    // is the mark-done time, used as the re-surface watermark (see store_notifications).
     r#"
     CREATE TABLE IF NOT EXISTS done_tombstones (
         thread_id   TEXT PRIMARY KEY,
