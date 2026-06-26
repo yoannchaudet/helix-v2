@@ -114,6 +114,20 @@
           </div>
         </header>
 
+        <!-- Auto-update prompt: shown when a newer release is available (release builds). -->
+        <div class="update-banner" id="update-banner" hidden role="status" aria-live="polite">
+          <div class="update-banner-main">
+            <span class="update-banner-text" id="update-banner-text"></span>
+            <span class="update-bar" id="update-bar" hidden aria-hidden="true">
+              <span class="update-bar-fill" id="update-bar-fill"></span>
+            </span>
+          </div>
+          <div class="update-banner-actions">
+            <button type="button" class="btn btn--sm" id="update-later">Later</button>
+            <button type="button" class="btn btn--sm btn--primary" id="update-now">Update &amp; restart</button>
+          </div>
+        </div>
+
         <div class="inbox" id="inbox" aria-live="polite">
           <div class="loader">
             <span class="spinner" aria-hidden="true"></span>
@@ -144,6 +158,25 @@
               </div>
             </div>
           </div>
+        </section>
+
+        <!-- App updates -->
+        <section class="sgroup">
+          <h2 class="sgroup-label">Updates</h2>
+          <div class="slist">
+            <div class="srow">
+              <span class="srow-label">Version</span>
+              <span class="srow-value"><span id="app-version">—</span></span>
+            </div>
+            <div class="srow">
+              <span class="srow-label" id="update-status">Up to date</span>
+              <span class="srow-value">
+                <span class="srow-flash" id="update-flash" aria-live="polite"></span>
+                <button type="button" class="btn btn--sm" id="check-updates-btn">Check for updates</button>
+              </span>
+            </div>
+          </div>
+          <p class="sgroup-note" id="updates-note" hidden></p>
         </section>
 
         <!-- Notifications (sync freshness + rate, no list) -->

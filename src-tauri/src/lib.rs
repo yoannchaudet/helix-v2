@@ -594,6 +594,92 @@ fn open_url(_url: String) -> Result<(), String> {
     Err("Opening URLs is only supported on macOS.".to_string())
 }
 
+/// Whether in-app auto-update is available in this build. Release macOS builds ship the
+/// updater plugin; debug builds — and non-macOS — do not, so the frontend hides the update
+/// UI and never calls the (absent) updater commands.
+#[tauri::command]
+fn updater_enabled() -> bool {
+    !cfg!(debug_assertions) && cfg!(target_os = "macos")
+}
+
+/// The running app version (from `tauri.conf.json`), shown in Settings.
+#[tauri::command]
+fn app_version(app: tauri::AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
+/// Metadata about an available update, surfaced to the UI.
+#[derive(Serialize, Clone)]
+struct UpdateInfo {
+    version: String,
+    current_version: String,
+    notes: Option<String>,
+}
+
+/// Download progress, emitted on the `update:progress` event while an update installs.
+#[derive(Serialize, Clone)]
+struct UpdateProgress {
+    downloaded: u64,
+    total: Option<u64>,
+}
+
+/// Check the configured release endpoint for a newer version. Returns `None` when the app
+/// is up to date. Release macOS builds only: the updater plugin isn't initialized in debug
+/// (so this errors there) and the UI gates calls behind `updater_enabled`.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn check_for_update(app: tauri::AppHandle) -> Result<Option<UpdateInfo>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    match updater.check().await.map_err(|e| e.to_string())? {
+        Some(update) => Ok(Some(UpdateInfo {
+            version: update.version.clone(),
+            current_version: update.current_version.clone(),
+            notes: update.body.clone(),
+        })),
+        None => Ok(None),
+    }
+}
+
+/// Download and install the available update — emitting `update:progress` as bytes arrive
+/// and `update:installed` when done — then relaunch into the new version. Release macOS
+/// builds only.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let Some(update) = updater.check().await.map_err(|e| e.to_string())? else {
+        return Err("No update available.".to_string());
+    };
+    let mut downloaded: u64 = 0;
+    update
+        .download_and_install(
+            |chunk, total| {
+                downloaded += chunk as u64;
+                let _ = app.emit("update:progress", UpdateProgress { downloaded, total });
+            },
+            || {},
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit("update:installed", ());
+    // Relaunch into the freshly installed bundle. `restart` diverges (never returns).
+    app.restart();
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn check_for_update(_app: tauri::AppHandle) -> Result<Option<UpdateInfo>, String> {
+    Err("Updates are only supported on macOS.".to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn install_update(_app: tauri::AppHandle) -> Result<(), String> {
+    Err("Updates are only supported on macOS.".to_string())
+}
+
 /// Persist the current window size (logical px) to SQLite so the next launch restores
 /// it. Skips minimized/maximized/fullscreen states and redundant writes (the cache in
 /// `AppState`) so a resize drag doesn't hammer the database.
@@ -648,7 +734,15 @@ pub fn run() {
             .expect("failed to initialize the macOS Keychain store"),
     );
 
-    tauri::Builder::default()
+    // Auto-update is release-only: a dev build must never try to self-update (it would hit
+    // the production endpoint and replace the running binary). The updater plugin is
+    // macOS-only (see Cargo.toml); we drive it from Rust (see `check_for_update` /
+    // `install_update`) and relaunch with the core `AppHandle::restart`.
+    let builder = tauri::Builder::default();
+    #[cfg(all(not(debug_assertions), target_os = "macos"))]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+
+    builder
         .on_window_event(|window, event| {
             // Persist the window size to SQLite so the next launch reopens at the same
             // size (macOS/Tauri don't restore it automatically). Resize fires
@@ -724,7 +818,11 @@ pub fn run() {
             mark_threads_done,
             show_main_window,
             reveal_in_finder,
-            open_url
+            open_url,
+            updater_enabled,
+            app_version,
+            check_for_update,
+            install_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
