@@ -650,7 +650,8 @@ function repoHeader(group) {
   const privacy = group.private
     ? `<span class="badge badge--lock" title="Private repository">private</span>`
     : "";
-  // Read state isn't tracked; show the total number of notifications in this repo.
+  // Read state isn't tracked; show how many notifications are shown for this repo (i.e.
+  // matching the active filter — `group.notifications` is already filtered upstream).
   const counts = `<span class="repo-counts">${group.notifications.length}</span>`;
   return `
     <div class="repo-header">

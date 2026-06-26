@@ -458,7 +458,7 @@ pub fn mark_done_local(conn: &mut Connection, thread_ids: &[String]) -> rusqlite
             "INSERT INTO done_tombstones (thread_id, updated_at, done_at)
              VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
              ON CONFLICT(thread_id) DO UPDATE SET
-               updated_at = excluded.updated_at,
+               updated_at = COALESCE(excluded.updated_at, done_tombstones.updated_at),
                done_at    = excluded.done_at",
         )?;
         let mut delete_stmt = tx.prepare("DELETE FROM notifications WHERE thread_id = ?1")?;
@@ -947,6 +947,31 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM done_tombstones", [], |r| r.get(0))
             .unwrap();
         assert_eq!(tombstones, 0, "expired tombstone is reaped");
+    }
+
+    #[test]
+    fn duplicate_mark_done_preserves_tombstone_updated_at() {
+        // A second mark-done for the same id (row already gone → NULL updated_at) must not
+        // clobber the tombstone's captured updated_at, or a real re-surface would be missed.
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
+        mark_done_local(&mut conn, &["1".to_string()]).unwrap();
+        mark_done_local(&mut conn, &["1".to_string()]).unwrap(); // row already deleted
+
+        let updated_at: Option<String> = conn
+            .query_row(
+                "SELECT updated_at FROM done_tombstones WHERE thread_id = '1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(updated_at.as_deref(), Some("2026-01-02T00:00:00Z"));
+
+        // A genuine re-surface (newer activity) still comes back.
+        let mut newer = thread("1", 100, "octo/repo-a", "One");
+        newer.updated_at = "2026-06-01T00:00:00Z".to_string();
+        store_notifications(&mut conn, &[newer]).unwrap();
+        assert_eq!(count(&conn).unwrap(), 1);
     }
 
     #[test]
