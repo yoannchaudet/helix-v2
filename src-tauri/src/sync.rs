@@ -268,10 +268,10 @@ impl RateTracker {
     }
 
     /// Whether any tracked bucket has fallen to/below a reserve fraction of its limit — e.g.
-    /// `reserve_fraction = 0.25` means "fewer than 25% of the allowance remains". Used to
-    /// stop spending optional quota (background subject resolution) before exhausting the
-    /// budget other operations (list fetch, mark-done) need. Buckets whose limit we don't
-    /// know yet are ignored.
+    /// `reserve_fraction = 0.25` means "25% or fewer of the allowance remains" (the check is
+    /// inclusive: `remaining <= fraction * limit`). Used to stop spending optional quota
+    /// (background subject resolution) before exhausting the budget other operations (list
+    /// fetch, mark-done) need. Buckets whose limit we don't know yet are ignored.
     pub fn below_reserve(&self, reserve_fraction: f64) -> bool {
         self.buckets.values().any(|b| match (b.remaining, b.limit) {
             (Some(remaining), Some(limit)) if limit > 0 => {
