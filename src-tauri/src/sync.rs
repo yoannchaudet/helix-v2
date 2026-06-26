@@ -23,17 +23,19 @@ pub struct StoreOutcome {
 /// Upsert repos + notifications from a **complete** fetch and reconcile local state.
 ///
 /// `threads` must be the full current set of notifications GitHub returns for `all=true`
-/// (read and unread alike, but never *done* threads). Existing rows are updated in place;
+/// (read **and** unread — and, unhelpfully, GitHub keeps returning *done* threads here too;
+/// they're filtered out locally via `done_tombstones`). Existing rows are updated in place;
 /// the subject-resolution columns (`subject_state`, `resolved_at`, …) are intentionally left
 /// untouched here — they are populated separately by `store_resolved_subject` after subjects
 /// are resolved.
 ///
-/// Reconciliation (M5): any locally-stored notification absent from this fetch was marked
-/// **done** upstream (here or elsewhere), so it is deleted — done is the only thing that
-/// removes a notification (read state is not tracked). Repos left without any notifications
-/// are pruned so the table doesn't accumulate orphans. Stale rows are identified by the
-/// exact set of fetched thread ids rather than a timestamp watermark, so
-/// reconciliation is correct even when two syncs land within the same clock tick.
+/// Reconciliation (M5): any locally-stored notification absent from this fetch was removed
+/// upstream (e.g. the underlying repo became inaccessible), so it is deleted. Note this is
+/// *not* how marking-done works — GitHub keeps done threads in `all=true`, so done is handled
+/// by the local tombstones, not reconciliation. Repos left without any notifications are
+/// pruned so the table doesn't accumulate orphans. Stale rows are identified by the exact set
+/// of fetched thread ids rather than a timestamp watermark, so reconciliation is correct even
+/// when two syncs land within the same clock tick.
 pub fn store_notifications(
     conn: &mut Connection,
     threads: &[NotificationThread],
@@ -53,17 +55,16 @@ pub fn store_notifications(
     // this can be less than `threads.len()`).
     let mut stored = 0usize;
 
-    // A done-tombstone only suppresses re-inserts within this TTL; past it, the tombstone
-    // is treated as absent (and is reaped by the cleanup at the end of this pass). The same
-    // modifier is used for the suppression lookup and the cleanup so they can't drift.
-    const TOMBSTONE_TTL: &str = "-10 minutes";
-    // Prepared once and reused across the loop (with `all=true` the fetch can be large);
-    // explicitly dropped before `tx.commit()` since it borrows the transaction.
-    let mut tombstone_stmt = tx.prepare(&format!(
-        "SELECT updated_at FROM done_tombstones
-         WHERE thread_id = ?1
-           AND done_at >= strftime('%Y-%m-%dT%H:%M:%SZ','now','{TOMBSTONE_TTL}')"
-    ))?;
+    // A done-tombstone is a *durable* local record that the user marked this thread done.
+    // It must persist for as long as GitHub keeps returning the thread, because
+    // `DELETE /notifications/threads/{id}` ("done") only drops a thread from the *unread*
+    // list — `all=true` (which we fetch) keeps returning done threads as "read". So there is
+    // no time-based expiry: a tombstone is cleared only when the thread genuinely re-surfaces
+    // with newer activity (handled below) or when GitHub finally stops listing it (the
+    // cleanup at the end of this pass). Prepared once and reused across the loop (with
+    // `all=true` the fetch can be large); dropped before `tx.commit()` since it borrows tx.
+    let mut tombstone_stmt =
+        tx.prepare("SELECT updated_at, done_at FROM done_tombstones WHERE thread_id = ?1")?;
 
     for t in threads {
         tx.execute(
@@ -71,19 +72,27 @@ pub fn store_notifications(
             params![t.id],
         )?;
 
-        // Suppress re-inserting a thread the user just marked done: a sync's network fetch
-        // can predate the mark-done and carry the now-deleted thread in its (stale) result.
-        // A (non-expired) tombstone blocks the re-insert until GitHub stops returning the
-        // thread — unless it has genuinely *newer* activity than when it was marked done, in
-        // which case it's a real re-surface, so we clear the tombstone and let it back in.
-        let tombstone: Option<Option<String>> = tombstone_stmt
-            .query_row(params![t.id], |r| r.get::<_, Option<String>>(0))
+        // Keep a thread the user marked done out of the inbox. GitHub keeps returning done
+        // threads in `all=true`, so the tombstone suppresses re-inserting it — unless it has
+        // genuinely *newer* activity than the user has already dismissed, in which case it's a
+        // real re-surface, so we clear the tombstone and let it back in.
+        //
+        // The watermark is the later of the activity we knew about at done-time
+        // (`updated_at`, which may be stale or NULL if the row hadn't synced) and the moment
+        // the user marked it done (`done_at`). Using `done_at` too means pre-done activity we
+        // simply hadn't fetched yet can't masquerade as a re-surface, and a NULL `updated_at`
+        // tombstone still suppresses correctly. (ISO-8601 UTC timestamps compare lexically.)
+        let tombstone: Option<(Option<String>, String)> = tombstone_stmt
+            .query_row(params![t.id], |r| {
+                Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?))
+            })
             .optional()?;
-        if let Some(done_updated_at) = tombstone {
-            let resurfaced = match &done_updated_at {
-                Some(prev) => t.updated_at.as_str() > prev.as_str(),
-                None => false,
+        if let Some((done_updated_at, done_at)) = tombstone {
+            let watermark: &str = match done_updated_at.as_deref() {
+                Some(prev) if prev > done_at.as_str() => prev,
+                _ => done_at.as_str(),
             };
+            let resurfaced = t.updated_at.as_str() > watermark;
             if resurfaced {
                 tx.execute(
                     "DELETE FROM done_tombstones WHERE thread_id = ?1",
@@ -160,15 +169,14 @@ pub fn store_notifications(
         [],
     )?;
 
-    // Retire tombstones that have done their job: a thread GitHub no longer returns is
-    // confirmed done (the mark-done stuck), and any tombstone past the TTL is reaped so a
-    // tombstone can never suppress a thread indefinitely.
+    // Retire a tombstone only once GitHub stops returning the thread — i.e. it has finally
+    // left the `all=true` list (aged out of GitHub's retention, or was un-done elsewhere). We
+    // deliberately do NOT expire tombstones on a timer: GitHub keeps returning done threads
+    // indefinitely, so a timer would let them resurface (the bug this fixes). The set stays
+    // bounded by GitHub's retention window and self-cleans as threads drop off.
     tx.execute(
-        &format!(
-            "DELETE FROM done_tombstones
-             WHERE thread_id NOT IN (SELECT thread_id FROM present_threads)
-                OR done_at < strftime('%Y-%m-%dT%H:%M:%SZ','now','{TOMBSTONE_TTL}')"
-        ),
+        "DELETE FROM done_tombstones
+         WHERE thread_id NOT IN (SELECT thread_id FROM present_threads)",
         [],
     )?;
 
@@ -468,10 +476,13 @@ pub fn mark_done_local(conn: &mut Connection, thread_ids: &[String]) -> rusqlite
     let mut removed = 0;
     {
         // For each thread, record a tombstone (with the row's current `updated_at`) before
-        // deleting it, so a stale in-flight sync can't re-insert the just-done thread. The
-        // tombstone is keyed by thread id; `updated_at` lets a later sync tell a stale
-        // re-insert (same/older timestamp → keep suppressed) from a genuine re-surface with
-        // new activity (newer timestamp → allow back).
+        // deleting it, so future syncs keep the just-done thread out of the inbox — GitHub
+        // keeps returning done threads in `all=true`, and this also covers a stale in-flight
+        // sync that still carries the thread. The tombstone is keyed by thread id;
+        // `updated_at` lets a later sync tell an unchanged thread (same/older timestamp → keep
+        // suppressed) from a genuine re-surface with new activity (newer timestamp → allow
+        // back). `done_at` (the mark-done time) is the suppression watermark — see
+        // store_notifications — so pre-done activity can't masquerade as a re-surface.
         let mut updated_at_stmt =
             tx.prepare("SELECT updated_at FROM notifications WHERE thread_id = ?1")?;
         let mut tombstone_stmt = tx.prepare(
@@ -912,7 +923,9 @@ mod tests {
         mark_done_local(&mut conn, &["1".to_string()]).unwrap();
 
         let mut newer = thread("1", 100, "octo/repo-a", "One (new comment)");
-        newer.updated_at = "2026-06-01T00:00:00Z".to_string(); // newer than the fixture's date
+        // Activity *after* the mark-done (done_at ≈ now); use a far-future date so it's
+        // unambiguously past the wall-clock done watermark regardless of when the test runs.
+        newer.updated_at = "2099-01-01T00:00:00Z".to_string();
         store_notifications(&mut conn, &[newer]).unwrap();
 
         assert_eq!(count(&conn).unwrap(), 1, "new activity must re-surface the thread");
@@ -946,13 +959,15 @@ mod tests {
     }
 
     #[test]
-    fn expired_tombstone_does_not_suppress_in_the_same_pass() {
-        // A tombstone past its TTL must be treated as absent immediately — the thread comes
-        // back in this very store pass, not only on the next one.
+    fn old_tombstone_still_suppresses_unchanged_thread() {
+        // The fix: a tombstone never expires on a timer. GitHub keeps returning done threads
+        // in `all=true`, so even a long-old tombstone must keep an unchanged thread out of the
+        // inbox (no resurrection), and must remain so it can keep doing so.
         let mut conn = mem_conn();
         store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
         mark_done_local(&mut conn, &["1".to_string()]).unwrap();
-        // Backdate the tombstone well past the 10-minute TTL.
+        // Backdate the tombstone far into the past — under the old 10-minute TTL it would have
+        // been reaped and the thread would resurface; now it must not.
         conn.execute(
             "UPDATE done_tombstones SET done_at = '2000-01-01T00:00:00Z' WHERE thread_id = '1'",
             [],
@@ -961,12 +976,12 @@ mod tests {
 
         let outcome =
             store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
-        assert_eq!(count(&conn).unwrap(), 1, "expired tombstone must not suppress");
-        assert_eq!(outcome.stored, 1);
+        assert_eq!(count(&conn).unwrap(), 0, "an old tombstone must still suppress");
+        assert_eq!(outcome.stored, 0);
         let tombstones: i64 = conn
             .query_row("SELECT COUNT(*) FROM done_tombstones", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(tombstones, 0, "expired tombstone is reaped");
+        assert_eq!(tombstones, 1, "tombstone is kept while the thread is still listed");
     }
 
     #[test]
@@ -987,11 +1002,64 @@ mod tests {
             .unwrap();
         assert_eq!(updated_at.as_deref(), Some("2026-01-02T00:00:00Z"));
 
-        // A genuine re-surface (newer activity) still comes back.
+        // A genuine re-surface (activity after the mark-done) still comes back.
         let mut newer = thread("1", 100, "octo/repo-a", "One");
-        newer.updated_at = "2026-06-01T00:00:00Z".to_string();
+        newer.updated_at = "2099-01-01T00:00:00Z".to_string();
         store_notifications(&mut conn, &[newer]).unwrap();
         assert_eq!(count(&conn).unwrap(), 1);
+    }
+
+    #[test]
+    fn pre_done_activity_does_not_resurface() {
+        // The local row was stale (T1) when marked done, and the user dismissed it at T3,
+        // after activity T2 that Helix hadn't synced yet (T1 < T2 < T3). A later fetch
+        // returning the thread at T2 must NOT resurface it — the activity predates the
+        // mark-done, so it's already been dismissed.
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
+        mark_done_local(&mut conn, &["1".to_string()]).unwrap();
+        // Tombstone: knew about T1 locally, marked done at T3.
+        conn.execute(
+            "UPDATE done_tombstones
+                SET updated_at = '2026-01-02T00:00:00Z', done_at = '2026-03-01T00:00:00Z'
+              WHERE thread_id = '1'",
+            [],
+        )
+        .unwrap();
+        // Fetch surfaces T2 (between T1 and T3) — activity that predates the done.
+        let mut t2 = thread("1", 100, "octo/repo-a", "One");
+        t2.updated_at = "2026-02-01T00:00:00Z".to_string();
+        store_notifications(&mut conn, &[t2]).unwrap();
+        assert_eq!(
+            count(&conn).unwrap(),
+            0,
+            "activity before the mark-done must not resurface a done thread"
+        );
+    }
+
+    #[test]
+    fn null_updated_at_tombstone_uses_done_at_watermark() {
+        // A tombstone created when the row wasn't locally present has NULL updated_at; done_at
+        // alone must still suppress, and only activity strictly after done_at resurfaces.
+        let mut conn = mem_conn();
+        conn.execute(
+            "INSERT INTO done_tombstones (thread_id, updated_at, done_at)
+             VALUES ('1', NULL, '2026-03-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        // Activity before done_at → still suppressed.
+        let mut before = thread("1", 100, "octo/repo-a", "One");
+        before.updated_at = "2026-02-01T00:00:00Z".to_string();
+        store_notifications(&mut conn, &[before]).unwrap();
+        assert_eq!(count(&conn).unwrap(), 0, "NULL-updated_at tombstone suppresses before done_at");
+
+        // Activity after done_at → genuine re-surface.
+        let mut after = thread("1", 100, "octo/repo-a", "One");
+        after.updated_at = "2026-04-01T00:00:00Z".to_string();
+        store_notifications(&mut conn, &[after]).unwrap();
+        assert_eq!(count(&conn).unwrap(), 1, "activity after done_at resurfaces");
     }
 
     #[test]
