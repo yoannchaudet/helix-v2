@@ -42,6 +42,29 @@ function flash(el, text, kind) {
   }, 1800);
 }
 
+/** Show a brief, self-dismissing toast for actions with no inline anchor (e.g. a copy
+ * triggered from the right-click menu). Announced politely for screen readers. */
+let toastTimer = null;
+function toast(text, kind) {
+  let el = document.getElementById("toast");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "toast";
+    el.className = "toast";
+    el.setAttribute("role", "status");
+    el.setAttribute("aria-live", "polite");
+    document.body.appendChild(el);
+  }
+  el.textContent = text;
+  el.classList.toggle("toast--error", kind === "error");
+  // Restart the CSS transition even if a toast is already showing.
+  el.classList.remove("toast--show");
+  void el.offsetWidth;
+  el.classList.add("toast--show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("toast--show"), 1600);
+}
+
 function escapeHtml(value) {
   return String(value).replace(
     /[&<>"']/g,
@@ -554,8 +577,14 @@ function notificationRow(n) {
   const badge = stateBadge(n.subject_state);
   const stateLine = badge ? `<div class="n-state">${badge}</div>` : "";
   const reason = escapeHtml(n.reason.replace(/_/g, " "));
+  // Only rows with a resolved web URL are openable (clickable + hover affordance).
+  const url = n.subject_html_url || "";
+  const cls = `n-row${n.unread ? " n-row--unread" : ""}${url ? " n-row--openable" : ""}`;
+  const openAttrs = url
+    ? ` data-url="${escapeHtml(url)}" role="link" tabindex="0"`
+    : "";
   return `
-    <li class="n-row ${n.unread ? "n-row--unread" : ""}" data-thread-id="${escapeHtml(n.thread_id)}">
+    <li class="${cls}" data-thread-id="${escapeHtml(n.thread_id)}"${openAttrs}>
       <span class="n-badge-slot">${subjectBadge(n.subject_type)}</span>
       <div class="n-main">
         <div class="n-title">${number}${escapeHtml(n.subject_title)}</div>
@@ -940,17 +969,73 @@ function openContextMenu(x, y, items) {
   menu.querySelector(".context-menu-item:not(:disabled)")?.focus();
 }
 
-/** Right-click a notification row → mark that thread as done. */
-function onInboxContextMenu(e) {
-  // `e.target` can be a Text node (right-clicking directly on text); normalize to an
-  // Element so `closest` still finds the row wherever inside it the user clicked.
+/** Open a notification's subject in the default browser via the backend. */
+function openNotification(url) {
+  if (!url) return;
+  invoke("open_url", { url }).catch((err) => {
+    console.error(`failed to open ${url}: ${err}`);
+    toast("Couldn't open link", "error");
+  });
+}
+
+/** Copy a notification's subject URL to the clipboard. */
+async function copyNotificationUrl(url) {
+  if (!url) return;
+  try {
+    await navigator.clipboard.writeText(url);
+    toast("Copied URL");
+  } catch (err) {
+    console.error(`failed to copy ${url}: ${err}`);
+    toast("Copy failed", "error");
+  }
+}
+
+/** Resolve the `.n-row` an inbox event landed on, normalizing text-node targets. */
+function inboxRowFromEvent(e) {
   const el = e.target instanceof Element ? e.target : e.target?.parentElement;
-  const row = el?.closest(".n-row");
+  return el?.closest(".n-row") ?? null;
+}
+
+/** Left-click an openable notification row → open it in the browser. */
+function onInboxClick(e) {
+  // Ignore the second click of a double-click so an instinctive double-click on a
+  // desktop list row doesn't open two browser tabs.
+  if (e.detail > 1) return;
+  const row = inboxRowFromEvent(e);
+  if (row?.dataset.url) openNotification(row.dataset.url);
+}
+
+/** Enter on a focused openable row → open it (links activate on Enter, not Space). */
+function onInboxKeydown(e) {
+  if (e.key !== "Enter") return;
+  const row = inboxRowFromEvent(e);
+  if (!row?.dataset.url) return;
+  e.preventDefault();
+  openNotification(row.dataset.url);
+}
+
+/** Right-click a notification row → copy its URL (if resolved) and/or mark done. */
+function onInboxContextMenu(e) {
+  const row = inboxRowFromEvent(e);
   if (!row) return;
   e.preventDefault();
   const threadId = row.dataset.threadId;
   if (!threadId) return;
-  openContextMenu(e.clientX, e.clientY, [
+  const url = row.dataset.url;
+  // A keyboard-triggered context menu (Menu key / Shift+F10) reports 0,0; anchor the
+  // menu to the row instead so it doesn't appear detached in the corner.
+  let { clientX: x, clientY: y } = e;
+  if (x === 0 && y === 0) {
+    const r = row.getBoundingClientRect();
+    x = r.left + 12;
+    y = r.bottom - 8;
+  }
+  openContextMenu(x, y, [
+    {
+      label: "Copy URL",
+      disabled: !url,
+      action: () => copyNotificationUrl(url),
+    },
     {
       label: "Mark as done",
       danger: true,
@@ -1173,7 +1258,10 @@ window.addEventListener("DOMContentLoaded", () => {
   $("#open-settings").addEventListener("click", () => showSettings(true));
   $("#settings-back").addEventListener("click", () => showSettings(false));
 
-  // Notification actions: right-click a row to mark done; ••• for the visible set.
+  // Notification actions: left-click an (openable) row to open it in the browser,
+  // right-click for the row menu, ••• for the visible set. Enter opens a focused row.
+  $("#inbox").addEventListener("click", onInboxClick);
+  $("#inbox").addEventListener("keydown", onInboxKeydown);
   $("#inbox").addEventListener("contextmenu", onInboxContextMenu);
   $("#bulk-actions-btn").addEventListener("click", (e) => {
     e.stopPropagation();
