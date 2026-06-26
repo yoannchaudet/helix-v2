@@ -80,8 +80,9 @@ code,
 }
 
 /* With the sidebar gone, the toolbar slides under the macOS traffic lights — inset
-   its left padding so the back button clears them. */
-.app--settings #view-settings .toolbar {
+   its left padding so the back button clears them (macOS only; other platforms have
+   no overlaid traffic lights). */
+[data-platform="macos"] .app--settings #view-settings .toolbar {
   padding-left: 80px;
 }
 

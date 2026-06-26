@@ -1282,6 +1282,11 @@ function initSidebarResize() {
 /* --------------------------------- Init ---------------------------------- */
 
 window.addEventListener("DOMContentLoaded", () => {
+  // Tag the platform so macOS-only chrome (e.g. the traffic-light toolbar inset) is scoped
+  // to macOS and doesn't apply on Windows/Linux (the app bundles for all targets).
+  if (navigator.userAgent.includes("Macintosh")) {
+    document.documentElement.dataset.platform = "macos";
+  }
   // Settings auto-apply: the toggle persists immediately; the stepper debounces typed
   // values and persists right away on a committed change (blur / arrow click).
   $("#dependabot-only").addEventListener("change", applySettings);
