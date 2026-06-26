@@ -1081,20 +1081,26 @@ function openBulkMenu(anchorEl) {
       label: `Mark all as done${allIds.length ? ` (${allIds.length})` : ""}`,
       danger: true,
       disabled: allIds.length === 0,
-      action: () => {
-        const n = allIds.length;
-        if (
-          window.confirm(
-            `Mark ${n} notification${n === 1 ? "" : "s"} as done? This clears ${
-              n === 1 ? "it" : "them"
-            } on GitHub.`,
-          )
-        ) {
-          markDone(allIds);
-        }
-      },
+      action: () => confirmBulkDone(allIds, rect),
     },
   ]);
+}
+
+/** Second-step confirmation for the destructive bulk mark-done. WKWebView (Tauri on macOS)
+ *  does not implement window.confirm — it returns false without showing a dialog — so we
+ *  confirm with an in-app menu instead, which actually works. */
+function confirmBulkDone(allIds, rect) {
+  const n = allIds.length;
+  if (!n) return;
+  openContextMenu(rect.left, rect.bottom + 4, [
+    {
+      label: `Confirm: mark ${n} as done (clears on GitHub)`,
+      danger: true,
+      action: () => markDone(allIds),
+    },
+    { label: "Cancel", action: () => {} },
+  ]);
+  $("#bulk-actions-btn")?.setAttribute("aria-expanded", "true");
 }
 
 
