@@ -1,9 +1,10 @@
 //! Helix application core.
 //!
-//! On startup we install the macOS Keychain credential store, resolve the app-data
-//! directory, and bootstrap the SQLite database (creating it and applying migrations on
-//! first run). The frontend drives auth/settings and storage status through the commands
-//! below, always with live, color-coded feedback (see `AGENT.md`).
+//! On startup we resolve the app-data directory and bootstrap the SQLite database
+//! (creating it and applying migrations on first run). Release builds also install the
+//! macOS Keychain credential store for the PAT; debug builds store the PAT unencrypted in
+//! SQLite instead (see `auth.rs`). The frontend drives auth/settings and storage status
+//! through the commands below, always with live, color-coded feedback (see `AGENT.md`).
 
 mod auth;
 mod db;
@@ -618,6 +619,11 @@ pub fn run() {
 
             let db_path = data_dir.join("helix.db");
             let conn = db::open_and_migrate(&db_path)?;
+
+            // Release builds: scrub any plaintext dev PAT a prior debug run may have left in
+            // this shared DB, so a release build never carries an unencrypted token. No-op
+            // in debug (must not touch the Keychain).
+            let _ = auth::purge_inactive_token(&conn);
 
             // Restore the last window size (logical px) before the window is shown, so
             // there's no visible resize jump. Read it before `conn` is moved into state.

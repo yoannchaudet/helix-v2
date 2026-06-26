@@ -19,8 +19,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Bundled SQLite: no system dependency, reproducible builds (see AGENT.md "lightweight first").
 rusqlite = { version = "0.40", features = ["bundled"] }
-# Secret storage in the macOS login Keychain (keyring v4 split the library into keyring-core
-# plus per-platform store crates). PAT is never written to SQLite.
+# Secret storage in the macOS login Keychain for release builds (keyring v4 split the
+# library into keyring-core plus per-platform store crates). Debug builds store the PAT
+# unencrypted in SQLite instead (see auth.rs), so the Keychain isn't touched in dev.
 keyring-core = "1"
 apple-native-keyring-store = { version = "1", features = ["keychain"] }
 # GitHub REST client. macOS-only target → default (native) TLS keeps the dependency
