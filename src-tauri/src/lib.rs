@@ -246,10 +246,10 @@ async fn sync_now(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<S
 ///
 /// Smart caching (`subjects_needing_resolution`) keeps this cheap after the first sync. To
 /// avoid this *optional* work starving the quota that core operations (list fetch, mark-done)
-/// need, it stops once spending would drop a rate-limit bucket below a 25% reserve; the
-/// deferred (oldest) subjects resolve on a later sync once quota recovers. Per-subject
-/// failures are logged and retried later; the DB lock is never held across network I/O.
-/// Emits `subjects:resolved` when anything changed.
+/// need, it stops after a batch once spending has reached a ~25% reserve on any rate-limit
+/// bucket (a soft floor — see `RESERVE_FRACTION`); the deferred (oldest) subjects resolve on
+/// a later sync once quota recovers. Per-subject failures are logged and retried later; the
+/// DB lock is never held across network I/O. Emits `subjects:resolved` when anything changed.
 async fn resolve_pending_subjects(app: tauri::AppHandle, token: String) {
     let state = app.state::<AppState>();
 
@@ -269,10 +269,14 @@ async fn resolve_pending_subjects(app: tauri::AppHandle, token: String) {
 
     const POOL: usize = 8;
     // Background subject resolution is *optional* quota: stop before it eats into the
-    // reserve other operations (the notifications list fetch, mark-done) need. We keep at
-    // least this fraction of each bucket's allowance — i.e. never spend the last 25%.
-    // Deferred subjects stay pending (they're newest-first), so a later sync — once the
-    // window resets and quota is plentiful again — finishes them.
+    // reserve other operations (the notifications list fetch, mark-done) need. We aim to
+    // keep at least this fraction of each bucket's allowance.
+    //
+    // This is a *soft* reserve: the check runs after each batch of up to POOL concurrent
+    // requests, so a single batch can dip up to POOL requests past the line before we stop
+    // (immaterial against the thousands-wide core budget; not a hard floor). Deferred
+    // subjects stay pending (newest-first), so a later sync — once the window resets and
+    // quota is plentiful again — finishes them.
     const RESERVE_FRACTION: f64 = 0.25;
 
     let client = reqwest::Client::new();
