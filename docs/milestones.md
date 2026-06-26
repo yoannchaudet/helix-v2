@@ -51,8 +51,8 @@ live progress.
 ## M5 — Reconciliation
 **Objective:** Keep local state consistent with GitHub.
 **Deliverables:**
-- After a full sync pass, reconcile rows no longer present (marked done) using the
-  `fetched_at` watermark (design.md §3).
+- After a full sync pass, reconcile rows no longer present (marked done) by the exact set
+  of fetched thread ids (a `present_threads` temp table; design.md §3).
 **Done when:** Clearing a notification on github.com makes it disappear from Helix after
 the next sync.
 

@@ -49,6 +49,10 @@ pub fn store_notifications(
          DELETE FROM present_threads;",
     )?;
 
+    // Count notifications actually written (tombstoned re-inserts are skipped below, so
+    // this can be less than `threads.len()`).
+    let mut stored = 0usize;
+
     for t in threads {
         tx.execute(
             "INSERT OR IGNORE INTO present_threads (thread_id) VALUES (?1)",
@@ -127,6 +131,7 @@ pub fn store_notifications(
                 t.url,
             ],
         )?;
+        stored += 1;
     }
 
     // Reconcile: drop notifications no longer returned upstream, then prune repos that
@@ -155,10 +160,7 @@ pub fn store_notifications(
     )?;
 
     tx.commit()?;
-    Ok(StoreOutcome {
-        stored: threads.len(),
-        removed,
-    })
+    Ok(StoreOutcome { stored, removed })
 }
 
 /// Record a successful sync: timestamp, status, and the rate-limit snapshot.
@@ -865,7 +867,7 @@ mod tests {
         let outcome =
             store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
         assert_eq!(count(&conn).unwrap(), 0, "tombstone must suppress re-insert");
-        assert_eq!(outcome.stored, 1); // it was in the fetch, just not stored
+        assert_eq!(outcome.stored, 0, "a suppressed thread isn't counted as stored");
     }
 
     #[test]
