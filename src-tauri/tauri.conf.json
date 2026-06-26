@@ -4,8 +4,7 @@
   "version": "0.1.0",
   "identifier": "com.yoannchaudet.helix",
   "build": {
-    "frontendDist": "../src",
-    "runner": "../scripts/cargo-codesign.sh"
+    "frontendDist": "../src"
   },
   "app": {
     "withGlobalTauri": true,

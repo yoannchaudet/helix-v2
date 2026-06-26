@@ -7,6 +7,10 @@ const $$ = (sel) => document.querySelectorAll(sel);
 /** True once the user is authenticated; drives the signed-out empty state. */
 let authenticated = false;
 
+/** True when the backend stores the PAT unencrypted in SQLite (debug builds) rather than
+ *  the Keychain; drives the Settings warning. Set from `auth_status` in `loadAccount`. */
+let unencryptedStorage = false;
+
 const STATES = ["pending", "success", "error", "neutral"];
 
 /** True while a sync is in flight; gates stale sync:progress events. */
@@ -146,6 +150,18 @@ async function loadStorage() {
 
 /* -------------------------------- Account -------------------------------- */
 
+/** Markup for the "token stored unencrypted" warning shown in debug builds, or "" in
+ *  release. Rendered inside the Account group so it sits next to the credential UI. */
+function unencryptedStorageWarning() {
+  if (!unencryptedStorage) return "";
+  return `
+    <div class="callout callout--warn" role="note">
+      <strong>Dev build:</strong> your GitHub token is stored
+      <strong>unencrypted</strong> in this app's local database (SQLite), not the macOS
+      Keychain. Use a low-privilege token and don't ship this build.
+    </div>`;
+}
+
 function renderSignedIn(login, name) {
   authenticated = true;
   // Signed in → begin the automatic poll loop (idempotent; restarts the countdown).
@@ -163,6 +179,7 @@ function renderSignedIn(login, name) {
         src="https://github.com/${encodeURIComponent(login)}.png?size=96" />`
     : `<span class="avatar avatar--fallback" aria-hidden="true">?</span>`;
   $("#account-body").innerHTML = `
+    ${unencryptedStorageWarning()}
     <div class="srow srow--account">
       ${avatar}
       <div class="account-meta">
@@ -194,6 +211,7 @@ function renderSignedOut(message) {
   // Signed out → stop polling so we never hit the API without a token.
   stopPolling();
   $("#account-body").innerHTML = `
+    ${unencryptedStorageWarning()}
     <form id="signin-form" class="form">
       <div class="field">
         <label for="pat">GitHub Personal Access Token</label>
@@ -201,7 +219,11 @@ function renderSignedOut(message) {
           placeholder="ghp_… or github_pat_…" />
         <p class="hint">
           Needs the <code>notifications</code> scope (add <code>repo</code> for private
-          repositories). Stored in your macOS Keychain.
+          repositories). ${
+            unencryptedStorage
+              ? "Stored <strong>unencrypted</strong> in this app's local database (dev build)."
+              : "Stored in your macOS Keychain."
+          }
         </p>
       </div>
       <div class="form-actions">
@@ -249,6 +271,10 @@ async function loadAccount() {
   body.classList.remove("slist--error");
   try {
     const status = await invoke("auth_status");
+    unencryptedStorage = Boolean(status.unencrypted_storage);
+    // The "stored in the macOS Keychain" footer is only true for release builds.
+    const keychainNote = $("#keychain-note");
+    if (keychainNote) keychainNote.hidden = unencryptedStorage;
     if (status.authenticated && status.login) {
       renderSignedIn(status.login);
     } else if (status.authenticated) {

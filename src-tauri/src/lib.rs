@@ -40,6 +40,9 @@ struct DbStatus {
 struct AuthStatus {
     authenticated: bool,
     login: Option<String>,
+    /// True when the PAT is stored unencrypted in SQLite (debug builds) rather than the
+    /// Keychain — the frontend shows a warning when set.
+    unencrypted_storage: bool,
 }
 
 /// User-facing settings.
@@ -63,23 +66,23 @@ fn db_status(state: State<'_, AppState>) -> Result<DbStatus, String> {
     })
 }
 
-/// Current auth state: a token in the Keychain plus the cached login. Does not hit the
+/// Current auth state: whether a token is stored plus the cached login. Does not hit the
 /// network, so it works offline and loads fast.
 #[tauri::command]
 fn auth_status(state: State<'_, AppState>) -> Result<AuthStatus, String> {
-    let has_token = auth::has_token()?;
-    let login = {
-        let conn = state.db.0.lock().map_err(|e| e.to_string())?;
-        settings::get_string(&conn, settings::KEY_GITHUB_LOGIN).map_err(|e| e.to_string())?
-    };
+    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+    let authenticated = auth::has_token(&conn)?;
+    let login =
+        settings::get_string(&conn, settings::KEY_GITHUB_LOGIN).map_err(|e| e.to_string())?;
     Ok(AuthStatus {
-        authenticated: has_token,
+        authenticated,
         login,
+        unencrypted_storage: auth::storage_is_unencrypted(),
     })
 }
 
-/// Verify a PAT against GitHub, and on success store it in the Keychain and cache the
-/// login. Invalid tokens are rejected and nothing is stored.
+/// Verify a PAT against GitHub, and on success store it and cache the login. Invalid tokens
+/// are rejected and nothing is stored.
 #[tauri::command]
 async fn sign_in(token: String, state: State<'_, AppState>) -> Result<GitHubUser, String> {
     let token = token.trim().to_string();
@@ -90,9 +93,9 @@ async fn sign_in(token: String, state: State<'_, AppState>) -> Result<GitHubUser
     // Verify before persisting anything (network call, no locks held).
     let user = github::fetch_user(&token).await?;
 
-    auth::store_token(&token)?;
     {
         let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+        auth::store_token(&conn, &token)?;
         settings::set_string(&conn, settings::KEY_GITHUB_LOGIN, &user.login)
             .map_err(|e| e.to_string())?;
         // New credentials may have broader scope — re-resolve all subjects on next sync.
@@ -104,8 +107,8 @@ async fn sign_in(token: String, state: State<'_, AppState>) -> Result<GitHubUser
 /// Remove the stored token and cached login.
 #[tauri::command]
 fn sign_out(state: State<'_, AppState>) -> Result<(), String> {
-    auth::delete_token()?;
     let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+    auth::delete_token(&conn)?;
     settings::delete_key(&conn, settings::KEY_GITHUB_LOGIN).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -163,8 +166,11 @@ struct SyncResult {
 /// single transaction afterwards.
 #[tauri::command]
 async fn sync_now(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<SyncResult, String> {
-    let token = auth::read_token()?
-        .ok_or_else(|| "Not connected — add a GitHub token first.".to_string())?;
+    let token = {
+        let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+        auth::read_token(&conn)?
+    }
+    .ok_or_else(|| "Not connected — add a GitHub token first.".to_string())?;
 
     let _ = app.emit("sync:started", ());
 
@@ -375,8 +381,11 @@ where
             .collect()
     };
 
-    let token = auth::read_token()?
-        .ok_or_else(|| "Not connected — add a GitHub token first.".to_string())?;
+    let token = {
+        let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+        auth::read_token(&conn)?
+    }
+    .ok_or_else(|| "Not connected — add a GitHub token first.".to_string())?;
 
     const POOL: usize = 8;
     let client = reqwest::Client::new();
@@ -584,7 +593,10 @@ fn persist_window_size(window: &tauri::Window) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Install the macOS login-Keychain credential store for keyring-core.
+    // Install the macOS login-Keychain credential store for keyring-core. Only release
+    // builds use the Keychain; debug builds store the PAT unencrypted in SQLite (see
+    // `auth.rs`) and never touch keyring, so we skip the store there entirely.
+    #[cfg(not(debug_assertions))]
     keyring_core::set_default_store(
         apple_native_keyring_store::keychain::Store::new()
             .expect("failed to initialize the macOS Keychain store"),
