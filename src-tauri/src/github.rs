@@ -169,15 +169,18 @@ pub struct ResolveResult {
     pub rate: RateLimit,
 }
 
-/// Resolve a notification's subject (PR/Issue) by fetching `subject.url`.
+/// Resolve a notification's subject by fetching `subject.url`. Works for any subject that
+/// has one — issues, PRs, discussions, releases, commits — yielding a web `html_url` (and,
+/// for PR/Issue/Discussion, a state).
 ///
 /// A 404 means the subject is currently unreadable (deleted, or private without the right
 /// token scope); we return an empty [`ResolvedSubject`] and the caller still stamps
 /// `resolved_at`, so it won't be re-fetched on every sync. It isn't permanently skipped,
-/// though: `sync::subjects_needing_resolution` retries rows that still have no state about
+/// though: `sync::subjects_needing_resolution` retries rows that resolved to nothing about
 /// once an hour, so access granted later (e.g. a broader token) eventually resolves. Other
-/// non-success statuses are surfaced as errors and left unresolved for the next sync. The
-/// response's rate-limit headers are captured in every non-error case.
+/// non-success statuses are surfaced as [`ResolveError`] (carrying the rate snapshot) and
+/// left unresolved for the next sync. The response's rate-limit headers are captured in
+/// every case except a transport error before any response.
 pub async fn resolve_subject(
     client: &reqwest::Client,
     url: &str,

@@ -372,7 +372,8 @@ pub fn count(conn: &Connection) -> rusqlite::Result<i64> {
 
 /* ----------------------------- Subject resolution ------------------------- */
 
-/// A notification whose PR/Issue subject metadata still needs resolving.
+/// A notification whose subject metadata still needs resolving (any type with a
+/// `subject_url` — issue, PR, discussion, release, commit, …).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingSubject {
     pub thread_id: String,
