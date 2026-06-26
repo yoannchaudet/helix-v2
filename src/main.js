@@ -1179,6 +1179,9 @@ async function applySettings() {
 function showSettings(show) {
   $("#view-notifications").hidden = show;
   $("#view-settings").hidden = !show;
+  // Settings is a focused, full-width pane: hide the sidebar (and its resizer) so the
+  // content spans the whole window. CSS also insets the toolbar past the traffic lights.
+  document.querySelector(".app")?.classList.toggle("app--settings", show);
 }
 
 /* ----------------------------- Sidebar resize ---------------------------- */
