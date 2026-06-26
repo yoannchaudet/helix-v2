@@ -83,6 +83,25 @@ const MIGRATIONS: &[&str] = &[
         updated_at  TEXT NOT NULL
     );
     "#,
+    // v3 — drop read-status tracking. Helix shows every notification GitHub lists and only
+    // removes one when it's marked *done*, so read/unread state is no longer modeled. The
+    // index on `unread` must go before the column can be dropped.
+    r#"
+    DROP INDEX IF EXISTS idx_notifications_unread;
+    ALTER TABLE notifications DROP COLUMN unread;
+    ALTER TABLE notifications DROP COLUMN last_read_at;
+    "#,
+    // v4 — short-lived tombstones for threads just marked done. A sync's network fetch may
+    // predate a mark-done, then re-insert the (already deleted) thread from its stale result.
+    // store_notifications consults this table to suppress such re-inserts until GitHub stops
+    // returning the thread (or the thread genuinely re-surfaces with newer activity).
+    r#"
+    CREATE TABLE IF NOT EXISTS done_tombstones (
+        thread_id   TEXT PRIMARY KEY,
+        updated_at  TEXT,
+        done_at     TEXT NOT NULL
+    );
+    "#,
 ];
 
 /// Open the database at `db_path`, apply any pending migrations, and return the
@@ -100,9 +119,16 @@ pub fn open_and_migrate(db_path: &Path) -> rusqlite::Result<Connection> {
 fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
     let mut version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     while (version as usize) < MIGRATIONS.len() {
-        conn.execute_batch(MIGRATIONS[version as usize])?;
-        version += 1;
-        conn.pragma_update(None, "user_version", version)?;
+        // Run each migration and its version bump atomically. If any statement fails, the
+        // transaction rolls back and `user_version` is left unchanged, so the next launch
+        // cleanly retries the whole migration instead of starting from a half-applied state
+        // (which could otherwise brick startup — e.g. a column dropped but the bump missed).
+        let next = version + 1;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(MIGRATIONS[version as usize])?;
+        tx.pragma_update(None, "user_version", next)?;
+        tx.commit()?;
+        version = next;
     }
     Ok(())
 }
@@ -144,7 +170,7 @@ mod tests {
         assert_eq!(schema_version(&conn).unwrap(), MIGRATIONS.len() as i64);
 
         let tables = table_names(&conn).unwrap();
-        for expected in ["notifications", "rate_limits", "repos", "settings", "sync_state"] {
+        for expected in ["done_tombstones", "notifications", "rate_limits", "repos", "settings", "sync_state"] {
             assert!(tables.contains(&expected.to_string()), "missing table {expected}");
         }
 
@@ -155,6 +181,61 @@ mod tests {
         assert_eq!(rows, 1);
 
         std::fs::remove_file(&db_path).ok();
+    }
+
+    /// Exercise the real upgrade path: a populated v2 database (with the dropped `unread`
+    /// column, its index, and a data row) migrates to the latest schema, dropping the
+    /// read-status columns while preserving the row, and adding `done_tombstones`.
+    #[test]
+    fn upgrade_from_populated_v2_drops_read_columns_and_keeps_data() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        // Apply only v1 + v2 and stamp the DB as version 2.
+        conn.execute_batch(MIGRATIONS[0]).unwrap();
+        conn.execute_batch(MIGRATIONS[1]).unwrap();
+        conn.pragma_update(None, "user_version", 2).unwrap();
+
+        // Seed a repo + a notification carrying the soon-to-be-dropped read columns.
+        conn.execute(
+            "INSERT INTO repos (id, full_name, owner, name) VALUES (1, 'o/r', 'o', 'r')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO notifications
+               (thread_id, repo_id, subject_type, subject_title, reason, unread,
+                updated_at, last_read_at, fetched_at)
+             VALUES ('t1', 1, 'Issue', 'Hi', 'subscribed', 1, '2026-01-01T00:00:00Z',
+                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        // Run the remaining migrations (v3 drop-columns, v4 tombstones).
+        run_migrations(&conn).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), MIGRATIONS.len() as i64);
+
+        // The read-status columns are gone; the data row survives.
+        let cols: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(notifications)").unwrap();
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            rows
+        };
+        assert!(!cols.contains(&"unread".to_string()));
+        assert!(!cols.contains(&"last_read_at".to_string()));
+        let title: String = conn
+            .query_row(
+                "SELECT subject_title FROM notifications WHERE thread_id = 't1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(title, "Hi");
+        assert!(table_names(&conn).unwrap().contains(&"done_tombstones".to_string()));
     }
 
     #[test]

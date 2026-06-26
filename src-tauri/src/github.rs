@@ -66,15 +66,17 @@ pub async fn fetch_user(token: &str) -> Result<GitHubUser, String> {
 /* ------------------------------ Notifications ------------------------------ */
 
 /// A notification thread (subset of the `Thread` schema Helix stores).
+///
+/// Helix deliberately ignores read/unread state: a thread stays in the inbox until it's
+/// marked **done** (removed from GitHub's list), so the `unread`/`last_read_at` fields the
+/// API returns are not deserialized.
 #[derive(Debug, Deserialize)]
 pub struct NotificationThread {
     pub id: String,
     pub repository: MinimalRepo,
     pub subject: Subject,
     pub reason: String,
-    pub unread: bool,
     pub updated_at: String,
-    pub last_read_at: Option<String>,
     /// API URL of the notification thread.
     pub url: String,
 }
@@ -308,17 +310,19 @@ pub struct FetchOutcome {
     pub rate: RateLimit,
 }
 
-/// Fetch **all** unread notifications, following `Link` pagination.
+/// Fetch **all** notifications (read and unread alike), following `Link` pagination.
 ///
-/// `on_page` is invoked after each page with `(page_number, total_fetched_so_far)` so the
-/// caller can surface live progress. Rate-limit headers from the last response are
-/// returned in [`FetchOutcome::rate`].
+/// Uses `all=true`: Helix shows every notification GitHub still lists and only removes one
+/// when it's marked **done**, so read state never affects what's displayed. `on_page` is
+/// invoked after each page with `(page_number, total_fetched_so_far)` so the caller can
+/// surface live progress. Rate-limit headers from the last response are returned in
+/// [`FetchOutcome::rate`].
 pub async fn fetch_all_notifications<F>(token: &str, on_page: F) -> Result<FetchOutcome, String>
 where
     F: Fn(u32, usize) + Send,
 {
     let client = reqwest::Client::new();
-    let mut url = format!("{API_BASE}/notifications?all=false&per_page={NOTIFICATIONS_PER_PAGE}");
+    let mut url = format!("{API_BASE}/notifications?all=true&per_page={NOTIFICATIONS_PER_PAGE}");
     let mut threads: Vec<NotificationThread> = Vec::new();
     let mut rate = RateLimit::default();
     let mut page: u32 = 0;

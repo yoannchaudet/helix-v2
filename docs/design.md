@@ -91,9 +91,7 @@ CREATE TABLE notifications (
   subject_title  TEXT NOT NULL,
   subject_url    TEXT,                    -- API url to resolve PR/issue
   reason         TEXT,                    -- review_requested, mention, ...
-  unread         INTEGER NOT NULL DEFAULT 1,
   updated_at     TEXT NOT NULL,           -- notification updated_at
-  last_read_at   TEXT,
   thread_url     TEXT,                    -- API url for the thread
   -- Resolved subject metadata (filled by cleanup resolution; nullable)
   subject_number      INTEGER,
@@ -107,7 +105,6 @@ CREATE TABLE notifications (
 );
 
 CREATE INDEX idx_notifications_repo ON notifications(repo_id);
-CREATE INDEX idx_notifications_unread ON notifications(unread);
 
 -- Key/value app settings
 CREATE TABLE settings (
@@ -130,10 +127,11 @@ CREATE TABLE sync_state (
 
 ### Reconciliation model
 - **Upsert:** each synced notification is `INSERT ... ON CONFLICT(thread_id) DO UPDATE`.
-- **Deletion/reconcile:** GitHub only returns currently-unread notifications. After a full
-  sync pass we delete local rows not present in the latest result, so the local inbox
-  matches GitHub's unread feed. The set of fetched thread ids (a temp table) identifies
-  stale rows. The inbox is unread-only: there is no separate "read but retained" state.
+- **Deletion/reconcile:** Helix fetches `all=true` (read and unread alike, never *done*
+  threads). After a full sync pass we delete local rows not present in the latest result,
+  so the local inbox matches GitHub's list. The set of fetched thread ids (a temp table)
+  identifies stale rows. Read state is not modeled: a notification is shown until it is
+  marked **done** (the only thing that removes it), here or elsewhere.
 - **Optimistic local mutation:** when the user marks a thread done, the UI updates
   immediately; the core calls the API for each thread (bounded concurrency), then deletes
   the local rows for the threads that succeeded and reports per-thread failures.
@@ -147,7 +145,7 @@ Native REST over HTTPS from the Rust core (no `gh` CLI dependency). A small HTTP
 ### Endpoints (v1)
 | Purpose | Method & path |
 | --- | --- |
-| List notifications | `GET /notifications?all=false&per_page=50&page=N` |
+| List notifications | `GET /notifications?all=true&per_page=50&page=N` |
 | Resolve PR/Issue subject | `GET {subject_url}` |
 | Mark a thread as done | `DELETE /notifications/threads/{thread_id}` |
 | (Optional) auth check | `GET /user` |
@@ -177,7 +175,7 @@ Headers on every request:
 
 A single coordinator in the Rust core:
 
-1. **Fetch** all unread notifications (paginated, §4).
+1. **Fetch** all notifications, read and unread (`all=true`, paginated, §4).
 2. **Upsert** repos + notifications into SQLite (§3).
 3. **Reconcile** rows missing from the latest pass.
 4. **Resolve** subjects lazily — for the cleanup view we resolve PR/Issue metadata
@@ -197,7 +195,7 @@ Ports the proven logic from `yoann-em` (`scripts/cleanup-notifications.ps1` +
 `modules/CleanupNotifications.psm1`).
 
 ### Candidate rules
-Starting from unread notifications whose subject is a `PullRequest` or `Issue` (with a
+Starting from notifications whose subject is a `PullRequest` or `Issue` (with a
 subject URL), resolve the subject and keep it as a cleanup candidate when:
 
 - **Pull request:**
@@ -236,12 +234,12 @@ column, no marketing hero):
   bar (`titleBarStyle: "Overlay"`, `hiddenTitle: true`, transparent window +
   `macOSPrivateApi`). The toolbar shows the active source title (left) and sync
   status + refresh (right), and stays pinned while the list scrolls.
-- Accent (purple) is applied **sparingly** — selection tint, unread dots, counts — not as
+- Accent (purple) is applied **sparingly** — selection tint, counts — not as
   large filled buttons (system control styling otherwise).
 
 ### Views (v1)
 - **Notifications:** a full-width, dense list with **sticky, Mail-style repo section
-  headers** (repo name, private badge, unread count), each listing its notifications with
+  headers** (repo name, private badge, notification count), each listing its notifications with
   subject type (PR/Issue), number, title, reason, and state label. Hairline row separators.
 - **Cleanup:** the filtered candidate list (§6) with the dependabot-only toggle, a
   preview grouped by repo, and a confirm → bulk mark-as-done flow with live progress.
@@ -287,8 +285,8 @@ column, no marketing hero):
 - **Subject resolution cost:** resolving every PR/Issue is N extra calls. Do we resolve
   eagerly during sync, or lazily only when the cleanup view is opened? (Lean toward lazy
   for v1; revisit if it feels slow.)
-- **Reconcile vs. retain:** when a notification is no longer unread on GitHub, do we
-  delete the local row or keep it flagged read for history? (v1: keep the inbox = unread
-  only; deletion is simplest.)
-- **Read vs. done semantics:** v1 only does "mark done" (removes from inbox). Mark-read
-  is a later milestone.
+- **Reconcile vs. retain:** *Resolved.* Helix fetches `all=true` and does not model read
+  state — a notification is shown until it is marked **done** (the only removal path), so
+  reconciliation deletes a local row exactly when its thread leaves GitHub's list.
+- **Read vs. done semantics:** the only action is "mark done" (removes from inbox). Read
+  state is intentionally not tracked.

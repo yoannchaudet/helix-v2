@@ -34,7 +34,7 @@ v1 is complete when **M1–M7** are done.
 ## M3 — Fetch & store notifications
 **Objective:** Pull the notification inbox into local state.
 **Deliverables:**
-- Paginated `GET /notifications?all=false` (follow `Link` headers).
+- Paginated `GET /notifications?all=true` (follow `Link` headers).
 - Upsert repos + notifications into SQLite; record rate-limit snapshot in `sync_state`.
 - "Sync now" command with live progress events.
 **Done when:** "Sync now" populates the DB; an offline relaunch shows the same data.
@@ -51,8 +51,8 @@ live progress.
 ## M5 — Reconciliation
 **Objective:** Keep local state consistent with GitHub.
 **Deliverables:**
-- After a full sync pass, reconcile rows no longer present (no longer unread) using the
-  `fetched_at` watermark (design.md §3).
+- After a full sync pass, reconcile rows no longer present (marked done) by the exact set
+  of fetched thread ids (a `present_threads` temp table; design.md §3).
 **Done when:** Clearing a notification on github.com makes it disappear from Helix after
 the next sync.
 
