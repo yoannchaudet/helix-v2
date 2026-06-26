@@ -750,6 +750,11 @@ code {
   overflow: hidden;
 }
 
+/* Indeterminate track for buckets with no numeric snapshot yet (no fill, faded). */
+.rate-bar--unknown {
+  opacity: 0.5;
+}
+
 .rate-fill {
   height: 100%;
   border-radius: 3px;
@@ -761,11 +766,11 @@ code {
 }
 
 .rate-fill--warn {
-  background: #e3a008;
+  background: var(--pending);
 }
 
 .rate-fill--danger {
-  background: #cf222e;
+  background: var(--error);
 }
 
 .rate-foot {
