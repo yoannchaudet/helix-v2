@@ -292,14 +292,19 @@ function renderRateBuckets(buckets) {
     .map((b) => {
       const label = escapeHtml(rateBucketLabel(b.resource));
       const hasNums = b.limit != null && b.remaining != null && b.limit > 0;
-      const used = hasNums ? Math.max(0, b.limit - b.remaining) : 0;
+      // Once the window's reset time has passed, the stored snapshot is stale: GitHub has
+      // rolled the bucket over and refilled it, so render it as reset (full / 0% used)
+      // rather than alarming red, until the next request refreshes the real numbers.
+      const expired = b.reset_at != null && b.reset_at <= Date.now() / 1000;
+      const remaining = expired && hasNums ? b.limit : b.remaining;
+      const used = hasNums ? Math.max(0, b.limit - remaining) : 0;
       const frac = hasNums ? Math.min(1, Math.max(0, used / b.limit)) : 0;
       const pct = Math.round(frac * 100);
       const level = frac >= 0.9 ? "danger" : frac >= 0.75 ? "warn" : "ok";
       const counts = hasNums
-        ? `${b.remaining.toLocaleString()} / ${b.limit.toLocaleString()} left`
+        ? `${remaining.toLocaleString()} / ${b.limit.toLocaleString()} left`
         : "—";
-      const reset = escapeHtml(resetCountdown(b.reset_at));
+      const reset = escapeHtml(expired ? "window reset" : resetCountdown(b.reset_at));
       return `
         <div class="rate-row">
           <div class="rate-head">

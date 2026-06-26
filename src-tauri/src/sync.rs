@@ -175,14 +175,28 @@ pub struct RateTracker {
 }
 
 impl RateTracker {
-    /// Fold one response's snapshot in, keeping the lowest `remaining` seen for its bucket.
+    /// Fold one response's snapshot in. A snapshot from a newer reset window always wins
+    /// (the bucket's quota has rolled over, so an old `remaining = 0` must not mask the
+    /// refilled count); within the same (or an unknown) window we keep the lowest
+    /// `remaining` seen, which is the truest "after these calls" quota for concurrent calls.
     pub fn observe(&mut self, rate: RateLimit) {
         let Some(resource) = rate.resource.clone() else {
             return;
         };
-        let replace = match self.buckets.get(&resource).and_then(|b| b.remaining) {
-            Some(cur) => rate.remaining.is_some_and(|new| new < cur),
+        let replace = match self.buckets.get(&resource) {
             None => rate.remaining.is_some(),
+            Some(cur) => match (cur.reset, rate.reset) {
+                // Different known windows: the newer one wins outright.
+                (Some(cur_reset), Some(new_reset)) if new_reset != cur_reset => {
+                    new_reset > cur_reset
+                }
+                // Same or unknown window: keep the most conservative remaining.
+                _ => match (cur.remaining, rate.remaining) {
+                    (Some(c), Some(n)) => n < c,
+                    (None, Some(_)) => true,
+                    _ => false,
+                },
+            },
         };
         if replace {
             self.buckets.insert(resource, rate);
@@ -872,6 +886,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read_rate_buckets(&conn).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn rate_tracker_newer_window_beats_lower_remaining() {
+        // An old-window response with remaining=0 must not mask a newer-window response
+        // whose quota has rolled over (remaining=4999) — otherwise the UI would show an
+        // exhausted bucket right after it reset.
+        let mut tracker = RateTracker::default();
+        tracker.observe(RateLimit {
+            resource: Some("core".to_string()),
+            limit: Some(5000),
+            remaining: Some(0),
+            reset: Some(1000),
+            poll_interval: None,
+        });
+        tracker.observe(RateLimit {
+            resource: Some("core".to_string()),
+            limit: Some(5000),
+            remaining: Some(4999),
+            reset: Some(4600),
+            poll_interval: None,
+        });
+        assert_eq!(tracker.lowest_remaining(), Some(4999));
     }
 
     #[test]

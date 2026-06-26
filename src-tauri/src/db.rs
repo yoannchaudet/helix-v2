@@ -75,7 +75,7 @@ const MIGRATIONS: &[&str] = &[
     // usage bar (remaining vs. `lim`) and a reset countdown per API, instead of a single
     // opaque number. Additive: existing `sync_state.rate_*` columns are left untouched.
     r#"
-    CREATE TABLE rate_limits (
+    CREATE TABLE IF NOT EXISTS rate_limits (
         resource    TEXT PRIMARY KEY,
         lim         INTEGER,
         remaining   INTEGER,
