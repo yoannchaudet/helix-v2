@@ -240,10 +240,16 @@ async fn sync_now(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<S
     Ok(result)
 }
 
-/// Resolve outstanding PR/Issue subjects (state, number, author, …) so the UI can show
-/// Open/Closed/Merged pills. Smart caching (`subjects_needing_resolution`) keeps this cheap
-/// after the first sync. Per-subject failures are logged and retried on a future sync; the
-/// DB lock is never held across network I/O. Emits `subjects:resolved` when anything changed.
+/// Resolve outstanding subjects (state, number, author, **web `html_url`**, …) so the UI can
+/// show Open/Closed/Merged pills and open the notification in a browser. Applies to any
+/// subject with a `subject.url` (PRs, issues, discussions, releases, …), not just PR/Issue.
+///
+/// Smart caching (`subjects_needing_resolution`) keeps this cheap after the first sync. To
+/// avoid this *optional* work starving the quota that core operations (list fetch, mark-done)
+/// need, it stops once spending would drop a rate-limit bucket below a 25% reserve; the
+/// deferred (oldest) subjects resolve on a later sync once quota recovers. Per-subject
+/// failures are logged and retried later; the DB lock is never held across network I/O.
+/// Emits `subjects:resolved` when anything changed.
 async fn resolve_pending_subjects(app: tauri::AppHandle, token: String) {
     let state = app.state::<AppState>();
 
@@ -262,12 +268,37 @@ async fn resolve_pending_subjects(app: tauri::AppHandle, token: String) {
     }
 
     const POOL: usize = 8;
+    // Background subject resolution is *optional* quota: stop before it eats into the
+    // reserve other operations (the notifications list fetch, mark-done) need. We keep at
+    // least this fraction of each bucket's allowance — i.e. never spend the last 25%.
+    // Deferred subjects stay pending (they're newest-first), so a later sync — once the
+    // window resets and quota is plentiful again — finishes them.
+    const RESERVE_FRACTION: f64 = 0.25;
+
     let client = reqwest::Client::new();
     let mut changed = 0usize;
     // The most conservative (lowest `remaining`) snapshot per rate-limit bucket seen across
     // the resolution calls, so the UI's per-bucket usage reflects what these extra requests
-    // actually consumed.
+    // actually consumed. Seed it with what the just-completed list fetch already recorded so
+    // the budget check has a baseline before the first resolution call.
     let mut rate = sync::RateTracker::default();
+    {
+        if let Ok(conn) = state.db.0.lock() {
+            for b in sync::read_rate_buckets(&conn).unwrap_or_default() {
+                rate.observe(github::RateLimit {
+                    resource: Some(b.resource),
+                    limit: b.limit,
+                    remaining: b.remaining,
+                    reset: b.reset_at,
+                    poll_interval: None,
+                });
+            }
+        }
+    }
+    // Already low on quota? Don't start — leave every subject for a future sync.
+    if rate.below_reserve(RESERVE_FRACTION) {
+        return;
+    }
 
     for batch in pending.chunks(POOL) {
         let mut handles = Vec::with_capacity(batch.len());
@@ -297,6 +328,11 @@ async fn resolve_pending_subjects(app: tauri::AppHandle, token: String) {
                 }
                 Err(err) => eprintln!("subject resolution failed for {thread_id}: {err}"),
             }
+        }
+
+        // Stop once this batch pushed us into the reserve; the rest waits for a later sync.
+        if rate.below_reserve(RESERVE_FRACTION) {
+            break;
         }
     }
 

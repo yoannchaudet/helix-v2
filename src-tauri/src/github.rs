@@ -99,7 +99,9 @@ pub struct RepoOwner {
 #[derive(Debug, Deserialize)]
 pub struct Subject {
     pub title: String,
-    /// API URL to the PR/issue (null for some subject types, e.g. discussions).
+    /// API URL to the subject (PR/Issue/Discussion), resolved to get the web `html_url`.
+    /// Null for subject types GitHub doesn't expose this way (e.g. CheckSuite), and
+    /// occasionally for discussions (older / comment-less) — callers must handle `None`.
     pub url: Option<String>,
     #[serde(rename = "type")]
     pub subject_type: String,
