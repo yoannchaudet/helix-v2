@@ -99,7 +99,10 @@ pub struct RepoOwner {
 #[derive(Debug, Deserialize)]
 pub struct Subject {
     pub title: String,
-    /// API URL to the PR/issue (null for some subject types, e.g. discussions).
+    /// API URL to the subject — issues, PRs, discussions, releases, commits, … — which we
+    /// resolve to get the web `html_url` (and, for PR/Issue/Discussion, a state). Null for
+    /// subject types GitHub doesn't expose this way (e.g. CheckSuite), and occasionally for
+    /// discussions (older / comment-less) — callers must handle `None`.
     pub url: Option<String>,
     #[serde(rename = "type")]
     pub subject_type: String,
@@ -166,24 +169,31 @@ pub struct ResolveResult {
     pub rate: RateLimit,
 }
 
-/// Resolve a notification's subject (PR/Issue) by fetching `subject.url`.
+/// Resolve a notification's subject by fetching `subject.url`. Works for any subject that
+/// has one — issues, PRs, discussions, releases, commits — yielding a web `html_url` (and,
+/// for PR/Issue/Discussion, a state).
 ///
 /// A 404 means the subject is currently unreadable (deleted, or private without the right
 /// token scope); we return an empty [`ResolvedSubject`] and the caller still stamps
 /// `resolved_at`, so it won't be re-fetched on every sync. It isn't permanently skipped,
-/// though: `sync::subjects_needing_resolution` retries rows that still have no state about
+/// though: `sync::subjects_needing_resolution` retries rows that resolved to nothing about
 /// once an hour, so access granted later (e.g. a broader token) eventually resolves. Other
-/// non-success statuses are surfaced as errors and left unresolved for the next sync. The
-/// response's rate-limit headers are captured in every non-error case.
+/// non-success statuses are surfaced as [`ResolveError`] (carrying the rate snapshot) and
+/// left unresolved for the next sync. The response's rate-limit headers are captured in
+/// every case except a transport error before any response.
 pub async fn resolve_subject(
     client: &reqwest::Client,
     url: &str,
     token: &str,
-) -> Result<ResolveResult, String> {
+) -> Result<ResolveResult, ResolveError> {
     let resp = authed_get(client, url, token)
         .send()
         .await
-        .map_err(|e| format!("network error: {e}"))?;
+        .map_err(|e| ResolveError {
+            // A transport error before any response carries no rate snapshot.
+            rate: RateLimit::default(),
+            message: format!("network error: {e}"),
+        })?;
 
     let status = resp.status();
     let mut rate = RateLimit::default();
@@ -197,20 +207,32 @@ pub async fn resolve_subject(
     }
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!(
-            "GitHub returned {status} resolving subject: {}",
-            body.trim()
-        ));
+        // A failed (non-404) request still consumed quota — carry its rate snapshot so the
+        // caller's budget accounting stays accurate.
+        return Err(ResolveError {
+            rate,
+            message: format!("GitHub returned {status} resolving subject: {}", body.trim()),
+        });
     }
 
-    let raw: SubjectResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("failed to parse subject: {e}"))?;
-    Ok(ResolveResult {
-        subject: raw.into(),
-        rate,
-    })
+    match resp.json::<SubjectResponse>().await {
+        Ok(raw) => Ok(ResolveResult {
+            subject: raw.into(),
+            rate,
+        }),
+        Err(e) => Err(ResolveError {
+            rate,
+            message: format!("failed to parse subject: {e}"),
+        }),
+    }
+}
+
+/// Failure from resolving a subject that still carries the rate-limit snapshot. A failed
+/// request (other than a transport error before any response) consumes quota too, so the
+/// caller folds this `rate` into its budget accounting.
+pub struct ResolveError {
+    pub rate: RateLimit,
+    pub message: String,
 }
 
 /* -------------------------------- Mutations ------------------------------- */

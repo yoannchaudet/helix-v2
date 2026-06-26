@@ -266,6 +266,20 @@ impl RateTracker {
     pub fn lowest_remaining(&self) -> Option<i64> {
         self.buckets.values().filter_map(|b| b.remaining).min()
     }
+
+    /// Whether any tracked bucket has fallen to/below a reserve fraction of its limit — e.g.
+    /// `reserve_fraction = 0.25` means "25% or fewer of the allowance remains" (the check is
+    /// inclusive: `remaining <= fraction * limit`). Used to stop spending optional quota
+    /// (background subject resolution) before exhausting the budget other operations (list
+    /// fetch, mark-done) need. Buckets whose limit we don't know yet are ignored.
+    pub fn below_reserve(&self, reserve_fraction: f64) -> bool {
+        self.buckets.values().any(|b| match (b.remaining, b.limit) {
+            (Some(remaining), Some(limit)) if limit > 0 => {
+                (remaining as f64) <= reserve_fraction * (limit as f64)
+            }
+            _ => false,
+        })
+    }
 }
 
 /// Record a failed sync (status + message); leaves the last successful data intact.
@@ -358,37 +372,43 @@ pub fn count(conn: &Connection) -> rusqlite::Result<i64> {
 
 /* ----------------------------- Subject resolution ------------------------- */
 
-/// A notification whose PR/Issue subject metadata still needs resolving.
+/// A notification whose subject metadata still needs resolving (any type with a
+/// `subject_url` — issue, PR, discussion, release, commit, …).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingSubject {
     pub thread_id: String,
     pub subject_url: String,
 }
 
-/// Find notifications whose PR/Issue subject should be resolved.
+/// Find notifications whose subject should be resolved (for the state pill and a clickable
+/// web URL).
 ///
-/// Smart caching — a row qualifies when it is a PullRequest/Issue with a `subject_url`
-/// AND any of:
+/// Resolution applies to **any** subject that exposes a `subject_url`, not a fixed list of
+/// types: issues, PRs, discussions, releases, and commits all resolve their `subject.url` to
+/// an `html_url` the same way (and PR/Issue/Discussion additionally yield an open/closed/
+/// merged state). Subject types GitHub gives no `subject.url` for — e.g. `CheckSuite` — are
+/// skipped by the `IS NOT NULL` guard and never resolved.
+///
+/// Smart caching — a row qualifies when it has a `subject_url` AND any of:
 ///   * never resolved (`resolved_at IS NULL`), or
 ///   * changed upstream since last resolution (`updated_at > resolved_at`), or
-///   * still has no state and was last attempted over an hour ago — a bounded retry so
-///     subjects that couldn't be read before (e.g. private repos the token gained access
-///     to after a scope upgrade) eventually resolve, without re-fetching them every sync.
-///
-/// Successfully-resolved, unchanged rows are skipped so we don't spend an API call per
-/// subject on every sync.
+///   * resolution yielded **nothing** (no state and no html_url — e.g. a 404 from a private
+///     repo before a scope upgrade) and was last attempted over an hour ago. This is a
+///     bounded retry; a successful resolution always sets an html_url (and PR/Issue/
+///     Discussion a state), so it is never re-fetched on subsequent syncs.
 pub fn subjects_needing_resolution(conn: &Connection) -> rusqlite::Result<Vec<PendingSubject>> {
     let mut stmt = conn.prepare(
         "SELECT thread_id, subject_url
          FROM notifications
-         WHERE subject_type IN ('PullRequest', 'Issue')
-           AND subject_url IS NOT NULL
+         WHERE subject_url IS NOT NULL
            AND (
                  resolved_at IS NULL
               OR updated_at > resolved_at
               OR (subject_state IS NULL
+                  AND subject_html_url IS NULL
                   AND resolved_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1 hour'))
-           )",
+           )
+         ORDER BY updated_at DESC",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok(PendingSubject {
@@ -1080,6 +1100,41 @@ mod tests {
     }
 
     #[test]
+    fn below_reserve_flags_low_quota() {
+        let mut tracker = RateTracker::default();
+        // 30% of 5000 left → above a 25% reserve.
+        tracker.observe(RateLimit {
+            resource: Some("core".to_string()),
+            limit: Some(5000),
+            remaining: Some(1500),
+            reset: Some(1000),
+            poll_interval: None,
+        });
+        assert!(!tracker.below_reserve(0.25));
+
+        // Drops to exactly the 25% line (1250) → now at/below the reserve.
+        tracker.observe(RateLimit {
+            resource: Some("core".to_string()),
+            limit: Some(5000),
+            remaining: Some(1250),
+            reset: Some(1000),
+            poll_interval: None,
+        });
+        assert!(tracker.below_reserve(0.25));
+
+        // A bucket with an unknown limit is ignored (no false positive).
+        let mut unknown = RateTracker::default();
+        unknown.observe(RateLimit {
+            resource: Some("search".to_string()),
+            limit: None,
+            remaining: Some(1),
+            reset: None,
+            poll_interval: None,
+        });
+        assert!(!unknown.below_reserve(0.25));
+    }
+
+    #[test]
     fn needs_resolution_skips_resolved_unchanged_and_includes_changed() {
         let mut conn = mem_conn();
         store_notifications(
@@ -1120,7 +1175,8 @@ mod tests {
         assert!(ids.contains(&"1"));
         assert!(ids.contains(&"2"));
 
-        // Non PR/Issue subjects are never resolved.
+        // Any subject *with a subject_url* is resolved now (not just PR/Issue) — e.g. a
+        // Release/Discussion/CI run becomes clickable the same way.
         conn.execute(
             "UPDATE notifications SET subject_type = 'Release' WHERE thread_id = '2'",
             [],
@@ -1128,7 +1184,17 @@ mod tests {
         .unwrap();
         let pending = subjects_needing_resolution(&conn).unwrap();
         let ids: Vec<&str> = pending.iter().map(|p| p.thread_id.as_str()).collect();
-        assert!(!ids.contains(&"2"));
+        assert!(ids.contains(&"2"), "a Release with a subject_url should resolve");
+
+        // A subject with no subject_url (e.g. a CheckSuite) is skipped — nothing to resolve.
+        conn.execute(
+            "UPDATE notifications SET subject_url = NULL WHERE thread_id = '2'",
+            [],
+        )
+        .unwrap();
+        let pending = subjects_needing_resolution(&conn).unwrap();
+        let ids: Vec<&str> = pending.iter().map(|p| p.thread_id.as_str()).collect();
+        assert!(!ids.contains(&"2"), "a subject without a subject_url is not resolved");
     }
 
     #[test]
@@ -1168,6 +1234,38 @@ mod tests {
         )
         .unwrap();
         assert!(subjects_needing_resolution(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn stateless_resolved_subject_is_not_retried() {
+        // A type with no state (e.g. Release/Commit) resolves to an html_url but no state.
+        // Once resolved it must NOT be retried hourly — the retry only fires when resolution
+        // yielded nothing at all (no state AND no html_url).
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
+        conn.execute(
+            "UPDATE notifications SET subject_type = 'Release' WHERE thread_id = '1'",
+            [],
+        )
+        .unwrap();
+        store_resolved_subject(
+            &conn,
+            "1",
+            &ResolvedSubject {
+                html_url: Some("https://github.com/octo/repo-a/releases/tag/v1".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE notifications SET resolved_at = '2026-03-01T00:00:00Z' WHERE thread_id = '1'",
+            [],
+        )
+        .unwrap();
+        assert!(
+            subjects_needing_resolution(&conn).unwrap().is_empty(),
+            "a resolved subject with an html_url must not be retried, even without a state"
+        );
     }
 
     #[test]
