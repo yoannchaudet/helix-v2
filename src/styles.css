@@ -507,10 +507,6 @@ code,
   text-overflow: ellipsis;
 }
 
-.n-row--unread .n-title {
-  font-weight: 600;
-}
-
 .n-number {
   color: var(--muted);
   font-family: var(--mono);

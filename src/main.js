@@ -605,7 +605,7 @@ function notificationRow(n) {
   const reason = escapeHtml(n.reason.replace(/_/g, " "));
   // Only rows with a resolved web URL are openable (clickable + hover affordance).
   const url = n.subject_html_url || "";
-  const cls = `n-row${n.unread ? " n-row--unread" : ""}${url ? " n-row--openable" : ""}`;
+  const cls = `n-row${url ? " n-row--openable" : ""}`;
   const openAttrs = url
     ? ` data-url="${escapeHtml(url)}" role="link" tabindex="0"`
     : "";
@@ -650,10 +650,8 @@ function repoHeader(group) {
   const privacy = group.private
     ? `<span class="badge badge--lock" title="Private repository">private</span>`
     : "";
-  const unread = group.notifications.filter((n) => n.unread).length;
-  const counts = unread
-    ? `<span class="repo-counts"><strong>${unread}</strong> unread</span>`
-    : `<span class="repo-counts">${group.notifications.length}</span>`;
+  // Read state isn't tracked; show the total number of notifications in this repo.
+  const counts = `<span class="repo-counts">${group.notifications.length}</span>`;
   return `
     <div class="repo-header">
       <span class="repo-name">${escapeHtml(group.full_name)}</span>
@@ -763,8 +761,10 @@ function renderSidebar() {
   } else {
     repoList.innerHTML = visibleRepos
       .map(({ group: g, matches }) => {
-        const unread = matches.filter((n) => n.unread).length;
-        const count = unread ? `<span class="source-count">${unread}</span>` : "";
+        // Total notifications matching the active filter in this repo (read state untracked).
+        const count = matches.length
+          ? `<span class="source-count">${matches.length}</span>`
+          : "";
         const lock = g.private ? " 🔒" : "";
         return `<li>
           <button type="button" class="source repo-source" data-repo="${g.repo_id}">

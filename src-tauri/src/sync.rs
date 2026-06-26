@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
 use crate::github::{NotificationThread, RateLimit, ResolvedSubject};
@@ -22,16 +22,17 @@ pub struct StoreOutcome {
 
 /// Upsert repos + notifications from a **complete** fetch and reconcile local state.
 ///
-/// `threads` must be the full current set of unread notifications (GitHub only returns
-/// currently-unread threads). Existing rows are updated in place; the subject-resolution
-/// columns (`subject_state`, `resolved_at`, …) are intentionally left untouched here — they
-/// are populated separately by `store_resolved_subject` after subjects are resolved.
+/// `threads` must be the full current set of notifications GitHub returns for `all=true`
+/// (read and unread alike, but never *done* threads). Existing rows are updated in place;
+/// the subject-resolution columns (`subject_state`, `resolved_at`, …) are intentionally left
+/// untouched here — they are populated separately by `store_resolved_subject` after subjects
+/// are resolved.
 ///
-/// Reconciliation (M5): any locally-stored notification absent from this fetch was cleared
-/// (marked done/read) upstream, so it is deleted — v1 keeps the inbox = currently-unread
-/// only (see `docs/design.md` §"Reconcile vs. retain"). Repos left without any
-/// notifications are pruned so the table doesn't accumulate orphans. Stale rows are
-/// identified by the exact set of fetched thread ids rather than a timestamp watermark, so
+/// Reconciliation (M5): any locally-stored notification absent from this fetch was marked
+/// **done** upstream (here or elsewhere), so it is deleted — done is the only thing that
+/// removes a notification (read state is not tracked). Repos left without any notifications
+/// are pruned so the table doesn't accumulate orphans. Stale rows are identified by the
+/// exact set of fetched thread ids rather than a timestamp watermark, so
 /// reconciliation is correct even when two syncs land within the same clock tick.
 pub fn store_notifications(
     conn: &mut Connection,
@@ -53,6 +54,34 @@ pub fn store_notifications(
             "INSERT OR IGNORE INTO present_threads (thread_id) VALUES (?1)",
             params![t.id],
         )?;
+
+        // Suppress re-inserting a thread the user just marked done: a sync's network fetch
+        // can predate the mark-done and carry the now-deleted thread in its (stale) result.
+        // A tombstone blocks the re-insert until GitHub stops returning the thread — unless
+        // it has genuinely *newer* activity than when it was marked done, in which case it's
+        // a real re-surface, so we clear the tombstone and let it back in.
+        let tombstone: Option<Option<String>> = tx
+            .query_row(
+                "SELECT updated_at FROM done_tombstones WHERE thread_id = ?1",
+                params![t.id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        if let Some(done_updated_at) = tombstone {
+            let resurfaced = match &done_updated_at {
+                Some(prev) => t.updated_at.as_str() > prev.as_str(),
+                None => false,
+            };
+            if resurfaced {
+                tx.execute(
+                    "DELETE FROM done_tombstones WHERE thread_id = ?1",
+                    params![t.id],
+                )?;
+            } else {
+                continue; // still done: keep it out of the inbox
+            }
+        }
+
         tx.execute(
             "INSERT INTO repos (id, full_name, owner, name, private, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -75,8 +104,8 @@ pub fn store_notifications(
         tx.execute(
             "INSERT INTO notifications (
                  thread_id, repo_id, subject_type, subject_title, subject_url,
-                 reason, unread, updated_at, last_read_at, thread_url, fetched_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                 reason, updated_at, thread_url, fetched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
                      strftime('%Y-%m-%dT%H:%M:%SZ','now'))
              ON CONFLICT(thread_id) DO UPDATE SET
                repo_id       = excluded.repo_id,
@@ -84,9 +113,7 @@ pub fn store_notifications(
                subject_title = excluded.subject_title,
                subject_url   = excluded.subject_url,
                reason        = excluded.reason,
-               unread        = excluded.unread,
                updated_at    = excluded.updated_at,
-               last_read_at  = excluded.last_read_at,
                thread_url    = excluded.thread_url,
                fetched_at    = excluded.fetched_at",
             params![
@@ -96,9 +123,7 @@ pub fn store_notifications(
                 t.subject.title,
                 t.subject.url,
                 t.reason,
-                t.unread as i64,
                 t.updated_at,
-                t.last_read_at,
                 t.url,
             ],
         )?;
@@ -106,8 +131,8 @@ pub fn store_notifications(
 
     // Reconcile: drop notifications no longer returned upstream, then prune repos that
     // ended up with no notifications. Notifications are deleted first to respect the
-    // repos foreign key. The inbox mirrors GitHub's unread feed, so a row absent from the
-    // latest fetch was cleared/read/done elsewhere and is removed.
+    // repos foreign key. The inbox mirrors GitHub's `all=true` feed, so a row absent from
+    // the latest fetch was marked done elsewhere and is removed.
     let removed = tx.execute(
         "DELETE FROM notifications
          WHERE thread_id NOT IN (SELECT thread_id FROM present_threads)",
@@ -116,6 +141,16 @@ pub fn store_notifications(
     tx.execute(
         "DELETE FROM repos
          WHERE id NOT IN (SELECT DISTINCT repo_id FROM notifications)",
+        [],
+    )?;
+
+    // Retire tombstones that have done their job: a thread GitHub no longer returns is
+    // confirmed done (the mark-done stuck), and any tombstone older than the TTL is a
+    // safety-net cleanup so a tombstone can never suppress a thread indefinitely.
+    tx.execute(
+        "DELETE FROM done_tombstones
+         WHERE thread_id NOT IN (SELECT thread_id FROM present_threads)
+            OR done_at < strftime('%Y-%m-%dT%H:%M:%SZ','now','-10 minutes')",
         [],
     )?;
 
@@ -397,10 +432,27 @@ pub fn mark_done_local(conn: &mut Connection, thread_ids: &[String]) -> rusqlite
     let tx = conn.transaction()?;
     let mut removed = 0;
     {
-        // Prepare once and reuse across ids to avoid re-parsing the statement per row.
-        let mut stmt = tx.prepare("DELETE FROM notifications WHERE thread_id = ?1")?;
+        // For each thread, record a tombstone (with the row's current `updated_at`) before
+        // deleting it, so a stale in-flight sync can't re-insert the just-done thread. The
+        // tombstone is keyed by thread id; `updated_at` lets a later sync tell a stale
+        // re-insert (same/older timestamp → keep suppressed) from a genuine re-surface with
+        // new activity (newer timestamp → allow back).
+        let mut updated_at_stmt =
+            tx.prepare("SELECT updated_at FROM notifications WHERE thread_id = ?1")?;
+        let mut tombstone_stmt = tx.prepare(
+            "INSERT INTO done_tombstones (thread_id, updated_at, done_at)
+             VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+             ON CONFLICT(thread_id) DO UPDATE SET
+               updated_at = excluded.updated_at,
+               done_at    = excluded.done_at",
+        )?;
+        let mut delete_stmt = tx.prepare("DELETE FROM notifications WHERE thread_id = ?1")?;
         for id in thread_ids {
-            removed += stmt.execute(params![id])?;
+            let updated_at: Option<String> = updated_at_stmt
+                .query_row(params![id], |r| r.get(0))
+                .optional()?;
+            tombstone_stmt.execute(params![id, updated_at])?;
+            removed += delete_stmt.execute(params![id])?;
         }
     }
     tx.execute(
@@ -422,7 +474,6 @@ pub struct NotificationView {
     pub subject_title: String,
     pub subject_url: Option<String>,
     pub reason: String,
-    pub unread: bool,
     pub updated_at: String,
     pub thread_url: Option<String>,
     /// Resolved subject metadata (populated by background subject resolution; null until
@@ -438,25 +489,25 @@ pub struct RepoGroup {
     pub repo_id: i64,
     pub full_name: String,
     pub private: bool,
-    pub unread_count: i64,
     pub total: i64,
     pub notifications: Vec<NotificationView>,
 }
 
 /// Read all stored notifications grouped by repository.
 ///
-/// Repos are ordered by full name; within a repo, unread first, then most recently
-/// updated. This is a pure local read (offline-first) — the source of truth is SQLite.
+/// Repos are ordered by full name; within a repo, most recently updated first. Read state
+/// is not tracked — every stored notification is shown until it's marked done. This is a
+/// pure local read (offline-first) — the source of truth is SQLite.
 pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
     let mut stmt = conn.prepare(
         "SELECT r.id, r.full_name, r.private,
                 n.thread_id, n.subject_type, n.subject_title, n.subject_url,
                 COALESCE(n.reason, '') AS reason,
-                n.unread, n.updated_at, n.thread_url,
+                n.updated_at, n.thread_url,
                 n.subject_number, n.subject_state, n.subject_html_url
          FROM notifications n
          JOIN repos r ON r.id = n.repo_id
-         ORDER BY r.full_name ASC, n.unread DESC, n.updated_at DESC",
+         ORDER BY r.full_name ASC, n.updated_at DESC, n.thread_id ASC",
     )?;
 
     let rows = stmt.query_map([], |r| {
@@ -470,12 +521,11 @@ pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
                 subject_title: r.get(5)?,
                 subject_url: r.get(6)?,
                 reason: r.get(7)?,
-                unread: r.get::<_, i64>(8)? != 0,
-                updated_at: r.get(9)?,
-                thread_url: r.get(10)?,
-                subject_number: r.get(11)?,
-                subject_state: r.get(12)?,
-                subject_html_url: r.get(13)?,
+                updated_at: r.get(8)?,
+                thread_url: r.get(9)?,
+                subject_number: r.get(10)?,
+                subject_state: r.get(11)?,
+                subject_html_url: r.get(12)?,
             },
         ))
     })?;
@@ -489,16 +539,12 @@ pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
                 repo_id,
                 full_name,
                 private,
-                unread_count: 0,
                 total: 0,
                 notifications: Vec::new(),
             });
         }
         let group = groups.last_mut().expect("group just ensured");
         group.total += 1;
-        if view.unread {
-            group.unread_count += 1;
-        }
         group.notifications.push(view);
     }
     Ok(groups)
@@ -534,7 +580,7 @@ mod tests {
         conn
     }
 
-    fn thread(id: &str, repo_id: i64, repo: &str, title: &str, unread: bool) -> NotificationThread {
+    fn thread(id: &str, repo_id: i64, repo: &str, title: &str) -> NotificationThread {
         let (owner, name) = repo.split_once('/').unwrap();
         NotificationThread {
             id: id.to_string(),
@@ -554,9 +600,7 @@ mod tests {
                 subject_type: "Issue".to_string(),
             },
             reason: "subscribed".to_string(),
-            unread,
             updated_at: "2026-01-02T00:00:00Z".to_string(),
-            last_read_at: None,
             url: format!("https://api.github.com/notifications/threads/{id}"),
         }
     }
@@ -565,9 +609,9 @@ mod tests {
     fn stores_repos_and_notifications() {
         let mut conn = mem_conn();
         let threads = vec![
-            thread("1", 100, "octo/repo-a", "First", true),
-            thread("2", 100, "octo/repo-a", "Second", true),
-            thread("3", 200, "octo/repo-b", "Third", true),
+            thread("1", 100, "octo/repo-a", "First"),
+            thread("2", 100, "octo/repo-a", "Second"),
+            thread("3", 200, "octo/repo-b", "Third"),
         ];
         let n = store_notifications(&mut conn, &threads).unwrap();
         assert_eq!(n.stored, 3);
@@ -588,9 +632,9 @@ mod tests {
     fn groups_notifications_by_repo() {
         let mut conn = mem_conn();
         let threads = vec![
-            thread("1", 200, "octo/zeta", "Z one", true),
-            thread("2", 100, "octo/alpha", "A read", false),
-            thread("3", 100, "octo/alpha", "A unread", true),
+            thread("1", 200, "octo/zeta", "Z one"),
+            thread("2", 100, "octo/alpha", "A one"),
+            thread("3", 100, "octo/alpha", "A two"),
         ];
         store_notifications(&mut conn, &threads).unwrap();
 
@@ -601,22 +645,25 @@ mod tests {
         assert_eq!(groups[0].full_name, "octo/alpha");
         assert_eq!(groups[1].full_name, "octo/zeta");
 
+        // Every stored notification is shown (read state is not tracked); count is the total.
         let alpha = &groups[0];
         assert_eq!(alpha.total, 2);
-        assert_eq!(alpha.unread_count, 1);
-        // Within a repo, unread sorts before read.
-        assert!(alpha.notifications[0].unread);
-        assert_eq!(alpha.notifications[0].subject_title, "A unread");
-        assert!(!alpha.notifications[1].unread);
+        assert_eq!(alpha.notifications.len(), 2);
+        let titles: Vec<&str> = alpha
+            .notifications
+            .iter()
+            .map(|n| n.subject_title.as_str())
+            .collect();
+        assert!(titles.contains(&"A one"));
+        assert!(titles.contains(&"A two"));
 
         assert_eq!(groups[1].total, 1);
-        assert_eq!(groups[1].unread_count, 1);
     }
 
     #[test]
     fn null_reason_does_not_break_listing() {
         let mut conn = mem_conn();
-        store_notifications(&mut conn, &[thread("1", 100, "octo/alpha", "Title", true)]).unwrap();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/alpha", "Title")]).unwrap();
         // The reason column is nullable; ensure a NULL value still lists cleanly.
         conn.execute(
             "UPDATE notifications SET reason = NULL WHERE thread_id = '1'",
@@ -635,33 +682,32 @@ mod tests {
         let mut conn = mem_conn();
         store_notifications(
             &mut conn,
-            &[thread("1", 100, "octo/repo-a", "Old title", true)],
+            &[thread("1", 100, "octo/repo-a", "Old title")],
         )
         .unwrap();
 
-        // Re-store the same thread id with a changed title + read state.
+        // Re-store the same thread id with a changed title.
         store_notifications(
             &mut conn,
-            &[thread("1", 100, "octo/repo-a", "New title", false)],
+            &[thread("1", 100, "octo/repo-a", "New title")],
         )
         .unwrap();
 
         assert_eq!(count(&conn).unwrap(), 1); // no duplicate row
-        let (title, unread): (String, i64) = conn
+        let title: String = conn
             .query_row(
-                "SELECT subject_title, unread FROM notifications WHERE thread_id = '1'",
+                "SELECT subject_title FROM notifications WHERE thread_id = '1'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| r.get(0),
             )
             .unwrap();
         assert_eq!(title, "New title");
-        assert_eq!(unread, 0);
     }
 
     #[test]
     fn upsert_preserves_resolved_subject_columns() {
         let mut conn = mem_conn();
-        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "Title", true)]).unwrap();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "Title")]).unwrap();
         // Simulate M6 resolution writing subject metadata.
         conn.execute(
             "UPDATE notifications SET subject_state = 'closed', resolved_at = '2026-01-03T00:00:00Z'
@@ -673,7 +719,7 @@ mod tests {
         // A subsequent sync must not clobber the resolved columns.
         store_notifications(
             &mut conn,
-            &[thread("1", 100, "octo/repo-a", "Title v2", true)],
+            &[thread("1", 100, "octo/repo-a", "Title v2")],
         )
         .unwrap();
         let (state, resolved): (Option<String>, Option<String>) = conn
@@ -693,9 +739,9 @@ mod tests {
         store_notifications(
             &mut conn,
             &[
-                thread("1", 100, "octo/repo-a", "One", true),
-                thread("2", 100, "octo/repo-a", "Two", true),
-                thread("3", 200, "octo/repo-b", "Three", true),
+                thread("1", 100, "octo/repo-a", "One"),
+                thread("2", 100, "octo/repo-a", "Two"),
+                thread("3", 200, "octo/repo-b", "Three"),
             ],
         )
         .unwrap();
@@ -703,7 +749,7 @@ mod tests {
 
         // A later full sync only returns thread 1 (2 and 3 were cleared on github.com).
         let outcome =
-            store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One", true)])
+            store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")])
                 .unwrap();
         assert_eq!(outcome.stored, 1);
         assert_eq!(outcome.removed, 2);
@@ -732,8 +778,8 @@ mod tests {
         store_notifications(
             &mut conn,
             &[
-                thread("1", 100, "octo/repo-a", "One", true),
-                thread("2", 200, "octo/repo-b", "Two", true),
+                thread("1", 100, "octo/repo-a", "One"),
+                thread("2", 200, "octo/repo-b", "Two"),
             ],
         )
         .unwrap();
@@ -755,8 +801,8 @@ mod tests {
         store_notifications(
             &mut conn,
             &[
-                thread("1", 100, "octo/repo-a", "One", true),
-                thread("2", 100, "octo/repo-a", "Two", true),
+                thread("1", 100, "octo/repo-a", "One"),
+                thread("2", 100, "octo/repo-a", "Two"),
             ],
         )
         .unwrap();
@@ -769,7 +815,7 @@ mod tests {
 
         // Next sync drops thread 2 but keeps thread 1 — its resolved column must persist.
         let outcome =
-            store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One", true)])
+            store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")])
                 .unwrap();
         assert_eq!(outcome.removed, 1);
         let state: Option<String> = conn
@@ -788,9 +834,9 @@ mod tests {
         store_notifications(
             &mut conn,
             &[
-                thread("1", 100, "octo/repo-a", "One", true),
-                thread("2", 100, "octo/repo-a", "Two", true),
-                thread("3", 200, "octo/repo-b", "Three", true),
+                thread("1", 100, "octo/repo-a", "One"),
+                thread("2", 100, "octo/repo-a", "Two"),
+                thread("3", 200, "octo/repo-b", "Three"),
             ],
         )
         .unwrap();
@@ -804,6 +850,64 @@ mod tests {
             repo_full_name(&conn, 100).unwrap().as_deref(),
             Some("octo/repo-a")
         );
+    }
+
+    #[test]
+    fn mark_done_then_stale_sync_does_not_resurrect() {
+        // The classic race: a sync's fetch predates the mark-done, then tries to re-insert
+        // the just-deleted thread. The tombstone must keep it out of the inbox.
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
+        mark_done_local(&mut conn, &["1".to_string()]).unwrap();
+        assert_eq!(count(&conn).unwrap(), 0);
+
+        // Stale fetch still lists thread 1 (same updated_at as when it was marked done).
+        let outcome =
+            store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
+        assert_eq!(count(&conn).unwrap(), 0, "tombstone must suppress re-insert");
+        assert_eq!(outcome.stored, 1); // it was in the fetch, just not stored
+    }
+
+    #[test]
+    fn resurfaced_thread_with_newer_activity_comes_back() {
+        // A thread marked done that gets genuinely new activity (newer updated_at) is a real
+        // re-surface and must be allowed back, clearing the tombstone.
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
+        mark_done_local(&mut conn, &["1".to_string()]).unwrap();
+
+        let mut newer = thread("1", 100, "octo/repo-a", "One (new comment)");
+        newer.updated_at = "2026-06-01T00:00:00Z".to_string(); // newer than the fixture's date
+        store_notifications(&mut conn, &[newer]).unwrap();
+
+        assert_eq!(count(&conn).unwrap(), 1, "new activity must re-surface the thread");
+        let tombstones: i64 = conn
+            .query_row("SELECT COUNT(*) FROM done_tombstones", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tombstones, 0, "tombstone cleared once it re-surfaced");
+    }
+
+    #[test]
+    fn tombstone_retires_once_thread_leaves_the_fetch() {
+        // Once GitHub stops returning a done thread, its tombstone has served its purpose
+        // and is removed (so the table doesn't grow unbounded).
+        let mut conn = mem_conn();
+        store_notifications(
+            &mut conn,
+            &[
+                thread("1", 100, "octo/repo-a", "One"),
+                thread("2", 100, "octo/repo-a", "Two"),
+            ],
+        )
+        .unwrap();
+        mark_done_local(&mut conn, &["1".to_string()]).unwrap();
+
+        // A sync that no longer lists thread 1 confirms the mark-done stuck.
+        store_notifications(&mut conn, &[thread("2", 100, "octo/repo-a", "Two")]).unwrap();
+        let tombstones: i64 = conn
+            .query_row("SELECT COUNT(*) FROM done_tombstones", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tombstones, 0, "tombstone retired after the thread left the fetch");
     }
 
     #[test]
@@ -917,8 +1021,8 @@ mod tests {
         store_notifications(
             &mut conn,
             &[
-                thread("1", 100, "octo/repo-a", "One", true),
-                thread("2", 100, "octo/repo-a", "Two", true),
+                thread("1", 100, "octo/repo-a", "One"),
+                thread("2", 100, "octo/repo-a", "Two"),
             ],
         )
         .unwrap();
@@ -966,7 +1070,7 @@ mod tests {
     #[test]
     fn needs_resolution_retries_unresolved_subjects_after_an_hour() {
         let mut conn = mem_conn();
-        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One", true)]).unwrap();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
 
         // Simulate a failed resolution (e.g. private repo 404 before a scope upgrade):
         // resolved_at is stamped but no state was stored.
@@ -1008,8 +1112,8 @@ mod tests {
         store_notifications(
             &mut conn,
             &[
-                thread("1", 100, "octo/repo-a", "One", true),
-                thread("2", 100, "octo/repo-a", "Two", true),
+                thread("1", 100, "octo/repo-a", "One"),
+                thread("2", 100, "octo/repo-a", "Two"),
             ],
         )
         .unwrap();
@@ -1034,7 +1138,7 @@ mod tests {
     #[test]
     fn store_resolved_subject_persists_fields_and_stamps_resolved_at() {
         let mut conn = mem_conn();
-        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "PR", true)]).unwrap();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "PR")]).unwrap();
 
         store_resolved_subject(
             &conn,
