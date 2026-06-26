@@ -16,6 +16,7 @@
 
 use rusqlite::Connection;
 
+use crate::db::Db;
 use crate::settings;
 
 /// Whether the PAT is stored unencrypted (dev/SQLite) rather than in the Keychain.
@@ -26,10 +27,16 @@ pub fn storage_is_unencrypted() -> bool {
     cfg!(debug_assertions)
 }
 
+// The token functions take the `Db` mutex (not a held `&Connection`) so that the *release*
+// path can do its Keychain I/O **without** holding the SQLite lock — keeping a potentially
+// slow OS call off the critical section that other DB-backed commands contend for. Only the
+// dev/SQLite path acquires the lock, and only briefly.
+
 /// Store (or replace) the PAT.
-pub fn store_token(conn: &Connection, token: &str) -> Result<(), String> {
+pub fn store_token(db: &Db, token: &str) -> Result<(), String> {
     if storage_is_unencrypted() {
-        settings::set_string(conn, settings::KEY_DEV_GITHUB_PAT, token)
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        settings::set_string(&conn, settings::KEY_DEV_GITHUB_PAT, token)
             .map_err(|e| format!("failed to store token: {e}"))
     } else {
         keychain::store(token)
@@ -37,9 +44,10 @@ pub fn store_token(conn: &Connection, token: &str) -> Result<(), String> {
 }
 
 /// Read the PAT, returning `None` when none is stored.
-pub fn read_token(conn: &Connection) -> Result<Option<String>, String> {
+pub fn read_token(db: &Db) -> Result<Option<String>, String> {
     if storage_is_unencrypted() {
-        settings::get_string(conn, settings::KEY_DEV_GITHUB_PAT)
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        settings::get_string(&conn, settings::KEY_DEV_GITHUB_PAT)
             .map_err(|e| format!("failed to read token: {e}"))
     } else {
         keychain::read()
@@ -47,25 +55,29 @@ pub fn read_token(conn: &Connection) -> Result<Option<String>, String> {
 }
 
 /// Whether a PAT is currently stored.
-pub fn has_token(conn: &Connection) -> Result<bool, String> {
-    Ok(read_token(conn)?.is_some())
+pub fn has_token(db: &Db) -> Result<bool, String> {
+    Ok(read_token(db)?.is_some())
 }
 
 /// Remove the stored PAT. A missing entry is treated as success.
-pub fn delete_token(conn: &Connection) -> Result<(), String> {
+pub fn delete_token(db: &Db) -> Result<(), String> {
     if storage_is_unencrypted() {
-        settings::delete_key(conn, settings::KEY_DEV_GITHUB_PAT)
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        settings::delete_key(&conn, settings::KEY_DEV_GITHUB_PAT)
             .map_err(|e| format!("failed to delete token: {e}"))
     } else {
+        // Keychain I/O first, with no lock held; then a brief lock only to scrub any
+        // plaintext dev token a prior debug run may have left in the shared SQLite DB.
         keychain::delete()?;
-        // Belt-and-braces: also clear any plaintext dev token a prior debug run may have
-        // left in the shared SQLite DB, so signing out of a release build leaves nothing.
-        let _ = settings::delete_key(conn, settings::KEY_DEV_GITHUB_PAT);
+        if let Ok(conn) = db.0.lock() {
+            let _ = settings::delete_key(&conn, settings::KEY_DEV_GITHUB_PAT);
+        }
         Ok(())
     }
 }
 
-/// Remove a token left behind by the *inactive* backend. Run once at startup.
+/// Remove a token left behind by the *inactive* backend. Run once at startup, when only a
+/// raw `Connection` is available (before it is wrapped in [`Db`]).
 ///
 /// In release builds this deletes any plaintext dev PAT that a previous **debug** run on
 /// this machine may have written to the shared SQLite database, so a release build never
@@ -115,63 +127,57 @@ mod keychain {
     }
 }
 
-#[cfg(test)]
+// These tests cover the dev/SQLite backend, which is only compiled in debug builds. Gating
+// the whole module on `debug_assertions` (rather than skipping at runtime) means they are
+// always meaningful when present and never silently pass under `cargo test --release`.
+#[cfg(all(test, debug_assertions))]
 mod tests {
     use super::*;
     use crate::db;
 
-    fn mem_conn() -> Connection {
+    fn mem_db() -> Db {
         let conn = Connection::open_in_memory().unwrap();
         for m in db::migrations() {
             conn.execute_batch(m).unwrap();
         }
-        conn
+        Db(std::sync::Mutex::new(conn))
     }
 
-    /// The dev/SQLite backend round-trips store -> read -> has -> delete. This is the path
-    /// exercised by `cargo test` (a debug build), so it covers the default test behavior.
+    /// The dev/SQLite backend round-trips store -> read -> has -> delete.
     #[test]
     fn sqlite_backend_round_trip() {
-        // Only meaningful when the dev backend is active (debug builds).
-        if !storage_is_unencrypted() {
-            return;
-        }
-        let conn = mem_conn();
+        let db = mem_db();
 
-        assert!(!has_token(&conn).unwrap());
-        assert_eq!(read_token(&conn).unwrap(), None);
+        assert!(!has_token(&db).unwrap());
+        assert_eq!(read_token(&db).unwrap(), None);
 
-        store_token(&conn, "ghp_dev_secret").unwrap();
-        assert!(has_token(&conn).unwrap());
-        assert_eq!(read_token(&conn).unwrap().as_deref(), Some("ghp_dev_secret"));
+        store_token(&db, "ghp_dev_secret").unwrap();
+        assert!(has_token(&db).unwrap());
+        assert_eq!(read_token(&db).unwrap().as_deref(), Some("ghp_dev_secret"));
 
         // The PAT lives under its own key, distinct from user-facing settings.
         assert_eq!(
-            settings::get_string(&conn, settings::KEY_DEV_GITHUB_PAT)
+            settings::get_string(&db.0.lock().unwrap(), settings::KEY_DEV_GITHUB_PAT)
                 .unwrap()
                 .as_deref(),
             Some("ghp_dev_secret")
         );
 
-        delete_token(&conn).unwrap();
-        assert!(!has_token(&conn).unwrap());
-        assert_eq!(read_token(&conn).unwrap(), None);
+        delete_token(&db).unwrap();
+        assert!(!has_token(&db).unwrap());
+        assert_eq!(read_token(&db).unwrap(), None);
     }
 
-    /// `purge_inactive_token` is a no-op in debug builds (the dev/SQLite token must survive
-    /// — only release builds purge it). This documents the debug-side contract; the
-    /// release behavior (deleting the key) can't be exercised under `cargo test` (a debug
-    /// build), but the function is a thin `delete_key`, so a debug no-op + manual review
-    /// covers it.
+    /// `purge_inactive_token` is a no-op in debug builds — the dev/SQLite token must survive
+    /// (only release builds purge it). The release-side deletion can't run under a debug
+    /// `cargo test`, but the function is a thin `delete_key`, so a debug no-op assertion
+    /// plus review covers it.
     #[test]
     fn purge_is_noop_in_debug() {
-        if !storage_is_unencrypted() {
-            return;
-        }
-        let conn = mem_conn();
-        store_token(&conn, "ghp_dev_secret").unwrap();
-        purge_inactive_token(&conn).unwrap();
+        let db = mem_db();
+        store_token(&db, "ghp_dev_secret").unwrap();
+        purge_inactive_token(&db.0.lock().unwrap()).unwrap();
         // The dev token must still be there in debug builds.
-        assert_eq!(read_token(&conn).unwrap().as_deref(), Some("ghp_dev_secret"));
+        assert_eq!(read_token(&db).unwrap().as_deref(), Some("ghp_dev_secret"));
     }
 }

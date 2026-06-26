@@ -71,10 +71,12 @@ fn db_status(state: State<'_, AppState>) -> Result<DbStatus, String> {
 /// network, so it works offline and loads fast.
 #[tauri::command]
 fn auth_status(state: State<'_, AppState>) -> Result<AuthStatus, String> {
-    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
-    let authenticated = auth::has_token(&conn)?;
-    let login =
-        settings::get_string(&conn, settings::KEY_GITHUB_LOGIN).map_err(|e| e.to_string())?;
+    // `has_token` may hit the Keychain (release), so don't hold the DB lock across it.
+    let authenticated = auth::has_token(&state.db)?;
+    let login = {
+        let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+        settings::get_string(&conn, settings::KEY_GITHUB_LOGIN).map_err(|e| e.to_string())?
+    };
     Ok(AuthStatus {
         authenticated,
         login,
@@ -94,9 +96,11 @@ async fn sign_in(token: String, state: State<'_, AppState>) -> Result<GitHubUser
     // Verify before persisting anything (network call, no locks held).
     let user = github::fetch_user(&token).await?;
 
+    // Store the token first (may be Keychain I/O in release — `store_token` locks the DB
+    // itself only for the dev/SQLite path, so we never hold the lock across Keychain I/O).
+    auth::store_token(&state.db, &token)?;
     {
         let conn = state.db.0.lock().map_err(|e| e.to_string())?;
-        auth::store_token(&conn, &token)?;
         settings::set_string(&conn, settings::KEY_GITHUB_LOGIN, &user.login)
             .map_err(|e| e.to_string())?;
         // New credentials may have broader scope — re-resolve all subjects on next sync.
@@ -108,8 +112,9 @@ async fn sign_in(token: String, state: State<'_, AppState>) -> Result<GitHubUser
 /// Remove the stored token and cached login.
 #[tauri::command]
 fn sign_out(state: State<'_, AppState>) -> Result<(), String> {
+    // `delete_token` does its Keychain work without the DB lock (release).
+    auth::delete_token(&state.db)?;
     let conn = state.db.0.lock().map_err(|e| e.to_string())?;
-    auth::delete_token(&conn)?;
     settings::delete_key(&conn, settings::KEY_GITHUB_LOGIN).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -167,11 +172,10 @@ struct SyncResult {
 /// single transaction afterwards.
 #[tauri::command]
 async fn sync_now(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<SyncResult, String> {
-    let token = {
-        let conn = state.db.0.lock().map_err(|e| e.to_string())?;
-        auth::read_token(&conn)?
-    }
-    .ok_or_else(|| "Not connected — add a GitHub token first.".to_string())?;
+    // `read_token` locks the DB itself only for the dev path; the release path reads the
+    // Keychain without holding the lock.
+    let token = auth::read_token(&state.db)?
+        .ok_or_else(|| "Not connected — add a GitHub token first.".to_string())?;
 
     let _ = app.emit("sync:started", ());
 
@@ -382,11 +386,8 @@ where
             .collect()
     };
 
-    let token = {
-        let conn = state.db.0.lock().map_err(|e| e.to_string())?;
-        auth::read_token(&conn)?
-    }
-    .ok_or_else(|| "Not connected — add a GitHub token first.".to_string())?;
+    let token = auth::read_token(&state.db)?
+        .ok_or_else(|| "Not connected — add a GitHub token first.".to_string())?;
 
     const POOL: usize = 8;
     let client = reqwest::Client::new();
