@@ -258,10 +258,15 @@ column, no marketing hero):
 
 ## 8. Security
 
-- The PAT is stored in the **macOS Keychain** via the Rust `keyring` crate — never in
-  SQLite, never in plaintext on disk, never logged.
+- **Release builds** store the PAT in the **macOS Keychain** via the Rust `keyring`
+  crate — never in SQLite, never in plaintext on disk, never logged.
+- **Debug builds** (`tauri dev` / `cargo`) instead store the PAT **unencrypted** in the
+  SQLite `settings` table (the Keychain re-prompts on every rebuild for a self-signed
+  binary, which is unworkable in dev). The Settings UI warns while this is active. The
+  backend selects the store at compile time via `cfg!(debug_assertions)` (see `auth.rs`).
 - The UI sends the token to the core once (to save); thereafter the core reads it from
-  Keychain on demand. The token is not echoed back to the UI.
+  the active store on demand. The token is not echoed back to the UI, and never returned
+  by `get_settings`.
 - **Recommended token scopes** (document for the user):
   - Classic PAT: `notifications` (read/modify the inbox). Add `repo` to resolve subjects
     in **private** repositories.

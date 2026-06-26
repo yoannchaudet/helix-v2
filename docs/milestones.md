@@ -24,11 +24,12 @@ v1 is complete when **M1–M7** are done.
 ## M2 — Auth & settings
 **Objective:** Securely authenticate and persist preferences.
 **Deliverables:**
-- Settings view; PAT saved to the macOS Keychain (never to SQLite).
+- Settings view; PAT stored in the macOS Keychain (release) or unencrypted in SQLite
+  (debug builds — see `auth.rs`).
 - Settings (poll interval, dependabot-only default) persisted in SQLite.
 - Auth check against `GET /user`.
 **Done when:** Entering a PAT shows the authenticated login; the token survives relaunch
-via Keychain and is never written to disk in plaintext.
+(via Keychain in release builds; via SQLite in debug builds).
 
 ## M3 — Fetch & store notifications
 **Objective:** Pull the notification inbox into local state.

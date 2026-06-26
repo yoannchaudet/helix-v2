@@ -1,6 +1,8 @@
 //! Application settings persisted in SQLite.
 //!
-//! Non-secret preferences live here (the PAT lives in the Keychain — see `auth.rs`).
+//! Non-secret preferences live here. The PAT is **not** a setting in the usual sense:
+//! release builds keep it in the Keychain, while debug builds store it unencrypted under
+//! `KEY_DEV_GITHUB_PAT` (see `auth.rs`). Either way it is never returned by `get_settings`.
 //! Simple key/value pairs go in the `settings` table; the polling cadence lives in
 //! `sync_state.poll_interval_s` (per the schema in `docs/design.md` §3).
 
@@ -11,6 +13,9 @@ pub const KEY_DEPENDABOT_ONLY: &str = "dependabot_only";
 pub const KEY_GITHUB_LOGIN: &str = "github_login";
 pub const KEY_WINDOW_WIDTH: &str = "window_width";
 pub const KEY_WINDOW_HEIGHT: &str = "window_height";
+/// Dev-only: the PAT stored *unencrypted* in SQLite for debug builds (see `auth.rs`).
+/// Release builds keep the PAT in the Keychain and never use this key.
+pub const KEY_DEV_GITHUB_PAT: &str = "dev_github_pat";
 
 /// Lower bound for the polling interval, to avoid hammering the API.
 pub const MIN_POLL_INTERVAL_S: i64 = 10;

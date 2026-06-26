@@ -43,70 +43,25 @@ Run the Rust tests (e.g. the SQLite bootstrap) with:
 cd src-tauri && cargo test
 ```
 
-### Avoiding repeated Keychain prompts (macOS)
+### Token storage (macOS)
 
-Helix stores its GitHub PAT in the macOS **login Keychain**. By default macOS
-re-prompts — *"helix wants to use your confidential information stored in
-com.yoannchaudet.helix"* — on essentially every rebuild. **The fix is one
-script:**
+Where Helix keeps your GitHub PAT depends on the build:
 
-```sh
-./scripts/fix-dev-keychain.sh   # paste your dev PAT once; no more prompts
-```
+- **Release builds** store it in the macOS **login Keychain** — encrypted at
+  rest, the secure default.
+- **Debug builds** (`tauri dev` / `cargo`) store it **unencrypted** in the app's
+  local SQLite database instead, and the Settings page shows a warning while this
+  is active.
 
-It re-stores the PAT as an *allow-all* Keychain item (`security
-add-generic-password -A`) and verifies the resulting ACL. After running it,
-relaunch the app and you won't be prompted again — across all rebuilds, with or
-without code signing.
+This split is deliberate. The Keychain ties its "always allow" grant to the
+binary's code signature *and* an ACL partition list that, for a self-signed
+binary with no Apple Team ID, can only pin the per-build code hash — so it
+re-prompts on essentially every rebuild, which is unworkable during development.
+Rather than fight that, debug builds skip the Keychain entirely.
 
-> ⚠️ **Trade-off:** an allow-all item can be read by any process running as you,
-> without a prompt. That's an intentional convenience for a *local, limited-scope
-> dev PAT* — don't do this for a high-privilege token. The secret is still
-> encrypted at rest. Re-run the script if prompts ever return — e.g. after
-> signing out and back in, which deletes and recreates the item (changing the
-> token in place preserves the allow-all grant).
-
-<details>
-<summary>Why signing alone can't fix this (and why we stopped relying on it)</summary>
-
-Access to the Keychain item is gated by an ACL with **two** independent checks:
-
-1. a **trusted-application requirement** (the app's code signature), and
-2. a **partition list**.
-
-A stable signing identity (below) satisfies (1) across rebuilds. But (2) is the
-catch: for a self-signed certificate with **no Apple Team ID**, the partition
-list can only pin the binary's per-build **cdhash**. Every rebuild changes the
-cdhash, so the partition check fails and macOS prompts — clicking *Always Allow*
-merely appends that one build's cdhash, so it can't stay stable across rebuilds
-during normal iterative development. A real Team ID would yield a stable
-`teamid:` partition; a self-signed dev cert cannot. The allow-all item sidesteps
-the partition gate entirely, which is why it's the reliable fix.
-
-</details>
-
-<details>
-<summary>Optional: stable dev code signature (no longer required for Keychain)</summary>
-
-Signing each debug build with a stable identity is still available (it gives a
-consistent code identity), but it is **not** needed to stop the Keychain prompts
-— `fix-dev-keychain.sh` handles those. To set it up:
-
-```sh
-./scripts/setup-dev-signing.sh   # one-time: create a "Helix Dev" code-signing cert
-```
-
-`codesign` only accepts a code-signing identity created through **Keychain
-Access → Certificate Assistant**, so the script walks you through that one-time
-GUI step. Once the `Helix Dev` identity exists,
-[`scripts/cargo-codesign.sh`](scripts/cargo-codesign.sh) — wired up as Tauri's
-`build.runner` — signs every debug build with it. The scripts resolve the
-identity by its SHA-1 **hash** (not by name) and don't require the cert to be
-Gatekeeper-trusted, so a duplicate or untrusted `Helix Dev` cert won't break
-signing. The wrapper is a no-op when the identity is absent, so this is optional
-and CI/other contributors are unaffected.
-
-</details>
+> ⚠️ Because the dev token is stored unencrypted, use a **low-privilege PAT**
+> locally and never ship a debug build. There is nothing to set up — it just
+> works, with no prompts.
 
 ## Project conventions
 

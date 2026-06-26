@@ -905,6 +905,21 @@ code {
 
 /* Transient confirmation (e.g. "Saved", "Stored N", "Copied") that fades in. Hidden
  * via `display: none` so it never reserves layout space (no permanent gap in the row). */
+/* Inline warning callout (e.g. the dev-build "token stored unencrypted" notice). */
+.callout {
+  margin: 16px 16px 10px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.callout--warn {
+  background: rgba(154, 103, 0, 0.1);
+  border: 1px solid rgba(154, 103, 0, 0.3);
+  color: #7a5300;
+}
+
 .srow-flash {
   display: none;
   font-size: 0.85rem;
