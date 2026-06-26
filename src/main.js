@@ -972,9 +972,10 @@ function openContextMenu(x, y, items) {
 /** Open a notification's subject in the default browser via the backend. */
 function openNotification(url) {
   if (!url) return;
-  invoke("open_url", { url }).catch((err) =>
-    console.error(`failed to open ${url}: ${err}`),
-  );
+  invoke("open_url", { url }).catch((err) => {
+    console.error(`failed to open ${url}: ${err}`);
+    toast("Couldn't open link", "error");
+  });
 }
 
 /** Copy a notification's subject URL to the clipboard. */
@@ -1258,7 +1259,7 @@ window.addEventListener("DOMContentLoaded", () => {
   $("#settings-back").addEventListener("click", () => showSettings(false));
 
   // Notification actions: left-click an (openable) row to open it in the browser,
-  // right-click for the row menu, ••• for the visible set. Enter/Space opens too.
+  // right-click for the row menu, ••• for the visible set. Enter opens a focused row.
   $("#inbox").addEventListener("click", onInboxClick);
   $("#inbox").addEventListener("keydown", onInboxKeydown);
   $("#inbox").addEventListener("contextmenu", onInboxContextMenu);
