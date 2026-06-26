@@ -45,33 +45,68 @@ cd src-tauri && cargo test
 
 ### Avoiding repeated Keychain prompts (macOS)
 
-Helix stores its GitHub PAT in the macOS login Keychain, and the Keychain ties its
-"Always Allow" grant to the app's code signature. Every `cargo` rebuild produces a
-binary with a new (ad-hoc) signature, so by default macOS re-prompts to let Helix read
-the PAT on **every** compile.
+Helix stores its GitHub PAT in the macOS **login Keychain**. By default macOS
+re-prompts — *"helix wants to use your confidential information stored in
+com.yoannchaudet.helix"* — on essentially every rebuild. **The fix is one
+script:**
 
-To stop this, sign each dev build with a stable identity:
+```sh
+./scripts/fix-dev-keychain.sh   # paste your dev PAT once; no more prompts
+```
+
+It re-stores the PAT as an *allow-all* Keychain item (`security
+add-generic-password -A`) and verifies the resulting ACL. After running it,
+relaunch the app and you won't be prompted again — across all rebuilds, with or
+without code signing.
+
+> ⚠️ **Trade-off:** an allow-all item can be read by any process running as you,
+> without a prompt. That's an intentional convenience for a *local, limited-scope
+> dev PAT* — don't do this for a high-privilege token. The secret is still
+> encrypted at rest. Re-run the script if prompts ever return — e.g. after
+> signing out and back in, which deletes and recreates the item (changing the
+> token in place preserves the allow-all grant).
+
+<details>
+<summary>Why signing alone can't fix this (and why we stopped relying on it)</summary>
+
+Access to the Keychain item is gated by an ACL with **two** independent checks:
+
+1. a **trusted-application requirement** (the app's code signature), and
+2. a **partition list**.
+
+A stable signing identity (below) satisfies (1) across rebuilds. But (2) is the
+catch: for a self-signed certificate with **no Apple Team ID**, the partition
+list can only pin the binary's per-build **cdhash**. Every rebuild changes the
+cdhash, so the partition check fails and macOS prompts — clicking *Always Allow*
+merely appends that one build's cdhash, so it can't stay stable across rebuilds
+during normal iterative development. A real Team ID would yield a stable
+`teamid:` partition; a self-signed dev cert cannot. The allow-all item sidesteps
+the partition gate entirely, which is why it's the reliable fix.
+
+</details>
+
+<details>
+<summary>Optional: stable dev code signature (no longer required for Keychain)</summary>
+
+Signing each debug build with a stable identity is still available (it gives a
+consistent code identity), but it is **not** needed to stop the Keychain prompts
+— `fix-dev-keychain.sh` handles those. To set it up:
 
 ```sh
 ./scripts/setup-dev-signing.sh   # one-time: create a "Helix Dev" code-signing cert
 ```
 
-`codesign` only accepts a code-signing identity created through **Keychain Access →
-Certificate Assistant**, so the script walks you through that one-time GUI step (it can
-open Certificate Assistant for you). Once the `Helix Dev` identity exists,
+`codesign` only accepts a code-signing identity created through **Keychain
+Access → Certificate Assistant**, so the script walks you through that one-time
+GUI step. Once the `Helix Dev` identity exists,
 [`scripts/cargo-codesign.sh`](scripts/cargo-codesign.sh) — wired up as Tauri's
-`build.runner` — code-signs every debug build with it automatically. The first build
-prompts once or twice (click **Always Allow**); after that, rebuilds are silent. The
-wrapper is a no-op when the identity is absent, so this setup is optional and CI/other
-contributors are unaffected.
+`build.runner` — signs every debug build with it. The scripts resolve the
+identity by its SHA-1 **hash** (not by name) and don't require the cert to be
+Gatekeeper-trusted, so a duplicate or untrusted `Helix Dev` cert won't break
+signing. The wrapper is a no-op when the identity is absent, so this is optional
+and CI/other contributors are unaffected.
 
-The signing scripts deliberately resolve the identity by its SHA-1 **hash** rather than
-by name, and do **not** require the cert to be Gatekeeper-trusted: a self-signed dev cert
-shows as untrusted (`CSSMERR_TP_NOT_TRUSTED`) yet still produces a stable signature, which
-is all the Keychain grant needs. This also means a leftover **duplicate** `Helix Dev`
-certificate won't break signing (it would otherwise make `codesign --sign "Helix Dev"`
-fail as *ambiguous*) — `setup-dev-signing.sh` flags duplicates so you can tidy them up in
-Keychain Access, but signing keeps working either way.
+</details>
 
 ## Project conventions
 

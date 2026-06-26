@@ -3,10 +3,14 @@
 # Tauri `build.runner` wrapper for local macOS development.
 #
 # It code-signs the freshly built *debug* binary with a stable, self-signed identity
-# before the app is launched. Signing every build the same way keeps the macOS
-# Keychain "Always Allow" grant for Helix's stored PAT valid across rebuilds. Without
-# a stable signature, each `cargo` build produces a binary with a different (ad-hoc)
-# signature, so macOS treats it as a new app and re-prompts on every compile.
+# before the app is launched, giving every build a consistent code identity.
+#
+# NOTE: this signing does NOT, on its own, stop the macOS Keychain from re-prompting
+# for the stored PAT. The Keychain item is also gated by a *partition list*, which for
+# a self-signed cert with no Apple Team ID can only pin each build's (changing) cdhash —
+# so prompts persist across rebuilds regardless of how stable the signature is. To stop
+# the prompts, run `scripts/fix-dev-keychain.sh` (re-stores the PAT as an allow-all
+# item). This signing wrapper is therefore optional.
 #
 # `tauri dev` invokes this as `… run <flags> -- <app-args>`, where `cargo run` builds
 # *and* executes in one step. To sign in between, we intercept `run`: build, sign,
@@ -30,8 +34,10 @@ BIN="$SCRIPT_DIR/../src-tauri/target/debug/helix"
 
 # Resolve the signing identity to a single, stable SHA-1 hash.
 #
-# Two deliberate choices here, both required to keep the Keychain "Always Allow" grant
-# stable across rebuilds:
+# Two deliberate choices here, both about producing a *stable, deterministic code
+# signature* across rebuilds (which gives the app a consistent code identity; note this
+# alone does NOT keep the Keychain grant stable — see the header note and
+# scripts/fix-dev-keychain.sh):
 #
 #   * We intentionally do NOT use `find-identity -v` (valid-only). A self-signed local
 #     dev cert is untrusted by Gatekeeper (CSSMERR_TP_NOT_TRUSTED) and so is filtered out

@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 #
-# One-time setup so local dev builds are signed with a stable identity, which keeps
-# the macOS Keychain "Always Allow" grant for Helix's stored PAT valid across
-# rebuilds (see scripts/cargo-codesign.sh and the README "Local development" notes).
+# One-time setup so local dev builds are signed with a stable identity, giving every
+# build a consistent code identity.
+#
+# NOTE: signing alone does NOT stop the macOS Keychain from re-prompting for the stored
+# PAT — the Keychain item's *partition list* pins each build's (changing) cdhash for a
+# self-signed, no-Team-ID cert, so prompts persist across rebuilds. To stop the prompts,
+# run `scripts/fix-dev-keychain.sh`. This signing setup is optional (see README,
+# "Avoiding repeated Keychain prompts").
 #
 # Why a GUI step: macOS `codesign` only accepts a code-signing identity created
 # through Keychain Access → Certificate Assistant. Self-signed certs minted with
@@ -73,10 +78,12 @@ After creating '$IDENTITY', re-run this script to confirm, then start the app:
   ./scripts/setup-dev-signing.sh   # should report the identity is valid
   npm run tauri dev
 
-On the first build macOS will prompt once or twice — click Always Allow each time:
-  • "codesign wants to use the '$IDENTITY' key"
-  • "Helix wants to use your confidential information" (the stored PAT)
+To stop the macOS Keychain from re-prompting for the stored PAT on every rebuild,
+also run:
 
-Subsequent rebuilds will not prompt.
+  ./scripts/fix-dev-keychain.sh    # re-stores the PAT as an allow-all item
+
+(Signing alone can't stop those prompts for a self-signed, no-Team-ID cert — see
+the README section "Avoiding repeated Keychain prompts".)
 EOF
 exit 1
