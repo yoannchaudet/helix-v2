@@ -99,9 +99,10 @@ pub struct RepoOwner {
 #[derive(Debug, Deserialize)]
 pub struct Subject {
     pub title: String,
-    /// API URL to the subject (PR/Issue/Discussion), resolved to get the web `html_url`.
-    /// Null for subject types GitHub doesn't expose this way (e.g. CheckSuite), and
-    /// occasionally for discussions (older / comment-less) — callers must handle `None`.
+    /// API URL to the subject — issues, PRs, discussions, releases, commits, … — which we
+    /// resolve to get the web `html_url` (and, for PR/Issue/Discussion, a state). Null for
+    /// subject types GitHub doesn't expose this way (e.g. CheckSuite), and occasionally for
+    /// discussions (older / comment-less) — callers must handle `None`.
     pub url: Option<String>,
     #[serde(rename = "type")]
     pub subject_type: String,
@@ -181,11 +182,15 @@ pub async fn resolve_subject(
     client: &reqwest::Client,
     url: &str,
     token: &str,
-) -> Result<ResolveResult, String> {
+) -> Result<ResolveResult, ResolveError> {
     let resp = authed_get(client, url, token)
         .send()
         .await
-        .map_err(|e| format!("network error: {e}"))?;
+        .map_err(|e| ResolveError {
+            // A transport error before any response carries no rate snapshot.
+            rate: RateLimit::default(),
+            message: format!("network error: {e}"),
+        })?;
 
     let status = resp.status();
     let mut rate = RateLimit::default();
@@ -199,20 +204,32 @@ pub async fn resolve_subject(
     }
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!(
-            "GitHub returned {status} resolving subject: {}",
-            body.trim()
-        ));
+        // A failed (non-404) request still consumed quota — carry its rate snapshot so the
+        // caller's budget accounting stays accurate.
+        return Err(ResolveError {
+            rate,
+            message: format!("GitHub returned {status} resolving subject: {}", body.trim()),
+        });
     }
 
-    let raw: SubjectResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("failed to parse subject: {e}"))?;
-    Ok(ResolveResult {
-        subject: raw.into(),
-        rate,
-    })
+    match resp.json::<SubjectResponse>().await {
+        Ok(raw) => Ok(ResolveResult {
+            subject: raw.into(),
+            rate,
+        }),
+        Err(e) => Err(ResolveError {
+            rate,
+            message: format!("failed to parse subject: {e}"),
+        }),
+    }
+}
+
+/// Failure from resolving a subject that still carries the rate-limit snapshot. A failed
+/// request (other than a transport error before any response) consumes quota too, so the
+/// caller folds this `rate` into its budget accounting.
+pub struct ResolveError {
+    pub rate: RateLimit,
+    pub message: String,
 }
 
 /* -------------------------------- Mutations ------------------------------- */

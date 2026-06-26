@@ -326,7 +326,11 @@ async fn resolve_pending_subjects(app: tauri::AppHandle, token: String) {
                         }
                     }
                 }
-                Err(err) => eprintln!("subject resolution failed for {thread_id}: {err}"),
+                Err(err) => {
+                    // A failed resolution still spent quota — count it toward the reserve.
+                    rate.observe(err.rate.clone());
+                    eprintln!("subject resolution failed for {thread_id}: {}", err.message);
+                }
             }
         }
 

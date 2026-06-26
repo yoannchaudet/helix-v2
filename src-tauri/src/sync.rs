@@ -383,10 +383,10 @@ pub struct PendingSubject {
 /// web URL).
 ///
 /// Resolution applies to **any** subject that exposes a `subject_url`, not a fixed list of
-/// types: issues, PRs, discussions, releases, commits, CI check suites, agent runs, and any
-/// future type all resolve their `subject.url` to an `html_url` the same way (and PR/Issue/
-/// Discussion additionally yield an open/closed/merged state). Types GitHub doesn't give a
-/// `subject.url` for are skipped by the `IS NOT NULL` guard.
+/// types: issues, PRs, discussions, releases, and commits all resolve their `subject.url` to
+/// an `html_url` the same way (and PR/Issue/Discussion additionally yield an open/closed/
+/// merged state). Subject types GitHub gives no `subject.url` for — e.g. `CheckSuite` — are
+/// skipped by the `IS NOT NULL` guard and never resolved.
 ///
 /// Smart caching — a row qualifies when it has a `subject_url` AND any of:
 ///   * never resolved (`resolved_at IS NULL`), or
