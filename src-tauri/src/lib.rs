@@ -253,9 +253,10 @@ async fn resolve_pending_subjects(app: tauri::AppHandle, token: String) {
     const POOL: usize = 8;
     let client = reqwest::Client::new();
     let mut changed = 0usize;
-    // The most conservative (lowest `remaining`) rate snapshot seen across the resolution
-    // calls, so the UI's quota reflects what these extra requests actually consumed.
-    let mut rate: Option<github::RateLimit> = None;
+    // The most conservative (lowest `remaining`) snapshot per rate-limit bucket seen across
+    // the resolution calls, so the UI's per-bucket usage reflects what these extra requests
+    // actually consumed.
+    let mut rate = sync::RateTracker::default();
 
     for batch in pending.chunks(POOL) {
         let mut handles = Vec::with_capacity(batch.len());
@@ -275,16 +276,7 @@ async fn resolve_pending_subjects(app: tauri::AppHandle, token: String) {
             };
             match res {
                 Ok(result) => {
-                    // Track the lowest remaining (most recent within the window).
-                    if let Some(remaining) = result.rate.remaining {
-                        if rate
-                            .as_ref()
-                            .and_then(|r| r.remaining)
-                            .is_none_or(|cur| remaining < cur)
-                        {
-                            rate = Some(result.rate.clone());
-                        }
-                    }
+                    rate.observe(result.rate.clone());
                     if let Ok(conn) = state.db.0.lock() {
                         if sync::store_resolved_subject(&conn, &thread_id, &result.subject).is_ok()
                         {
@@ -297,11 +289,9 @@ async fn resolve_pending_subjects(app: tauri::AppHandle, token: String) {
         }
     }
 
-    // Persist the post-resolution quota so Settings shows the true remaining count.
-    if let Some(rate) = &rate {
-        if let Ok(conn) = state.db.0.lock() {
-            let _ = sync::record_rate(&conn, rate);
-        }
+    // Persist the post-resolution quota so Settings shows the true per-bucket usage.
+    if let Ok(conn) = state.db.0.lock() {
+        let _ = rate.persist(&conn);
     }
 
     if changed > 0 {
@@ -351,20 +341,6 @@ type ThreadMutationFuture = std::pin::Pin<
 /// boxed future above. Implemented by a thin wrapper around `github::mark_thread_done`.
 type ThreadMutation = fn(reqwest::Client, String, String) -> ThreadMutationFuture;
 
-/// Fold a rate-limit snapshot into `current`, keeping the lowest `remaining` seen — the
-/// truest "after these calls" quota across a batch of mutation responses.
-fn fold_rate(current: &mut Option<github::RateLimit>, r: github::RateLimit) {
-    if let Some(remaining) = r.remaining {
-        if current
-            .as_ref()
-            .and_then(|x| x.remaining)
-            .is_none_or(|cur| remaining < cur)
-        {
-            *current = Some(r);
-        }
-    }
-}
-
 /// Run a notification-thread mutation across `thread_ids` with bounded concurrency,
 /// applying `apply_local` only to the threads whose network call succeeded.
 ///
@@ -406,8 +382,9 @@ where
     let client = reqwest::Client::new();
     let mut succeeded: Vec<String> = Vec::new();
     let mut failed: Vec<FailedThread> = Vec::new();
-    // Lowest `remaining` seen across the batch — the truest "after these calls" quota.
-    let mut rate: Option<github::RateLimit> = None;
+    // Lowest `remaining` per bucket seen across the batch — the truest "after these calls"
+    // quota for each API bucket the mutations touched.
+    let mut rate = sync::RateTracker::default();
 
     for batch in thread_ids.chunks(POOL) {
         // Keep each thread id alongside its task handle so a join failure (panic/cancel)
@@ -437,12 +414,12 @@ where
             };
             match res {
                 Ok(r) => {
-                    fold_rate(&mut rate, r);
+                    rate.observe(r);
                     succeeded.push(id);
                 }
                 Err(err) => {
                     // A failed request still consumes quota, so fold its rate snapshot too.
-                    fold_rate(&mut rate, err.rate);
+                    rate.observe(err.rate);
                     failed.push(FailedThread {
                         thread_id: id,
                         error: err.message,
@@ -457,14 +434,13 @@ where
     if !succeeded.is_empty() {
         apply_local(conn, &succeeded).map_err(|e| e.to_string())?;
     }
-    if let Some(rate) = &rate {
-        let _ = sync::record_rate(conn, rate);
-    }
+    let rate_remaining = rate.lowest_remaining();
+    let _ = rate.persist(conn);
 
     Ok(MutationResult {
         ok: succeeded.len(),
         failed,
-        rate_remaining: rate.and_then(|r| r.remaining),
+        rate_remaining,
     })
 }
 

@@ -158,7 +158,7 @@ impl From<SubjectResponse> for ResolvedSubject {
 
 /// Outcome of resolving a single subject: the metadata plus the rate-limit snapshot read
 /// from that response's headers (so the caller can keep the displayed quota accurate after
-/// these extra calls — see `sync::record_rate`).
+/// these extra calls — see `sync::upsert_rate` / `sync::RateTracker`).
 pub struct ResolveResult {
     pub subject: ResolvedSubject,
     pub rate: RateLimit,
@@ -262,8 +262,18 @@ pub async fn mark_thread_done(
 }
 
 /// Rate-limit snapshot read from response headers.
+///
+/// GitHub partitions rate limits into independent **buckets** (REST `core`, `search`,
+/// `graphql`, …). Every response reports which bucket it counted against via
+/// `X-RateLimit-Resource`, along with that bucket's `limit`/`remaining`/`reset`. Capturing
+/// the resource lets the UI show one usage bar per bucket Helix actually touches, and the
+/// `limit` gives the bar its denominator.
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct RateLimit {
+    /// Which bucket this snapshot is for (`X-RateLimit-Resource`, e.g. `core`).
+    pub resource: Option<String>,
+    /// Total requests allowed in the current window (`X-RateLimit-Limit`).
+    pub limit: Option<i64>,
     /// Remaining requests in the current window (`X-RateLimit-Remaining`).
     pub remaining: Option<i64>,
     /// Window reset time as epoch seconds (`X-RateLimit-Reset`).
@@ -274,6 +284,12 @@ pub struct RateLimit {
 
 impl RateLimit {
     fn update_from(&mut self, headers: &HeaderMap) {
+        if let Some(v) = header_string(headers, "x-ratelimit-resource") {
+            self.resource = Some(v);
+        }
+        if let Some(v) = header_i64(headers, "x-ratelimit-limit") {
+            self.limit = Some(v);
+        }
         if let Some(v) = header_i64(headers, "x-ratelimit-remaining") {
             self.remaining = Some(v);
         }
@@ -369,6 +385,16 @@ fn header_i64(headers: &HeaderMap, name: &str) -> Option<i64> {
     headers.get(name)?.to_str().ok()?.trim().parse().ok()
 }
 
+/// Read a string response header (trimmed, non-empty).
+fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
+    let v = headers.get(name)?.to_str().ok()?.trim();
+    if v.is_empty() {
+        None
+    } else {
+        Some(v.to_string())
+    }
+}
+
 /// Extract the `rel="next"` URL from a `Link` header, if present.
 fn next_page_url(headers: &HeaderMap) -> Option<String> {
     let link = headers.get("link")?.to_str().ok()?;
@@ -419,11 +445,15 @@ mod tests {
     #[test]
     fn reads_rate_limit_headers() {
         let mut h = HeaderMap::new();
+        h.insert("x-ratelimit-resource", HeaderValue::from_static("core"));
+        h.insert("x-ratelimit-limit", HeaderValue::from_static("5000"));
         h.insert("x-ratelimit-remaining", HeaderValue::from_static("4998"));
         h.insert("x-ratelimit-reset", HeaderValue::from_static("1700000000"));
         h.insert("x-poll-interval", HeaderValue::from_static("60"));
         let mut rate = RateLimit::default();
         rate.update_from(&h);
+        assert_eq!(rate.resource.as_deref(), Some("core"));
+        assert_eq!(rate.limit, Some(5000));
         assert_eq!(rate.remaining, Some(4998));
         assert_eq!(rate.reset, Some(1700000000));
         assert_eq!(rate.poll_interval, Some(60));

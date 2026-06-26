@@ -160,11 +160,16 @@
                 </button>
               </span>
             </div>
-            <div class="srow">
-              <span class="srow-label">API rate remaining</span>
-              <span class="srow-value" id="rate-remaining">—</span>
-            </div>
           </div>
+        </section>
+
+        <!-- API rate limits (one usage bar per GitHub bucket Helix touches) -->
+        <section class="sgroup">
+          <h2 class="sgroup-label">API rate limits</h2>
+          <div class="slist" id="rate-buckets" aria-live="polite">
+            <div class="srow"><span class="srow-value srow-muted">No requests yet.</span></div>
+          </div>
+          <p class="sgroup-note">Usage of your token's GitHub API allowance, per bucket. Resets on a rolling window.</p>
         </section>
 
         <!-- Syncing preferences (auto-applied) -->

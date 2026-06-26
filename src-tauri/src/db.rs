@@ -69,6 +69,20 @@ const MIGRATIONS: &[&str] = &[
 
     INSERT INTO sync_state (id) VALUES (1);
     "#,
+    // v2 — per-bucket rate-limit snapshots. GitHub partitions limits into independent
+    // buckets (core/search/graphql/…); each response reports its bucket via
+    // `X-RateLimit-Resource`. One row per bucket Helix has touched lets the UI draw a
+    // usage bar (remaining vs. `lim`) and a reset countdown per API, instead of a single
+    // opaque number. Additive: existing `sync_state.rate_*` columns are left untouched.
+    r#"
+    CREATE TABLE rate_limits (
+        resource    TEXT PRIMARY KEY,
+        lim         INTEGER,
+        remaining   INTEGER,
+        reset_at    INTEGER,
+        updated_at  TEXT NOT NULL
+    );
+    "#,
 ];
 
 /// Open the database at `db_path`, apply any pending migrations, and return the
@@ -130,7 +144,7 @@ mod tests {
         assert_eq!(schema_version(&conn).unwrap(), MIGRATIONS.len() as i64);
 
         let tables = table_names(&conn).unwrap();
-        for expected in ["notifications", "repos", "settings", "sync_state"] {
+        for expected in ["notifications", "rate_limits", "repos", "settings", "sync_state"] {
             assert!(tables.contains(&expected.to_string()), "missing table {expected}");
         }
 

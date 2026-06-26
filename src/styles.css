@@ -709,6 +709,71 @@ code {
   line-height: 1.45;
 }
 
+/* Muted inline value (e.g. the "No requests yet." rate-limit empty state). */
+.srow-muted {
+  color: var(--muted);
+}
+
+/* Rate-limit usage bars: one .rate-row per GitHub bucket, stacked in the slist. */
+.rate-row {
+  padding: 11px 16px;
+}
+
+.rate-row + .rate-row {
+  border-top: 1px solid var(--hairline);
+}
+
+.rate-head,
+.rate-foot {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.rate-name {
+  font-size: 0.95rem;
+  font-weight: 500;
+}
+
+.rate-counts {
+  font-size: 0.85rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.rate-bar {
+  margin: 7px 0 5px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--hairline);
+  overflow: hidden;
+}
+
+.rate-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.rate-fill--ok {
+  background: var(--accent);
+}
+
+.rate-fill--warn {
+  background: #e3a008;
+}
+
+.rate-fill--danger {
+  background: #cf222e;
+}
+
+.rate-foot {
+  font-size: 0.78rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
 /* Account row: avatar + identity on the left, Sign out on the right. */
 .srow--account {
   min-height: 60px;

@@ -4,6 +4,8 @@
 //! and notifications, reconciles away rows that disappeared upstream (M5), and records the
 //! outcome (status, error, rate-limit snapshot) in `sync_state`.
 
+use std::collections::HashMap;
+
 use rusqlite::{params, Connection};
 use serde::Serialize;
 
@@ -125,6 +127,9 @@ pub fn store_notifications(
 }
 
 /// Record a successful sync: timestamp, status, and the rate-limit snapshot.
+///
+/// The snapshot is also folded into the per-bucket `rate_limits` table (when it carries a
+/// resource), so the Settings UI can draw a usage bar for each API bucket Helix touches.
 pub fn record_success(conn: &Connection, rate: &RateLimit) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE sync_state SET
@@ -136,20 +141,67 @@ pub fn record_success(conn: &Connection, rate: &RateLimit) -> rusqlite::Result<(
          WHERE id = 1",
         params![rate.remaining, rate.reset.map(|r| r.to_string())],
     )?;
+    upsert_rate(conn, rate)?;
     Ok(())
 }
 
-/// Update only the rate-limit snapshot, without touching sync status/timestamp.
+/// Upsert a single bucket's snapshot into `rate_limits`, keyed by its resource name.
 ///
-/// Used after background subject resolution makes its extra API calls, so the quota shown
-/// in the UI reflects the *total* requests this sync spent (list fetch + resolutions),
-/// rather than the optimistic snapshot taken before resolution ran.
-pub fn record_rate(conn: &Connection, rate: &RateLimit) -> rusqlite::Result<()> {
+/// No-op when the snapshot has no `resource` (e.g. a transport error before any response),
+/// so we never create an empty/ambiguous bucket row.
+pub fn upsert_rate(conn: &Connection, rate: &RateLimit) -> rusqlite::Result<()> {
+    let Some(resource) = rate.resource.as_deref() else {
+        return Ok(());
+    };
     conn.execute(
-        "UPDATE sync_state SET rate_remaining = ?1, rate_reset_at = ?2 WHERE id = 1",
-        params![rate.remaining, rate.reset.map(|r| r.to_string())],
+        "INSERT INTO rate_limits (resource, lim, remaining, reset_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+         ON CONFLICT(resource) DO UPDATE SET
+           lim        = excluded.lim,
+           remaining  = excluded.remaining,
+           reset_at   = excluded.reset_at,
+           updated_at = excluded.updated_at",
+        params![resource, rate.limit, rate.remaining, rate.reset],
     )?;
     Ok(())
+}
+
+/// Accumulates the most conservative (lowest-remaining) snapshot **per bucket** across a
+/// batch of responses, so a sync that spends quota in several buckets persists each one
+/// accurately after the batch (mirrors the old single-scalar fold, but keyed by resource).
+#[derive(Default)]
+pub struct RateTracker {
+    buckets: HashMap<String, RateLimit>,
+}
+
+impl RateTracker {
+    /// Fold one response's snapshot in, keeping the lowest `remaining` seen for its bucket.
+    pub fn observe(&mut self, rate: RateLimit) {
+        let Some(resource) = rate.resource.clone() else {
+            return;
+        };
+        let replace = match self.buckets.get(&resource).and_then(|b| b.remaining) {
+            Some(cur) => rate.remaining.is_some_and(|new| new < cur),
+            None => rate.remaining.is_some(),
+        };
+        if replace {
+            self.buckets.insert(resource, rate);
+        }
+    }
+
+    /// Persist every tracked bucket via [`upsert_rate`].
+    pub fn persist(&self, conn: &Connection) -> rusqlite::Result<()> {
+        for rate in self.buckets.values() {
+            upsert_rate(conn, rate)?;
+        }
+        Ok(())
+    }
+
+    /// The lowest `remaining` across all tracked buckets, if any — a single scalar still
+    /// handy for callers (e.g. a mutation result) that only need a coarse "quota left" hint.
+    pub fn lowest_remaining(&self) -> Option<i64> {
+        self.buckets.values().filter_map(|b| b.remaining).min()
+    }
 }
 
 /// Record a failed sync (status + message); leaves the last successful data intact.
@@ -161,6 +213,19 @@ pub fn record_error(conn: &Connection, message: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// One rate-limit bucket's snapshot, surfaced to the UI as a usage bar.
+#[derive(Debug, Clone, Serialize)]
+pub struct RateBucket {
+    /// GitHub resource name (`core`, `search`, `graphql`, …).
+    pub resource: String,
+    /// Total requests allowed in the window, if known.
+    pub limit: Option<i64>,
+    /// Requests remaining in the window, if known.
+    pub remaining: Option<i64>,
+    /// Window reset time as epoch seconds, if known.
+    pub reset_at: Option<i64>,
+}
+
 /// Sync status surfaced to the UI.
 #[derive(Debug, Serialize)]
 pub struct SyncStatus {
@@ -170,6 +235,24 @@ pub struct SyncStatus {
     pub rate_remaining: Option<i64>,
     pub rate_reset_at: Option<String>,
     pub notification_count: i64,
+    /// Per-bucket rate-limit snapshots (one entry per API bucket Helix has touched).
+    pub rate_buckets: Vec<RateBucket>,
+}
+
+/// Read every recorded rate-limit bucket, ordered by resource name for stable display.
+pub fn read_rate_buckets(conn: &Connection) -> rusqlite::Result<Vec<RateBucket>> {
+    let mut stmt = conn.prepare(
+        "SELECT resource, lim, remaining, reset_at FROM rate_limits ORDER BY resource",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(RateBucket {
+            resource: r.get(0)?,
+            limit: r.get(1)?,
+            remaining: r.get(2)?,
+            reset_at: r.get(3)?,
+        })
+    })?;
+    rows.collect()
 }
 
 /// Read the current sync status (from `sync_state` + a count of stored notifications).
@@ -190,6 +273,7 @@ pub fn read_status(conn: &Connection) -> rusqlite::Result<SyncStatus> {
     )?;
     let notification_count: i64 =
         conn.query_row("SELECT COUNT(*) FROM notifications", [], |r| r.get(0))?;
+    let rate_buckets = read_rate_buckets(conn)?;
 
     Ok(SyncStatus {
         last_sync_at: row.0,
@@ -198,6 +282,7 @@ pub fn read_status(conn: &Connection) -> rusqlite::Result<SyncStatus> {
         rate_remaining: row.3,
         rate_reset_at: row.4,
         notification_count,
+        rate_buckets,
     })
 }
 
@@ -711,6 +796,8 @@ mod tests {
     fn records_success_and_error_status() {
         let conn = mem_conn();
         let rate = RateLimit {
+            resource: Some("core".to_string()),
+            limit: Some(5000),
             remaining: Some(4999),
             reset: Some(1700000000),
             poll_interval: Some(60),
@@ -721,6 +808,12 @@ mod tests {
         assert_eq!(s.rate_remaining, Some(4999));
         assert!(s.last_sync_at.is_some());
         assert_eq!(s.last_error, None);
+        // The snapshot is also folded into the per-bucket table.
+        assert_eq!(s.rate_buckets.len(), 1);
+        assert_eq!(s.rate_buckets[0].resource, "core");
+        assert_eq!(s.rate_buckets[0].limit, Some(5000));
+        assert_eq!(s.rate_buckets[0].remaining, Some(4999));
+        assert_eq!(s.rate_buckets[0].reset_at, Some(1700000000));
 
         record_error(&conn, "boom").unwrap();
         let s = read_status(&conn).unwrap();
@@ -729,35 +822,56 @@ mod tests {
     }
 
     #[test]
-    fn record_rate_updates_only_the_quota_snapshot() {
+    fn rate_tracker_keeps_lowest_remaining_per_bucket() {
         let conn = mem_conn();
-        record_success(
-            &conn,
-            &RateLimit {
-                remaining: Some(5000),
-                reset: Some(1700000000),
-                poll_interval: Some(60),
-            },
-        )
-        .unwrap();
+        let mut tracker = RateTracker::default();
+        // Two buckets observed across a batch; the lower `core` remaining wins.
+        tracker.observe(RateLimit {
+            resource: Some("core".to_string()),
+            limit: Some(5000),
+            remaining: Some(4900),
+            reset: Some(1700000000),
+            poll_interval: None,
+        });
+        tracker.observe(RateLimit {
+            resource: Some("core".to_string()),
+            limit: Some(5000),
+            remaining: Some(4990),
+            reset: Some(1700000000),
+            poll_interval: None,
+        });
+        tracker.observe(RateLimit {
+            resource: Some("search".to_string()),
+            limit: Some(30),
+            remaining: Some(29),
+            reset: Some(1700000500),
+            poll_interval: None,
+        });
+        tracker.persist(&conn).unwrap();
 
-        // Resolution spent more quota: record only the rate, leaving status/timestamp.
-        record_rate(
+        let buckets = read_rate_buckets(&conn).unwrap();
+        assert_eq!(buckets.len(), 2);
+        // Ordered by resource: core, search.
+        assert_eq!(buckets[0].resource, "core");
+        assert_eq!(buckets[0].remaining, Some(4900));
+        assert_eq!(buckets[1].resource, "search");
+        assert_eq!(buckets[1].remaining, Some(29));
+        assert_eq!(buckets[1].limit, Some(30));
+        assert_eq!(buckets[1].reset_at, Some(1700000500));
+
+        // A snapshot with no resource is ignored (no empty bucket row).
+        upsert_rate(
             &conn,
             &RateLimit {
-                remaining: Some(4900),
-                reset: Some(1700000500),
+                resource: None,
+                limit: Some(1),
+                remaining: Some(1),
+                reset: Some(1),
                 poll_interval: None,
             },
         )
         .unwrap();
-
-        let s = read_status(&conn).unwrap();
-        assert_eq!(s.rate_remaining, Some(4900));
-        assert_eq!(s.rate_reset_at.as_deref(), Some("1700000500"));
-        // Status and sync timestamp from record_success are untouched.
-        assert_eq!(s.last_status.as_deref(), Some("success"));
-        assert!(s.last_sync_at.is_some());
+        assert_eq!(read_rate_buckets(&conn).unwrap().len(), 2);
     }
 
     #[test]

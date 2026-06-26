@@ -247,15 +247,81 @@ function fmtTimestamp(value) {
   return Number.isNaN(d.getTime()) ? value : d.toLocaleString();
 }
 
+/* Human label for a GitHub rate-limit bucket. Falls back to the raw resource name (which
+ * is escaped before insertion) so a future/unknown bucket still renders sensibly. */
+const RATE_BUCKET_LABELS = {
+  core: "Core (REST)",
+  search: "Search",
+  graphql: "GraphQL",
+  integration_manifest: "Integration manifest",
+  source_import: "Source import",
+  code_scanning_upload: "Code scanning upload",
+  code_search: "Code search",
+};
+
+function rateBucketLabel(resource) {
+  return RATE_BUCKET_LABELS[resource] || resource;
+}
+
+/* Countdown to a rate-limit window reset, given as epoch seconds. Future-facing
+ * complement to relTime ("resets in 12m" / "resets now"). */
+function resetCountdown(epochSeconds) {
+  if (epochSeconds == null) return "";
+  const secs = Math.floor(epochSeconds - Date.now() / 1000);
+  if (secs <= 0) return "resets now";
+  const m = Math.floor(secs / 60);
+  if (m < 1) return `resets in ${secs}s`;
+  if (m < 60) return `resets in ${m}m`;
+  const h = Math.floor(m / 60);
+  return h < 24 ? `resets in ${h}h` : `resets in ${Math.floor(h / 24)}d`;
+}
+
+/* Render one usage bar per rate-limit bucket. The bar fills with how much of the token's
+ * allowance is *used* (limit − remaining), turning amber/red as it approaches the cap. */
+function renderRateBuckets(buckets) {
+  const host = $("#rate-buckets");
+  if (!host) return;
+
+  if (!buckets.length) {
+    host.innerHTML =
+      '<div class="srow"><span class="srow-value srow-muted">No requests yet.</span></div>';
+    return;
+  }
+
+  host.innerHTML = buckets
+    .map((b) => {
+      const label = escapeHtml(rateBucketLabel(b.resource));
+      const hasNums = b.limit != null && b.remaining != null && b.limit > 0;
+      const used = hasNums ? Math.max(0, b.limit - b.remaining) : 0;
+      const frac = hasNums ? Math.min(1, Math.max(0, used / b.limit)) : 0;
+      const pct = Math.round(frac * 100);
+      const level = frac >= 0.9 ? "danger" : frac >= 0.75 ? "warn" : "ok";
+      const counts = hasNums
+        ? `${b.remaining.toLocaleString()} / ${b.limit.toLocaleString()} left`
+        : "—";
+      const reset = escapeHtml(resetCountdown(b.reset_at));
+      return `
+        <div class="rate-row">
+          <div class="rate-head">
+            <span class="rate-name">${label}</span>
+            <span class="rate-counts">${escapeHtml(counts)}</span>
+          </div>
+          <div class="rate-bar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="${label} usage">
+            <div class="rate-fill rate-fill--${level}" style="width: ${pct}%"></div>
+          </div>
+          <div class="rate-foot">
+            <span class="rate-used">${pct}% used</span>
+            <span class="rate-reset">${reset}</span>
+          </div>
+        </div>`;
+    })
+    .join("");
+}
+
 function renderSyncStats(status) {
-  const rate =
-    status.rate_remaining === null || status.rate_remaining === undefined
-      ? "—"
-      : status.rate_remaining;
   const lastEl = $("#last-synced");
   if (lastEl) lastEl.textContent = fmtTimestamp(status.last_sync_at);
-  const rateEl = $("#rate-remaining");
-  if (rateEl) rateEl.textContent = rate;
+  renderRateBuckets(status.rate_buckets || []);
 
   if (status.last_status === "error" && status.last_error) {
     setSyncStatus("error", "Error");
