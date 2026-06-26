@@ -57,11 +57,13 @@ pub fn store_notifications(
     // is treated as absent (and is reaped by the cleanup at the end of this pass). The same
     // modifier is used for the suppression lookup and the cleanup so they can't drift.
     const TOMBSTONE_TTL: &str = "-10 minutes";
-    let tombstone_sql = format!(
+    // Prepared once and reused across the loop (with `all=true` the fetch can be large);
+    // explicitly dropped before `tx.commit()` since it borrows the transaction.
+    let mut tombstone_stmt = tx.prepare(&format!(
         "SELECT updated_at FROM done_tombstones
          WHERE thread_id = ?1
            AND done_at >= strftime('%Y-%m-%dT%H:%M:%SZ','now','{TOMBSTONE_TTL}')"
-    );
+    ))?;
 
     for t in threads {
         tx.execute(
@@ -74,10 +76,8 @@ pub fn store_notifications(
         // A (non-expired) tombstone blocks the re-insert until GitHub stops returning the
         // thread — unless it has genuinely *newer* activity than when it was marked done, in
         // which case it's a real re-surface, so we clear the tombstone and let it back in.
-        let tombstone: Option<Option<String>> = tx
-            .query_row(&tombstone_sql, params![t.id], |r| {
-                r.get::<_, Option<String>>(0)
-            })
+        let tombstone: Option<Option<String>> = tombstone_stmt
+            .query_row(params![t.id], |r| r.get::<_, Option<String>>(0))
             .optional()?;
         if let Some(done_updated_at) = tombstone {
             let resurfaced = match &done_updated_at {
@@ -141,6 +141,9 @@ pub fn store_notifications(
         )?;
         stored += 1;
     }
+
+    // Release the prepared statement's borrow of the transaction before committing.
+    drop(tombstone_stmt);
 
     // Reconcile: drop notifications no longer returned upstream, then prune repos that
     // ended up with no notifications. Notifications are deleted first to respect the
