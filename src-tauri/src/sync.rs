@@ -53,6 +53,16 @@ pub fn store_notifications(
     // this can be less than `threads.len()`).
     let mut stored = 0usize;
 
+    // A done-tombstone only suppresses re-inserts within this TTL; past it, the tombstone
+    // is treated as absent (and is reaped by the cleanup at the end of this pass). The same
+    // modifier is used for the suppression lookup and the cleanup so they can't drift.
+    const TOMBSTONE_TTL: &str = "-10 minutes";
+    let tombstone_sql = format!(
+        "SELECT updated_at FROM done_tombstones
+         WHERE thread_id = ?1
+           AND done_at >= strftime('%Y-%m-%dT%H:%M:%SZ','now','{TOMBSTONE_TTL}')"
+    );
+
     for t in threads {
         tx.execute(
             "INSERT OR IGNORE INTO present_threads (thread_id) VALUES (?1)",
@@ -61,15 +71,13 @@ pub fn store_notifications(
 
         // Suppress re-inserting a thread the user just marked done: a sync's network fetch
         // can predate the mark-done and carry the now-deleted thread in its (stale) result.
-        // A tombstone blocks the re-insert until GitHub stops returning the thread — unless
-        // it has genuinely *newer* activity than when it was marked done, in which case it's
-        // a real re-surface, so we clear the tombstone and let it back in.
+        // A (non-expired) tombstone blocks the re-insert until GitHub stops returning the
+        // thread — unless it has genuinely *newer* activity than when it was marked done, in
+        // which case it's a real re-surface, so we clear the tombstone and let it back in.
         let tombstone: Option<Option<String>> = tx
-            .query_row(
-                "SELECT updated_at FROM done_tombstones WHERE thread_id = ?1",
-                params![t.id],
-                |r| r.get::<_, Option<String>>(0),
-            )
+            .query_row(&tombstone_sql, params![t.id], |r| {
+                r.get::<_, Option<String>>(0)
+            })
             .optional()?;
         if let Some(done_updated_at) = tombstone {
             let resurfaced = match &done_updated_at {
@@ -150,12 +158,14 @@ pub fn store_notifications(
     )?;
 
     // Retire tombstones that have done their job: a thread GitHub no longer returns is
-    // confirmed done (the mark-done stuck), and any tombstone older than the TTL is a
-    // safety-net cleanup so a tombstone can never suppress a thread indefinitely.
+    // confirmed done (the mark-done stuck), and any tombstone past the TTL is reaped so a
+    // tombstone can never suppress a thread indefinitely.
     tx.execute(
-        "DELETE FROM done_tombstones
-         WHERE thread_id NOT IN (SELECT thread_id FROM present_threads)
-            OR done_at < strftime('%Y-%m-%dT%H:%M:%SZ','now','-10 minutes')",
+        &format!(
+            "DELETE FROM done_tombstones
+             WHERE thread_id NOT IN (SELECT thread_id FROM present_threads)
+                OR done_at < strftime('%Y-%m-%dT%H:%M:%SZ','now','{TOMBSTONE_TTL}')"
+        ),
         [],
     )?;
 
@@ -910,6 +920,30 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM done_tombstones", [], |r| r.get(0))
             .unwrap();
         assert_eq!(tombstones, 0, "tombstone retired after the thread left the fetch");
+    }
+
+    #[test]
+    fn expired_tombstone_does_not_suppress_in_the_same_pass() {
+        // A tombstone past its TTL must be treated as absent immediately — the thread comes
+        // back in this very store pass, not only on the next one.
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
+        mark_done_local(&mut conn, &["1".to_string()]).unwrap();
+        // Backdate the tombstone well past the 10-minute TTL.
+        conn.execute(
+            "UPDATE done_tombstones SET done_at = '2000-01-01T00:00:00Z' WHERE thread_id = '1'",
+            [],
+        )
+        .unwrap();
+
+        let outcome =
+            store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
+        assert_eq!(count(&conn).unwrap(), 1, "expired tombstone must not suppress");
+        assert_eq!(outcome.stored, 1);
+        let tombstones: i64 = conn
+            .query_row("SELECT COUNT(*) FROM done_tombstones", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tombstones, 0, "expired tombstone is reaped");
     }
 
     #[test]
