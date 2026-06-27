@@ -181,7 +181,10 @@ fn set_theme(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     if !settings::is_valid_theme(&theme) {
-        return Err(format!("Unknown theme: {theme}"));
+        return Err(format!(
+            "Unknown theme '{theme}'. Expected one of: {}.",
+            settings::THEMES.join(", ")
+        ));
     }
     {
         let conn = state.db.0.lock().map_err(|e| e.to_string())?;

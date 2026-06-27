@@ -11,7 +11,12 @@
       // source of truth and re-confirms it once the app boots.
       (function () {
         try {
-          var pref = localStorage.getItem("helix-theme") || "system";
+          var pref = localStorage.getItem("helix-theme");
+          // Fall back to "system" for missing/corrupted/unknown values so the first
+          // paint still follows the OS rather than silently defaulting to light.
+          if (pref !== "light" && pref !== "dark" && pref !== "system") {
+            pref = "system";
+          }
           var dark =
             pref === "dark" ||
             (pref === "system" &&
