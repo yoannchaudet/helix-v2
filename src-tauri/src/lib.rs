@@ -18,6 +18,21 @@ use serde::Serialize;
 use sync::SyncStatus;
 use tauri::{Emitter, Manager, State};
 
+/// Concurrency and quota tuning for background GitHub work. Centralized here so the knobs
+/// are easy to find and adjust without hunting through the command handlers.
+mod tuning {
+    /// Max concurrent requests when resolving notification subjects in the background.
+    pub const SUBJECT_RESOLUTION_POOL: usize = 8;
+    /// Max concurrent `DELETE /threads` requests when marking notifications done.
+    pub const MUTATION_POOL: usize = 8;
+    /// Soft reserve for background subject resolution: stop before it eats below this
+    /// fraction of any rate-limit bucket, leaving quota for the list fetch + mark-done.
+    /// The check runs after each batch of up to `SUBJECT_RESOLUTION_POOL` concurrent
+    /// requests, so a single batch can dip up to that many requests past the line before
+    /// we stop (immaterial against the thousands-wide core budget; not a hard floor).
+    pub const RATE_RESERVE_FRACTION: f64 = 0.25;
+}
+
 /// Application-wide state managed by Tauri.
 struct AppState {
     /// Absolute path to `helix.db`, surfaced to the UI for transparency.
@@ -50,6 +65,9 @@ struct AuthStatus {
 #[derive(Serialize)]
 struct Settings {
     poll_interval_s: i64,
+    /// Lower bound the UI must enforce on `poll_interval_s`. Surfaced so the frontend
+    /// validates/clamps against the backend's value instead of a duplicated literal.
+    min_poll_interval_s: i64,
     github_login: Option<String>,
     /// Appearance preference: `system`, `light`, or `dark`.
     theme: String,
@@ -143,6 +161,7 @@ fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
     let conn = state.db.0.lock().map_err(|e| e.to_string())?;
     Ok(Settings {
         poll_interval_s: settings::get_poll_interval(&conn).map_err(|e| e.to_string())?,
+        min_poll_interval_s: settings::MIN_POLL_INTERVAL_S,
         github_login: settings::get_string(&conn, settings::KEY_GITHUB_LOGIN)
             .map_err(|e| e.to_string())?,
         theme: settings::get_theme(&conn).map_err(|e| e.to_string())?,
@@ -165,6 +184,7 @@ fn save_settings(
     settings::set_poll_interval(&conn, poll_interval_s).map_err(|e| e.to_string())?;
     Ok(Settings {
         poll_interval_s,
+        min_poll_interval_s: settings::MIN_POLL_INTERVAL_S,
         github_login: settings::get_string(&conn, settings::KEY_GITHUB_LOGIN)
             .map_err(|e| e.to_string())?,
         theme: settings::get_theme(&conn).map_err(|e| e.to_string())?,
@@ -304,17 +324,8 @@ async fn resolve_pending_subjects(app: tauri::AppHandle, token: String) {
         return;
     }
 
-    const POOL: usize = 8;
-    // Background subject resolution is *optional* quota: stop before it eats into the
-    // reserve other operations (the notifications list fetch, mark-done) need. We aim to
-    // keep at least this fraction of each bucket's allowance.
-    //
-    // This is a *soft* reserve: the check runs after each batch of up to POOL concurrent
-    // requests, so a single batch can dip up to POOL requests past the line before we stop
-    // (immaterial against the thousands-wide core budget; not a hard floor). Deferred
-    // subjects stay pending (newest-first), so a later sync — once the window resets and
-    // quota is plentiful again — finishes them.
-    const RESERVE_FRACTION: f64 = 0.25;
+    const POOL: usize = tuning::SUBJECT_RESOLUTION_POOL;
+    const RESERVE_FRACTION: f64 = tuning::RATE_RESERVE_FRACTION;
 
     let client = reqwest::Client::new();
     let mut changed = 0usize;
@@ -470,7 +481,7 @@ where
     let token = auth::read_token(&state.db)?
         .ok_or_else(|| "Not connected — add a GitHub token first.".to_string())?;
 
-    const POOL: usize = 8;
+    const POOL: usize = tuning::MUTATION_POOL;
     let client = reqwest::Client::new();
     let mut succeeded: Vec<String> = Vec::new();
     let mut failed: Vec<FailedThread> = Vec::new();
