@@ -1,34 +1,24 @@
-const { invoke } = window.__TAURI__.core;
-const { listen } = window.__TAURI__.event;
-
-const $ = (sel) => document.querySelector(sel);
-const $$ = (sel) => document.querySelectorAll(sel);
-
-/* ----------------------------- Tunables ---------------------------------- */
-/* Named knobs gathered here so behavior isn't tuned via scattered magic numbers.
-   The poll-interval floor is NOT here on purpose — it's owned by the Rust backend
-   (`get_settings().min_poll_interval_s`) so the UI can't drift from it. */
-
-/** Automatic-poll heartbeat: how often `pollTick` runs (ms). */
-const POLL_TICK_MS = 1000;
-/** Polling cadence (s) assumed until the saved setting loads. */
-const DEFAULT_POLL_INTERVAL_S = 60;
-/** Fallback poll-interval floor used only until/if `loadSettings()` provides the
- *  authoritative `min_poll_interval_s` from the backend. Mirrors the Rust default. */
-const FALLBACK_MIN_POLL_INTERVAL_S = 10;
-
-/** Auto-dismiss timings (ms) for transient feedback. */
-const FLASH_DISMISS_MS = 1800;
-const TOAST_DISMISS_MS = 1600;
-const SYNC_PROGRESS_DISMISS_MS = 2600;
-
-/** Sidebar resize bounds (px). The minimum falls back to the CSS `--sidebar-w`. */
-const SIDEBAR_MIN_FALLBACK_PX = 232;
-const SIDEBAR_MAX_PX = 520;
-const SIDEBAR_KEY_STEP_PX = 16;
-
-/** Debounce (ms) before persisting a typed polling-interval value. */
-const SETTINGS_DEBOUNCE_MS = 450;
+import { invoke, listen } from "./js/api.js";
+import {
+  POLL_TICK_MS,
+  DEFAULT_POLL_INTERVAL_S,
+  FALLBACK_MIN_POLL_INTERVAL_S,
+  SYNC_PROGRESS_DISMISS_MS,
+  SIDEBAR_MIN_FALLBACK_PX,
+  SIDEBAR_MAX_PX,
+  SIDEBAR_KEY_STEP_PX,
+  SETTINGS_DEBOUNCE_MS,
+  STATES,
+} from "./js/constants.js";
+import { $, $$, escapeHtml, flash, toast, announce, copyText } from "./js/dom.js";
+import { relTime, fmtTimestamp } from "./js/format.js";
+import {
+  FILTERS,
+  EMPTY_SUBTITLES,
+  repoMatches,
+  sortReposByRecency,
+  filterGroups,
+} from "./js/inbox-model.js";
 
 /** True once the user is authenticated; drives the signed-out empty state. */
 let authenticated = false;
@@ -36,8 +26,6 @@ let authenticated = false;
 /** True when the backend stores the PAT unencrypted in SQLite (debug builds) rather than
  *  the Keychain; drives the Settings warning. Set from `auth_status` in `loadAccount`. */
 let unencryptedStorage = false;
-
-const STATES = ["pending", "success", "error", "neutral"];
 
 /** True while a sync is in flight; gates stale sync:progress events. */
 let syncing = false;
@@ -153,109 +141,6 @@ async function persistTheme(pref) {
       themeSaveRunner = null;
     }
   })();
-}
-
-/** Briefly show a transient confirmation element (e.g. "Saved", "Copied"), then fade it
- * out. Reuses the `.srow-flash` styling. Pass `kind = "error"` for a red message. */
-function flash(el, text, kind) {
-  if (!el) return;
-  if (text != null) el.textContent = text;
-  el.classList.toggle("srow-flash--error", kind === "error");
-  el.classList.add("srow-flash--show");
-  clearTimeout(el._flashTimer);
-  el._flashTimer = setTimeout(() => {
-    el.classList.remove("srow-flash--show");
-  }, FLASH_DISMISS_MS);
-}
-
-/** Show a brief, self-dismissing toast for actions with no inline anchor (e.g. a copy
- * triggered from the right-click menu). Announced politely for screen readers. */
-let toastTimer = null;
-function toast(text, kind) {
-  let el = document.getElementById("toast");
-  if (!el) {
-    el = document.createElement("div");
-    el.id = "toast";
-    el.className = "toast";
-    el.setAttribute("role", "status");
-    el.setAttribute("aria-live", "polite");
-    document.body.appendChild(el);
-  }
-  el.textContent = text;
-  el.classList.toggle("toast--error", kind === "error");
-  // Restart the CSS transition even if a toast is already showing.
-  el.classList.remove("toast--show");
-  void el.offsetWidth;
-  el.classList.add("toast--show");
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove("toast--show"), TOAST_DISMISS_MS);
-}
-
-/** Announce a concise message to assistive tech via the visually-hidden live region.
- *  The inbox is not itself a live region (it re-renders wholesale), so user-meaningful
- *  transitions — filter changes, mark-done outcomes — are surfaced here instead. Re-sets
- *  identical text by clearing first so repeated messages still announce. */
-function announce(text) {
-  const el = $("#a11y-announcer");
-  if (!el) return;
-  el.textContent = "";
-  // Re-set on the next frame: clearing then setting on a separate frame re-triggers the
-  // live region even when the text is identical to the previous announcement.
-  requestAnimationFrame(() => {
-    el.textContent = text;
-  });
-}
-
-function escapeHtml(value) {
-  return String(value).replace(
-    /[&<>"']/g,
-    (c) =>
-      ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#39;",
-      })[c],
-  );
-}
-
-/** Copy `text` to the clipboard, returning whether it succeeded. Tries the async Clipboard
- *  API first, then falls back to a hidden-textarea `execCommand("copy")` — the async API is
- *  unavailable/blocked in the macOS WKWebView Tauri uses, so the fallback is what actually
- *  runs there. */
-async function copyText(text) {
-  text = String(text);
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-    // Fall through to the execCommand path below.
-  }
-  // Selecting the textarea steals focus; restore it afterwards so keyboard/AT users aren't
-  // dropped to <body> (the async Clipboard path doesn't move focus).
-  const prevFocus = document.activeElement;
-  try {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    // Keep it out of view and inert, but selectable so `execCommand("copy")` has a target.
-    ta.setAttribute("readonly", "");
-    ta.style.cssText =
-      "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;pointer-events:none";
-    document.body.appendChild(ta);
-    try {
-      ta.select();
-      ta.setSelectionRange(0, text.length);
-      return document.execCommand("copy");
-    } finally {
-      ta.remove();
-      if (prevFocus instanceof HTMLElement) prevFocus.focus();
-    }
-  } catch {
-    return false;
-  }
 }
 
 /* ----------------------------- Local storage ----------------------------- */
@@ -462,12 +347,6 @@ async function loadAccount() {
 }
 
 /* ------------------------------ Notifications ----------------------------- */
-
-function fmtTimestamp(value) {
-  if (!value) return "never";
-  const d = new Date(value);
-  return Number.isNaN(d.getTime()) ? value : d.toLocaleString();
-}
 
 /* Human label for a GitHub rate-limit bucket. Falls back to the raw resource name (which
  * is escaped before insertion) so a future/unknown bucket still renders sensibly. */
@@ -752,22 +631,6 @@ function stateBadge(state) {
   return `<span class="state ${cls}">${label}</span>`;
 }
 
-function relTime(value) {
-  if (!value) return "";
-  const then = new Date(value).getTime();
-  if (Number.isNaN(then)) return value;
-  const s = Math.max(0, Math.floor((Date.now() - then) / 1000));
-  if (s < 60) return "just now";
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.floor(h / 24);
-  if (d < 30) return `${d}d ago`;
-  const mo = Math.floor(d / 30);
-  return mo < 12 ? `${mo}mo ago` : `${Math.floor(mo / 12)}y ago`;
-}
-
 /** Checkmark glyph for the "mark as done" affordances (row / toolbar / repo header). */
 const DONE_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3.4 8.5l3 3 6.2-6.8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
@@ -812,51 +675,6 @@ let activeFilter = "all";
 /** Optional repository refinement: a repo_id, or null for "all repositories". */
 let activeRepo = null;
 
-/** Smart filters: predicate over a notification + the human label for the toolbar. */
-const FILTERS = {
-  all: { label: "All", match: () => true },
-  mention: { label: "Mentions", match: (n) => n.reason === "mention" },
-  team_mention: {
-    label: "Team mentions",
-    match: (n) => n.reason === "team_mention",
-  },
-  review_requested: {
-    label: "Review requests",
-    match: (n) => n.reason === "review_requested",
-  },
-  assign: { label: "Assigned", match: (n) => n.reason === "assign" },
-  cleanup: { label: "Cleanup", match: (n) => isCleanupCandidate(n) },
-};
-
-/** Per-filter subtitle for the (illustrated) empty state. The title is always the same
- *  small "you're caught up" win; the subtitle says specifically what's empty. */
-const EMPTY_SUBTITLES = {
-  all: "No notifications right now.",
-  mention: "No mentions right now.",
-  team_mention: "No team mentions right now.",
-  review_requested: "No review requests right now.",
-  assign: "Nothing's assigned to you right now.",
-  cleanup: "No stale subscriptions to clean.",
-};
-
-/** Cleanup candidates: notifications safe to mark as done (design.md §6). A merged or
- *  closed pull request, or a closed issue. Subjects that aren't yet resolved (no
- *  `subject_state`) and other subject types are excluded. The resolved state is only
- *  trusted when it reflects the latest thread activity (`updated_at <= resolved_at`,
- *  mirroring the backend's staleness rule) — so a subject that changed since we last
- *  resolved it (e.g. a reopened issue) is excluded until re-resolution catches up, and we
- *  never offer a stale candidate to clear. */
-function isCleanupCandidate(n) {
-  if (!n.resolved_at || n.updated_at > n.resolved_at) return false;
-  if (n.subject_type === "PullRequest") {
-    return n.subject_state === "merged" || n.subject_state === "closed";
-  }
-  if (n.subject_type === "Issue") {
-    return n.subject_state === "closed";
-  }
-  return false;
-}
-
 function repoHeader(group) {
   const privacy = group.private
     ? `<span class="badge badge--lock" title="Private repository">private</span>`
@@ -886,51 +704,11 @@ function repoSection(group) {
   )}<ul class="n-list">${rows}</ul></section>`;
 }
 
-/** Notifications in `group` matching the given type filter. */
-function repoMatches(group, filterId) {
-  const match = (FILTERS[filterId] ?? FILTERS.all).match;
-  return group.notifications.filter(match);
-}
-
-/** Most recent `updated_at` in a notification list (ISO-8601 UTC strings compare lexically,
- *  so the newest is the max). Empty list → "". */
-function latestUpdatedAt(notifications) {
-  let max = "";
-  for (const n of notifications) {
-    if (n.updated_at > max) max = n.updated_at;
-  }
-  return max;
-}
-
-/** Order repo-like items most-recent-first by their newest (matching) notification, with
- *  repo name as a deterministic tie-breaker. Recency is computed once per item (not on every
- *  comparison), and names compare by code point so the order is stable across locales. */
-function sortReposByRecency(items, getNotifications, getName) {
-  return items
-    .map((item) => ({
-      item,
-      recency: latestUpdatedAt(getNotifications(item)),
-      name: getName(item),
-    }))
-    .sort((a, b) => {
-      if (a.recency !== b.recency) return a.recency < b.recency ? 1 : -1;
-      if (a.name !== b.name) return a.name < b.name ? -1 : 1;
-      return 0;
-    })
-    .map((x) => x.item);
-}
-
 /** Apply the active filter, then the optional repo refinement, to `inboxGroups`, ordering
- *  the repos most-recent-first. */
+ *  the repos most-recent-first. Thin wrapper binding the pure `filterGroups` to the current
+ *  inbox state. */
 function filteredGroups() {
-  let groups = inboxGroups
-    .map((g) => ({ ...g, notifications: repoMatches(g, activeFilter) }))
-    .filter((g) => g.notifications.length);
-  if (activeRepo != null) {
-    groups = groups.filter((g) => g.repo_id === activeRepo);
-  }
-  // Bubble the repo with the most recently updated matching notification to the top.
-  return sortReposByRecency(groups, (g) => g.notifications, (g) => g.full_name);
+  return filterGroups(inboxGroups, activeFilter, activeRepo);
 }
 
 /** Current toolbar breadcrumb: the filter label, plus the repo when refined. */
