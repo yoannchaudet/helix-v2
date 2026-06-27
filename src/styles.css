@@ -124,9 +124,21 @@
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.5);
 }
 
-* {
-  box-sizing: border-box;
+/* Visually hidden but available to assistive tech (e.g. the live-region announcer). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
+
+* {
+  box-sizing: border-box;}
 
 html,
 body {
@@ -593,6 +605,7 @@ code,
 }
 
 .repo-name {
+  margin: 0;
   font-weight: 600;
   font-size: 0.82rem;
   color: var(--text);

@@ -39,7 +39,7 @@
         <nav class="sources" aria-label="Views">
           <ul class="source-list" id="filter-list">
             <li>
-              <button type="button" class="source source--active" data-filter="all">
+              <button type="button" class="source source--active" data-filter="all" aria-current="true">
                 <span class="source-icon" aria-hidden="true">
                   <svg viewBox="0 0 16 16" width="15" height="15"><circle cx="8" cy="8" r="5.25" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M5.5 8l1.6 1.7L10.6 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
                 </span>
@@ -157,7 +157,7 @@
           </div>
         </div>
 
-        <div class="inbox" id="inbox" aria-live="polite">
+        <div class="inbox" id="inbox">
           <div class="loader">
             <span class="spinner" aria-hidden="true"></span>
             <span>Loading notifications…</span>
@@ -314,5 +314,10 @@
       </section>
       </main>
     </div>
+
+    <!-- Visually-hidden polite live region for transient announcements (filter changes,
+         mark-done outcomes). The inbox itself is NOT a live region — it re-renders wholesale,
+         which would otherwise flood assistive tech; we announce concise summaries here. -->
+    <div id="a11y-announcer" class="sr-only" role="status" aria-live="polite"></div>
   </body>
 </html>
