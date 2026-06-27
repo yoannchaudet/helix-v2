@@ -102,7 +102,8 @@ The release workflow declares `environment: release`, so it can read these; CI b
      **authoritative** app version (drives the bundle name and the updater version).
    - [`src-tauri/Cargo.toml`](../src-tauri/Cargo.toml) → `version` — keep it in sync.
    - [`src-tauri/Cargo.lock`](../src-tauri/Cargo.lock) — it records the `helix` package
-     version, so refresh it by running `cargo build` (or `cargo update -p helix`) and commit
+     version, so refresh it by running `cargo build` **from `src-tauri/`** (a build rewrites
+     the `helix` version in the lockfile without touching dependency versions) and commit
      the change.
 
    The git tag must equal this version with a leading `v` (config `0.2.0` → tag `v0.2.0`).
