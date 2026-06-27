@@ -430,24 +430,23 @@ code,
 }
 
 .inbox-empty {
+  /* Fill the scroll area and center the message both axes, so an empty view sits in the
+     middle of the pane rather than clinging to the top. */
+  min-height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
   color: var(--muted);
   font-size: 0.92rem;
-  padding: 40px 24px;
+  padding: 24px;
   text-align: center;
 }
 
 .inbox-empty .btn {
   margin-top: 12px;
-}
-
-/* Illustrated empty state (any authenticated view with nothing to show — every filter):
-   a muted helix mark above a small "you're caught up" message. */
-.inbox-empty--art {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  padding-top: 56px;
 }
 
 .inbox-empty-art {

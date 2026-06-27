@@ -749,7 +749,7 @@ function emptyInbox() {
   // filter has no matches. Reaching this is a small win, so show the muted helix mark with a
   // filter-specific subtitle (the toolbar already exposes sync status + refresh).
   const sub = EMPTY_SUBTITLES[activeFilter] ?? EMPTY_SUBTITLES.all;
-  return `<div class="inbox-empty inbox-empty--art">
+  return `<div class="inbox-empty">
       <img class="inbox-empty-art" src="/assets/helix-muted.svg" alt="" width="116" height="116" />
       <p class="inbox-empty-title">You're all caught up.</p>
       <p class="inbox-empty-sub">${sub}</p>
