@@ -1436,7 +1436,7 @@ input[type="text"]:focus {
   background: var(--surface);
   color: var(--text);
   font-weight: 600;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--knob-shadow);
 }
 
 .seg-opt input:focus-visible + span {
