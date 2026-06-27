@@ -1334,14 +1334,24 @@ let settingsDebounce;
  * toggles/edits can otherwise let a slow, stale response overwrite newer state). */
 let settingsApplySeq = 0;
 
+/** Apply the poll-interval floor to local state, the input's `min`, and the note text.
+ *  Used at init with the fallback, then by `loadSettings()` with the backend's value.
+ *  Guards against a missing/non-numeric value so the clamp can never become NaN. */
+function applyPollMin(seconds) {
+  minPollIntervalS = Number.isInteger(seconds)
+    ? seconds
+    : FALLBACK_MIN_POLL_INTERVAL_S;
+  const input = $("#poll-interval");
+  if (input) input.min = String(minPollIntervalS);
+  const label = $("#poll-min-label");
+  if (label) label.textContent = String(minPollIntervalS);
+}
+
 async function loadSettings() {
   try {
     const s = await invoke("get_settings");
     // The backend owns the floor; mirror it onto the input + local validation.
-    minPollIntervalS = s.min_poll_interval_s;
-    $("#poll-interval").min = String(minPollIntervalS);
-    const minLabel = $("#poll-min-label");
-    if (minLabel) minLabel.textContent = String(minPollIntervalS);
+    applyPollMin(s.min_poll_interval_s);
     $("#poll-interval").value = s.poll_interval_s;
     pollIntervalSeconds = s.poll_interval_s;
     const themeInput = $(`input[name="theme"][value="${s.theme}"]`);
@@ -1676,6 +1686,9 @@ window.addEventListener("DOMContentLoaded", () => {
   }
   // Settings auto-apply: the stepper debounces typed values and persists right away on a
   // committed change (blur / arrow click).
+  // Apply the fallback floor synchronously so the input has a sane `min` before the async
+  // loadSettings() resolves with the backend's authoritative value.
+  applyPollMin(FALLBACK_MIN_POLL_INTERVAL_S);
   $("#poll-interval").addEventListener("input", () => {
     clearTimeout(settingsDebounce);
     settingsDebounce = setTimeout(applySettings, SETTINGS_DEBOUNCE_MS);
