@@ -711,7 +711,36 @@ function repoMatches(group, filterId) {
   return group.notifications.filter(match);
 }
 
-/** Apply the active filter, then the optional repo refinement, to `inboxGroups`. */
+/** Most recent `updated_at` in a notification list (ISO-8601 UTC strings compare lexically,
+ *  so the newest is the max). Empty list → "". */
+function latestUpdatedAt(notifications) {
+  let max = "";
+  for (const n of notifications) {
+    if (n.updated_at > max) max = n.updated_at;
+  }
+  return max;
+}
+
+/** Order repo-like items most-recent-first by their newest (matching) notification, with
+ *  repo name as a deterministic tie-breaker. Recency is computed once per item (not on every
+ *  comparison), and names compare by code point so the order is stable across locales. */
+function sortReposByRecency(items, getNotifications, getName) {
+  return items
+    .map((item) => ({
+      item,
+      recency: latestUpdatedAt(getNotifications(item)),
+      name: getName(item),
+    }))
+    .sort((a, b) => {
+      if (a.recency !== b.recency) return a.recency < b.recency ? 1 : -1;
+      if (a.name !== b.name) return a.name < b.name ? -1 : 1;
+      return 0;
+    })
+    .map((x) => x.item);
+}
+
+/** Apply the active filter, then the optional repo refinement, to `inboxGroups`, ordering
+ *  the repos most-recent-first. */
 function filteredGroups() {
   let groups = inboxGroups
     .map((g) => ({ ...g, notifications: repoMatches(g, activeFilter) }))
@@ -719,7 +748,8 @@ function filteredGroups() {
   if (activeRepo != null) {
     groups = groups.filter((g) => g.repo_id === activeRepo);
   }
-  return groups;
+  // Bubble the repo with the most recently updated matching notification to the top.
+  return sortReposByRecency(groups, (g) => g.notifications, (g) => g.full_name);
 }
 
 /** Current toolbar breadcrumb: the filter label, plus the repo when refined. */
@@ -805,9 +835,15 @@ function renderSidebar() {
   // Repositories list — filtered to repos that have notifications matching the
   // active type filter, with counts that reflect that filter.
   const repoList = $("#repo-list");
-  const visibleRepos = inboxGroups
+  let visibleRepos = inboxGroups
     .map((g) => ({ group: g, matches: repoMatches(g, activeFilter) }))
     .filter((x) => x.matches.length);
+  // Same most-recent-first ordering as the main list, so the sidebar matches the view.
+  visibleRepos = sortReposByRecency(
+    visibleRepos,
+    (x) => x.matches,
+    (x) => x.group.full_name,
+  );
   if (!visibleRepos.length) {
     repoList.innerHTML = `<li class="source-empty">No repositories yet.</li>`;
   } else {
