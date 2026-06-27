@@ -1212,9 +1212,12 @@ async function initUpdates() {
 
   const checkBtn = $("#check-updates-btn");
   if (!updaterEnabled) {
-    // Debug builds (and non-macOS) don't ship the updater; mirror the dev-build framing
-    // used elsewhere in Settings.
-    setUpdateStatus("Updates are disabled in dev builds");
+    // No updater in this build: debug builds, or a (non-shipped) non-macOS build. Word the
+    // status to match the actual reason rather than always blaming "dev builds".
+    const isMac = navigator.userAgent.includes("Macintosh");
+    setUpdateStatus(
+      isMac ? "Updates are disabled in dev builds" : "Updates aren't available on this platform",
+    );
     if (checkBtn) checkBtn.disabled = true;
     return;
   }
@@ -1249,12 +1252,18 @@ async function checkForUpdate(manual) {
     } else {
       availableUpdate = null;
       hideUpdateBanner();
-      setUpdateStatus("Up to date");
-      if (manual) flash($("#update-flash"), "Up to date");
+      // The launch check is silent unless an update is available: only the manual
+      // "Check for updates" button reports an up-to-date / failed result inline.
+      if (manual) {
+        setUpdateStatus("Up to date");
+        flash($("#update-flash"), "Up to date");
+      }
     }
   } catch (err) {
-    setUpdateStatus("Couldn't check for updates");
-    if (manual) flash($("#update-flash"), "Failed", "error");
+    if (manual) {
+      setUpdateStatus("Couldn't check for updates");
+      flash($("#update-flash"), "Failed", "error");
+    }
   } finally {
     if (btn && !updateInstalling) btn.disabled = false;
   }
