@@ -2,7 +2,8 @@
 
 This file is the shared guardrail for anyone working on Helix — human or AI. Read it
 before making changes. It encodes *how* we build, not *what* we build (see
-[`docs/design.md`](docs/design.md) for the design).
+[`docs/design.md`](docs/design.md) for the design, and
+[`docs/publishing.md`](docs/publishing.md) for how we release & ship updates).
 
 ## Principles
 

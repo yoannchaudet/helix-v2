@@ -1,0 +1,74 @@
+name: Release
+
+# Cut a release by pushing a version tag, e.g. `git tag v0.2.0 && git push origin v0.2.0`.
+# The app version in `src-tauri/tauri.conf.json` must match the tag (without the leading
+# `v`). This builds a universal (Intel + Apple Silicon) macOS app, signs + notarizes it with
+# the Apple Developer ID, signs the updater bundle with the minisign key, and publishes a
+# DRAFT GitHub Release with the .dmg + updater assets (latest.json, .app.tar.gz, .sig).
+# Review the draft, then publish it — the in-app updater only sees published releases.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, sign, notarize & publish
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Both arches are needed to link the universal binary.
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-src-tauri
+          workspaces: src-tauri -> target
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Build, sign, notarize & publish
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Updater signing (minisign keypair — public key lives in tauri.conf.json).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Apple Developer ID code signing.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # Apple notarization (app-specific password + team).
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Helix ${{ github.ref_name }}
+          releaseBody: |
+            Download the `.dmg` below to install. Existing installs update automatically.
+          releaseDraft: true
+          prerelease: false
+          # One universal binary for both Intel and Apple Silicon.
+          args: --target universal-apple-darwin
