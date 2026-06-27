@@ -111,6 +111,10 @@ CREATE TABLE notifications (
 CREATE INDEX idx_notifications_repo ON notifications(repo_id);
 
 -- Key/value app settings
+--   github_login : cached GitHub login for offline display
+--   window_width/height : last window size, restored on launch
+--   theme : appearance preference — system (default) | light | dark
+--   dev_github_pat : debug-build only, unencrypted PAT (see auth.rs)
 CREATE TABLE settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -282,8 +286,21 @@ column, no marketing hero):
 - **Cleanup:** the **Cleanup** sidebar filter (§6) reuses the same by-repo list, narrowed to
   candidates; clearing them is the toolbar ••• "Mark all as done" flow with live progress.
 - **Settings:** an in-app pane (reached from the sidebar or `⌘,`) for PAT entry, the poll
-  interval, **per-bucket API rate-limit usage bars**, account info, and local-storage
-  details (DB path, schema version).
+  interval, **appearance (System / Light / Dark)**, **per-bucket API rate-limit usage
+  bars**, account info, and local-storage details (DB path, schema version).
+
+#### Theming
+- The webview palette is driven entirely by CSS custom properties on `:root`, with
+  `*-rgb` channel triplets feeding the alpha-composited tints; a `:root[data-theme="dark"]`
+  block overrides them with a Dracula-inspired palette tuned for WCAG AA contrast.
+- The **System / Light / Dark** choice persists as the `theme` setting. `main.js` resolves
+  the effective theme (following `prefers-color-scheme` live in System mode) and sets
+  `data-theme` on the root; an inline `<head>` script mirrors the pref via `localStorage`
+  to paint the correct theme before first frame (no flash).
+- The native macOS window chrome (title bar + vibrancy) is matched to the preference via
+  `Window::set_theme` — applied at launch in `setup()` and by a dedicated `set_theme`
+  command on each change (kept separate from `save_settings` so an unrelated invalid field
+  can't block a theme change). `system` leaves the window following the OS appearance.
 
 ### Conventions (see AGENT.md)
 - **Vanilla CSS + modern HTML**, no heavy framework. System font stack only.

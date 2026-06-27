@@ -5,6 +5,26 @@
     <link rel="stylesheet" href="styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Helix</title>
+    <script>
+      // Resolve the saved theme before first paint to avoid a flash of the wrong
+      // theme. The pref is mirrored to localStorage by main.js; SQLite remains the
+      // source of truth and re-confirms it once the app boots.
+      (function () {
+        try {
+          var pref = localStorage.getItem("helix-theme");
+          // Fall back to "system" for missing/corrupted/unknown values so the first
+          // paint still follows the OS rather than silently defaulting to light.
+          if (pref !== "light" && pref !== "dark" && pref !== "system") {
+            pref = "system";
+          }
+          var dark =
+            pref === "dark" ||
+            (pref === "system" &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.dataset.theme = dark ? "dark" : "light";
+        } catch (e) {}
+      })();
+    </script>
     <script type="module" src="/main.js" defer></script>
   </head>
 
@@ -167,6 +187,36 @@
               </div>
             </div>
           </div>
+        </section>
+
+        <!-- Appearance -->
+        <section class="sgroup">
+          <h2 class="sgroup-label">Appearance</h2>
+          <div class="slist">
+            <div class="srow">
+              <span class="srow-label">Theme</span>
+              <span class="srow-value">
+                <span class="seg" role="radiogroup" aria-label="Theme">
+                  <label class="seg-opt">
+                    <input type="radio" name="theme" value="system" checked />
+                    <span>System</span>
+                  </label>
+                  <label class="seg-opt">
+                    <input type="radio" name="theme" value="light" />
+                    <span>Light</span>
+                  </label>
+                  <label class="seg-opt">
+                    <input type="radio" name="theme" value="dark" />
+                    <span>Dark</span>
+                  </label>
+                </span>
+              </span>
+            </div>
+          </div>
+          <p class="sgroup-note">
+            “System” follows your macOS appearance. Dark mode uses a Dracula-inspired
+            palette.
+          </p>
         </section>
 
         <!-- App updates -->

@@ -51,6 +51,25 @@ struct AuthStatus {
 struct Settings {
     poll_interval_s: i64,
     github_login: Option<String>,
+    /// Appearance preference: `system`, `light`, or `dark`.
+    theme: String,
+}
+
+/// Map an appearance preference to a window theme. `system` (and any unknown value)
+/// returns `None`, which makes the window follow the OS appearance.
+fn theme_for_pref(pref: &str) -> Option<tauri::Theme> {
+    match pref {
+        "light" => Some(tauri::Theme::Light),
+        "dark" => Some(tauri::Theme::Dark),
+        _ => None,
+    }
+}
+
+/// Apply an appearance preference to the native window chrome (title bar + vibrancy),
+/// so the OS-drawn surfaces match the in-app theme. Best-effort: a failure here must
+/// never block a settings save.
+fn apply_window_theme(window: &tauri::WebviewWindow, pref: &str) {
+    let _ = window.set_theme(theme_for_pref(pref));
 }
 
 /// Report the local database path, schema version, and tables.
@@ -126,6 +145,7 @@ fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
         poll_interval_s: settings::get_poll_interval(&conn).map_err(|e| e.to_string())?,
         github_login: settings::get_string(&conn, settings::KEY_GITHUB_LOGIN)
             .map_err(|e| e.to_string())?,
+        theme: settings::get_theme(&conn).map_err(|e| e.to_string())?,
     })
 }
 
@@ -147,7 +167,31 @@ fn save_settings(
         poll_interval_s,
         github_login: settings::get_string(&conn, settings::KEY_GITHUB_LOGIN)
             .map_err(|e| e.to_string())?,
+        theme: settings::get_theme(&conn).map_err(|e| e.to_string())?,
     })
+}
+
+/// Persist the appearance preference and apply it to the native window chrome. Kept
+/// separate from `save_settings` so an unrelated invalid field (e.g. a mid-edit poll
+/// interval) can never block a theme change.
+#[tauri::command]
+fn set_theme(
+    theme: String,
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    if !settings::is_valid_theme(&theme) {
+        return Err(format!(
+            "Unknown theme '{theme}'. Expected one of: {}.",
+            settings::THEMES.join(", ")
+        ));
+    }
+    {
+        let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+        settings::set_string(&conn, settings::KEY_THEME, &theme).map_err(|e| e.to_string())?;
+    }
+    apply_window_theme(&window, &theme);
+    Ok(())
 }
 
 /// Result of a successful sync, returned to the caller and emitted as `sync:done`.
@@ -760,6 +804,10 @@ pub fn run() {
             // Restore the last window size (logical px) before the window is shown, so
             // there's no visible resize jump. Read it before `conn` is moved into state.
             let saved_size = settings::get_window_size(&conn).ok().flatten();
+            // Appearance preference, read before `conn` moves into state, to set the
+            // native window theme at launch (matching the webview's no-FOUC resolution).
+            let saved_theme = settings::get_theme(&conn)
+                .unwrap_or_else(|_| settings::DEFAULT_THEME.to_string());
 
             app.manage(AppState {
                 db_path: db_path.to_string_lossy().into_owned(),
@@ -779,6 +827,12 @@ pub fn run() {
             if let Some(win) = app.get_webview_window("main") {
                 use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
                 let _ = apply_vibrancy(&win, NSVisualEffectMaterial::Sidebar, None, None);
+            }
+
+            // Match the native window chrome (title bar + vibrancy) to the saved
+            // appearance preference. `system` leaves it following the OS.
+            if let Some(win) = app.get_webview_window("main") {
+                apply_window_theme(&win, &saved_theme);
             }
 
             // Safety net: the main window starts hidden and is normally revealed by
@@ -805,6 +859,7 @@ pub fn run() {
             sign_out,
             get_settings,
             save_settings,
+            set_theme,
             sync_now,
             sync_status,
             list_inbox,

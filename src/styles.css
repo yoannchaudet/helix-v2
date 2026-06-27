@@ -1,26 +1,116 @@
+/* Light theme (default). The palette below is split into solid tokens and `*-rgb`
+   channel triplets; the triplets feed the many `rgba(var(--x-rgb), a)` tints used
+   throughout, so a single dark-mode override of each channel re-themes every tint.
+   The dark theme lives in the `:root[data-theme="dark"]` block further down. */
 :root {
+  color-scheme: light;
+
   --bg: #f4f5f7;
   --surface: #ffffff;
   --border: #e1e4e8;
-  --hairline: rgba(31, 35, 40, 0.08);
+  --border-strong: #c2c9d1;
   --text: #1f2328;
+  --text-rgb: 31, 35, 40;
   --muted: #59636e;
+
   --accent: #7c5cff;
   --accent-strong: #6a48ff;
-  --accent-tint: rgba(124, 92, 255, 0.14);
+  --accent-rgb: 124, 92, 255;
+  --accent-tint: rgba(var(--accent-rgb), 0.14);
+  --on-accent: #ffffff;
 
   --success: #1f883d;
+  --success-rgb: 31, 136, 61;
   --pending: #9a6700;
+  --pending-rgb: 154, 103, 0;
   --error: #cf222e;
+  --error-rgb: 207, 34, 46;
+  --neutral-rgb: 140, 149, 159;
+
+  /* Derived / role tokens (all themeable via the channels + solids above). */
+  --hairline: rgba(var(--text-rgb), 0.08);
+  --hover: rgba(var(--text-rgb), 0.05);
+  --surface-hover: #f3f4f8;
+  --field-bg: #ffffff;
+  --focus-ring: rgba(var(--accent-rgb), 0.35);
+  --focus-ring-soft: rgba(var(--accent-rgb), 0.18);
+
+  /* Translucent chrome that sits over the native vibrancy material. */
+  --sidebar-bg: rgba(246, 247, 250, 0.6);
+  --toolbar-bg: rgba(255, 255, 255, 0.72);
+  --repo-header-bg: rgba(238, 240, 244, 0.92);
+
+  /* Status text on tinted callouts. */
+  --danger-text: #86181d;
+  --warn-text: #7a5300;
+  --warn-bg: rgba(var(--pending-rgb), 0.1);
+  --warn-border: rgba(var(--pending-rgb), 0.3);
+
+  /* Toggle switch + toast. */
+  --track: #d0d7de;
+  --knob: #ffffff;
+  --knob-shadow: 0 1px 2px rgba(var(--text-rgb), 0.25);
+  --toast-bg: rgba(31, 35, 40, 0.92);
+  --toast-text: #ffffff;
+  --toast-shadow: 0 6px 20px rgba(0, 0, 0, 0.22);
 
   --radius: 12px;
-  --shadow: 0 1px 2px rgba(31, 35, 40, 0.06), 0 8px 24px rgba(31, 35, 40, 0.06);
+  --shadow: 0 1px 2px rgba(var(--text-rgb), 0.06),
+    0 8px 24px rgba(var(--text-rgb), 0.06);
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto,
     Helvetica, Arial, sans-serif;
   --mono: "SF Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
 
   --sidebar-w: 232px;
   --titlebar-h: 52px;
+}
+
+/* Dark theme (Dracula-inspired). Applied when `data-theme="dark"` is set on the
+   root element (resolved in main.js from the user's System/Light/Dark choice).
+   Tuned for WCAG AA: muted text, accent-strong and status text colors are
+   lightened from raw Dracula values so they clear contrast on dark surfaces. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #282a36;
+  --surface: #343746;
+  --border: #44475a;
+  --border-strong: #565a72;
+  --text: #f8f8f2;
+  --text-rgb: 248, 248, 242;
+  --muted: #a3acd6;
+
+  --accent: #bd93f9;
+  --accent-strong: #d7bbff;
+  --accent-rgb: 189, 147, 249;
+  --on-accent: #21222c;
+
+  --success: #50fa7b;
+  --success-rgb: 80, 250, 123;
+  --pending: #f1fa8c;
+  --pending-rgb: 241, 250, 140;
+  --error: #ff8585;
+  --error-rgb: 255, 133, 133;
+  --neutral-rgb: 154, 163, 178;
+
+  --surface-hover: #3c3f52;
+  --field-bg: #21222c;
+
+  --sidebar-bg: rgba(40, 42, 54, 0.6);
+  --toolbar-bg: rgba(40, 42, 54, 0.72);
+  --repo-header-bg: rgba(40, 42, 54, 0.92);
+
+  --danger-text: #ff9b9b;
+  --warn-text: #f1fa8c;
+
+  --track: #44475a;
+  --knob: #f8f8f2;
+  --knob-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --toast-bg: rgba(17, 18, 24, 0.95);
+  --toast-text: #f8f8f2;
+  --toast-shadow: 0 6px 20px rgba(0, 0, 0, 0.55);
+
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.5);
 }
 
 * {
@@ -38,7 +128,6 @@ body {
 body {
   font-family: var(--font);
   color: var(--text);
-  color-scheme: light;
   cursor: default;
   -webkit-user-select: none;
   user-select: none;
@@ -132,7 +221,7 @@ code,
   min-height: 0;
   /* Translucent so the vibrancy material reads through; falls back to a tint
      when private-api vibrancy is unavailable. */
-  background: rgba(246, 247, 250, 0.6);
+  background: var(--sidebar-bg);
   border-right: 1px solid var(--hairline);
   padding: 0 10px 10px;
 }
@@ -196,7 +285,7 @@ code,
 }
 
 .source:hover {
-  background: rgba(31, 35, 40, 0.05);
+  background: var(--hover);
 }
 
 .source--active,
@@ -208,7 +297,7 @@ code,
 
 .source:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.35);
+  box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
 .source-icon {
@@ -298,7 +387,7 @@ code,
   gap: 12px;
   padding: 0 16px;
   border-bottom: 1px solid var(--hairline);
-  background: rgba(255, 255, 255, 0.72);
+  background: var(--toolbar-bg);
   backdrop-filter: saturate(180%) blur(14px);
   -webkit-backdrop-filter: saturate(180%) blur(14px);
 }
@@ -376,7 +465,7 @@ code,
 }
 
 .icon-btn:hover {
-  background: #f3f4f8;
+  background: var(--surface-hover);
   color: var(--text);
 }
 
@@ -413,7 +502,7 @@ code,
 #sync-btn.is-due {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   /* The button is disabled (opacity 0.5) while syncing; keep the accent crisp. */
   opacity: 1;
 }
@@ -486,7 +575,7 @@ code,
   align-items: center;
   gap: 8px;
   padding: 6px 16px;
-  background: rgba(238, 240, 244, 0.92);
+  background: var(--repo-header-bg);
   backdrop-filter: saturate(180%) blur(14px);
   -webkit-backdrop-filter: saturate(180%) blur(14px);
   border-bottom: 1px solid var(--hairline);
@@ -554,7 +643,7 @@ code,
 .n-done:hover,
 .repo-done:hover {
   color: var(--success);
-  background: #f3f4f8;
+  background: var(--surface-hover);
 }
 
 .n-done:focus-visible,
@@ -743,7 +832,7 @@ code {
   font-family: var(--mono);
   font-size: 0.88em;
   color: var(--accent-strong);
-  background: rgba(124, 92, 255, 0.1);
+  background: rgba(var(--accent-rgb), 0.1);
   padding: 1px 6px;
   border-radius: 6px;
 }
@@ -759,7 +848,7 @@ code {
 
 .tables li code {
   color: var(--success);
-  background: rgba(31, 136, 61, 0.1);
+  background: rgba(var(--success-rgb), 0.1);
 }
 
 /* Error */
@@ -772,10 +861,10 @@ code {
 .error-detail {
   margin: 0;
   padding: 12px;
-  background: rgba(207, 34, 46, 0.06);
-  border: 1px solid rgba(207, 34, 46, 0.25);
+  background: rgba(var(--error-rgb), 0.06);
+  border: 1px solid rgba(var(--error-rgb), 0.25);
   border-radius: 8px;
-  color: #86181d;
+  color: var(--danger-text);
   font-family: var(--mono);
   font-size: 0.82rem;
   white-space: pre-wrap;
@@ -807,12 +896,12 @@ code {
 
 /* Error state: tint the whole card red rather than nesting a red box inside it. */
 .slist--error {
-  background: rgba(207, 34, 46, 0.06);
-  border-color: rgba(207, 34, 46, 0.35);
+  background: rgba(var(--error-rgb), 0.06);
+  border-color: rgba(var(--error-rgb), 0.35);
 }
 
 .slist--error .srow-error {
-  color: #86181d;
+  color: var(--danger-text);
   font-family: var(--mono);
   font-size: 0.82rem;
   white-space: pre-wrap;
@@ -1049,9 +1138,9 @@ code {
 }
 
 .callout--warn {
-  background: rgba(154, 103, 0, 0.1);
-  border: 1px solid rgba(154, 103, 0, 0.3);
-  color: #7a5300;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  color: var(--warn-text);
 }
 
 .srow-flash {
@@ -1080,10 +1169,10 @@ code {
   max-width: 80vw;
   padding: 7px 14px;
   border-radius: 8px;
-  background: rgba(31, 35, 40, 0.92);
-  color: #fff;
+  background: var(--toast-bg);
+  color: var(--toast-text);
   font-size: 0.85rem;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.22);
+  box-shadow: var(--toast-shadow);
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.16s ease, transform 0.16s ease;
@@ -1107,7 +1196,7 @@ code {
   gap: 14px;
   padding: 10px 16px;
   border-bottom: 1px solid var(--hairline);
-  background: rgba(124, 92, 255, 0.08);
+  background: rgba(var(--accent-rgb), 0.08);
 }
 
 .update-banner[hidden] {
@@ -1187,7 +1276,7 @@ input[type="text"] {
   font-size: 0.95rem;
   font-family: inherit;
   color: var(--text);
-  background: #ffffff;
+  background: var(--field-bg);
   border: 1px solid var(--border);
   border-radius: 8px;
   outline: none;
@@ -1198,7 +1287,7 @@ input[type="number"]:focus,
 input[type="password"]:focus,
 input[type="text"]:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.18);
+  box-shadow: 0 0 0 3px var(--focus-ring-soft);
 }
 
 .form-actions {
@@ -1210,7 +1299,7 @@ input[type="text"]:focus {
 .btn {
   appearance: none;
   border: 1px solid var(--border);
-  background: #ffffff;
+  background: var(--field-bg);
   color: var(--text);
   font: inherit;
   font-size: 0.9rem;
@@ -1222,8 +1311,8 @@ input[type="text"]:focus {
 }
 
 .btn:hover {
-  border-color: #c2c9d1;
-  background: #f3f4f8;
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
 }
 
 .btn:disabled {
@@ -1234,7 +1323,7 @@ input[type="text"]:focus {
 .btn--primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 .btn--primary:hover {
@@ -1277,7 +1366,7 @@ input[type="text"]:focus {
   width: 40px;
   height: 22px;
   border-radius: 999px;
-  background: #d0d7de;
+  background: var(--track);
   transition: background 0.18s ease;
   flex: none;
 }
@@ -1290,8 +1379,8 @@ input[type="text"]:focus {
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 1px 2px rgba(31, 35, 40, 0.25);
+  background: var(--knob);
+  box-shadow: var(--knob-shadow);
   transition: transform 0.18s ease;
 }
 
@@ -1304,7 +1393,55 @@ input[type="text"]:focus {
 }
 
 .switch input:focus-visible + .switch-track {
-  box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.35);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+/* Segmented control (e.g. the Appearance theme picker): a small pill-grouped set
+   of radio options, macOS-style. The native radios are visually hidden but remain
+   the accessible/keyboard-operable control (arrow keys move between options). */
+.seg {
+  display: inline-flex;
+  padding: 2px;
+  gap: 2px;
+  background: var(--hover);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.seg-opt {
+  position: relative;
+  display: inline-flex;
+}
+
+.seg-opt input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.seg-opt > span {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 12px;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.seg-opt input:checked + span {
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: var(--knob-shadow);
+}
+
+.seg-opt input:focus-visible + span {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
 /* Badges */
@@ -1320,32 +1457,32 @@ input[type="text"]:focus {
 
 .badge--pr {
   color: var(--accent-strong);
-  background: rgba(124, 92, 255, 0.12);
-  border-color: rgba(124, 92, 255, 0.3);
+  background: rgba(var(--accent-rgb), 0.12);
+  border-color: rgba(var(--accent-rgb), 0.3);
 }
 
 .badge--issue {
   color: var(--success);
-  background: rgba(31, 136, 61, 0.12);
-  border-color: rgba(31, 136, 61, 0.3);
+  background: rgba(var(--success-rgb), 0.12);
+  border-color: rgba(var(--success-rgb), 0.3);
 }
 
 .badge--other {
   color: var(--muted);
-  background: rgba(140, 149, 159, 0.14);
-  border-color: rgba(140, 149, 159, 0.28);
+  background: rgba(var(--neutral-rgb), 0.14);
+  border-color: rgba(var(--neutral-rgb), 0.28);
 }
 
 .badge--alert {
   color: var(--error);
-  background: rgba(207, 34, 46, 0.12);
-  border-color: rgba(207, 34, 46, 0.3);
+  background: rgba(var(--error-rgb), 0.12);
+  border-color: rgba(var(--error-rgb), 0.3);
 }
 
 .badge--lock {
   color: var(--pending);
-  background: rgba(154, 103, 0, 0.1);
-  border-color: rgba(154, 103, 0, 0.3);
+  background: rgba(var(--pending-rgb), 0.1);
+  border-color: rgba(var(--pending-rgb), 0.3);
 }
 
 /* Subject state label */
@@ -1360,20 +1497,20 @@ input[type="text"]:focus {
 
 .state--merged {
   color: var(--accent-strong);
-  background: rgba(124, 92, 255, 0.14);
+  background: var(--accent-tint);
 }
 .state--closed {
   color: var(--error);
-  background: rgba(207, 34, 46, 0.12);
+  background: rgba(var(--error-rgb), 0.12);
 }
 .state--open,
 .state--done {
   color: var(--success);
-  background: rgba(31, 136, 61, 0.12);
+  background: rgba(var(--success-rgb), 0.12);
 }
 .state--muted {
   color: var(--muted);
-  background: rgba(140, 149, 159, 0.12);
+  background: rgba(var(--neutral-rgb), 0.12);
 }
 
 @keyframes spin {
@@ -1445,7 +1582,7 @@ input[type="text"]:focus {
 
 .context-menu-item--danger:hover:not(:disabled),
 .context-menu-item--danger:focus-visible:not(:disabled) {
-  background: rgba(207, 34, 46, 0.12);
+  background: rgba(var(--error-rgb), 0.12);
   color: var(--error);
 }
 
