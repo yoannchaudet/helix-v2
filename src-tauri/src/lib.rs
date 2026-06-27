@@ -50,7 +50,6 @@ struct AuthStatus {
 #[derive(Serialize)]
 struct Settings {
     poll_interval_s: i64,
-    dependabot_only: bool,
     github_login: Option<String>,
 }
 
@@ -125,8 +124,6 @@ fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
     let conn = state.db.0.lock().map_err(|e| e.to_string())?;
     Ok(Settings {
         poll_interval_s: settings::get_poll_interval(&conn).map_err(|e| e.to_string())?,
-        dependabot_only: settings::get_bool(&conn, settings::KEY_DEPENDABOT_ONLY, false)
-            .map_err(|e| e.to_string())?,
         github_login: settings::get_string(&conn, settings::KEY_GITHUB_LOGIN)
             .map_err(|e| e.to_string())?,
     })
@@ -136,7 +133,6 @@ fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
 #[tauri::command]
 fn save_settings(
     poll_interval_s: i64,
-    dependabot_only: bool,
     state: State<'_, AppState>,
 ) -> Result<Settings, String> {
     if poll_interval_s < settings::MIN_POLL_INTERVAL_S {
@@ -147,11 +143,8 @@ fn save_settings(
     }
     let conn = state.db.0.lock().map_err(|e| e.to_string())?;
     settings::set_poll_interval(&conn, poll_interval_s).map_err(|e| e.to_string())?;
-    settings::set_bool(&conn, settings::KEY_DEPENDABOT_ONLY, dependabot_only)
-        .map_err(|e| e.to_string())?;
     Ok(Settings {
         poll_interval_s,
-        dependabot_only,
         github_login: settings::get_string(&conn, settings::KEY_GITHUB_LOGIN)
             .map_err(|e| e.to_string())?,
     })

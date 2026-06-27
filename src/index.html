@@ -63,6 +63,15 @@
                 <span class="source-count" data-count="assign"></span>
               </button>
             </li>
+            <li>
+              <button type="button" class="source" data-filter="cleanup">
+                <span class="source-icon" aria-hidden="true">
+                  <svg viewBox="0 0 16 16" width="15" height="15"><path d="M9.5 2.5l4 4-5.5 5.5H4v-4z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M2.5 13.5h6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+                </span>
+                <span class="source-label">Cleanup</span>
+                <span class="source-count" data-count="cleanup"></span>
+              </button>
+            </li>
           </ul>
 
           <p class="source-group-label">Repositories</p>
@@ -193,16 +202,6 @@
                   />
                   <span class="stepper-unit" aria-hidden="true">s</span>
                 </span>
-              </span>
-            </div>
-            <div class="srow">
-              <span class="srow-label" id="dependabot-label">Clean up Dependabot notifications</span>
-              <span class="srow-value">
-                <label class="switch">
-                  <input id="dependabot-only" name="dependabot-only" type="checkbox"
-                    aria-labelledby="dependabot-label" />
-                  <span class="switch-track" aria-hidden="true"></span>
-                </label>
               </span>
             </div>
           </div>

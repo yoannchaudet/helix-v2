@@ -644,7 +644,26 @@ const FILTERS = {
     match: (n) => n.reason === "review_requested",
   },
   assign: { label: "Assigned", match: (n) => n.reason === "assign" },
+  cleanup: { label: "Cleanup", match: (n) => isCleanupCandidate(n) },
 };
+
+/** Cleanup candidates: notifications safe to mark as done (design.md §6). A merged or
+ *  closed pull request, or a closed issue. Subjects that aren't yet resolved (no
+ *  `subject_state`) and other subject types are excluded. The resolved state is only
+ *  trusted when it reflects the latest thread activity (`updated_at <= resolved_at`,
+ *  mirroring the backend's staleness rule) — so a subject that changed since we last
+ *  resolved it (e.g. a reopened issue) is excluded until re-resolution catches up, and we
+ *  never offer a stale candidate to clear. */
+function isCleanupCandidate(n) {
+  if (!n.resolved_at || n.updated_at > n.resolved_at) return false;
+  if (n.subject_type === "PullRequest") {
+    return n.subject_state === "merged" || n.subject_state === "closed";
+  }
+  if (n.subject_type === "Issue") {
+    return n.subject_state === "closed";
+  }
+  return false;
+}
 
 function repoHeader(group) {
   const privacy = group.private
@@ -715,7 +734,11 @@ function emptyInbox() {
         <button type="button" class="btn js-goto-settings">Open Settings</button>
       </div>`;
   }
-  return `<p class="inbox-empty">Nothing here. Click the refresh button to sync.</p>`;
+  return `<p class="inbox-empty">${
+    activeFilter === "cleanup"
+      ? "Nothing to clear right now."
+      : "Nothing here. Click the refresh button to sync."
+  }</p>`;
 }
 
 /** Render the main list for the active filter (and optional repo refinement). */
@@ -744,6 +767,7 @@ function renderSidebar() {
     team_mention: all.filter(FILTERS.team_mention.match).length,
     review_requested: all.filter(FILTERS.review_requested.match).length,
     assign: all.filter(FILTERS.assign.match).length,
+    cleanup: all.filter(FILTERS.cleanup.match).length,
   };
   for (const el of $$(".source-count")) {
     const key = el.dataset.count;
@@ -1117,7 +1141,6 @@ async function loadSettings() {
   try {
     const s = await invoke("get_settings");
     $("#poll-interval").value = s.poll_interval_s;
-    $("#dependabot-only").checked = s.dependabot_only;
     pollIntervalSeconds = s.poll_interval_s;
     clearSettingsError();
   } catch (err) {
@@ -1141,7 +1164,6 @@ function clearSettingsError() {
 /** Auto-apply: read the current controls, validate, persist, and confirm transiently. */
 async function applySettings() {
   const pollIntervalS = Number.parseInt($("#poll-interval").value, 10);
-  const dependabotOnly = $("#dependabot-only").checked;
 
   // Guard against NaN / out-of-range input before invoking the backend (NaN would
   // serialize to null over IPC and surface a confusing error).
@@ -1153,13 +1175,10 @@ async function applySettings() {
 
   const seq = ++settingsApplySeq;
   try {
-    const s = await invoke("save_settings", { pollIntervalS, dependabotOnly });
+    const s = await invoke("save_settings", { pollIntervalS });
     // Ignore a stale response superseded by a newer apply, so it can't clobber the
     // current UI state or show an outdated flash.
     if (seq !== settingsApplySeq) return;
-    // Reflect the toggle (the backend echoes the stored value) without clobbering the
-    // number field while the user may still be typing in it.
-    $("#dependabot-only").checked = s.dependabot_only;
     flash($("#settings-flash"), "Saved");
     // Adopt the new cadence immediately and restart the countdown so the change is
     // reflected without waiting out the previous interval.
@@ -1287,9 +1306,8 @@ window.addEventListener("DOMContentLoaded", () => {
   if (navigator.userAgent.includes("Macintosh")) {
     document.documentElement.dataset.platform = "macos";
   }
-  // Settings auto-apply: the toggle persists immediately; the stepper debounces typed
-  // values and persists right away on a committed change (blur / arrow click).
-  $("#dependabot-only").addEventListener("change", applySettings);
+  // Settings auto-apply: the stepper debounces typed values and persists right away on a
+  // committed change (blur / arrow click).
   $("#poll-interval").addEventListener("input", () => {
     clearTimeout(settingsDebounce);
     settingsDebounce = setTimeout(applySettings, 450);

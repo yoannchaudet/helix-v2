@@ -527,6 +527,10 @@ pub struct NotificationView {
     pub subject_number: Option<i64>,
     pub subject_state: Option<String>,
     pub subject_html_url: Option<String>,
+    /// When the subject was last resolved. Compared against `updated_at` to tell whether
+    /// `subject_state` still reflects the latest thread activity (the cleanup filter only
+    /// trusts a fresh resolution; see the frontend `isCleanupCandidate`).
+    pub resolved_at: Option<String>,
 }
 
 /// Notifications for one repository.
@@ -550,7 +554,7 @@ pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
                 n.thread_id, n.subject_type, n.subject_title, n.subject_url,
                 COALESCE(n.reason, '') AS reason,
                 n.updated_at, n.thread_url,
-                n.subject_number, n.subject_state, n.subject_html_url
+                n.subject_number, n.subject_state, n.subject_html_url, n.resolved_at
          FROM notifications n
          JOIN repos r ON r.id = n.repo_id
          ORDER BY r.full_name ASC, n.updated_at DESC, n.thread_id ASC",
@@ -572,6 +576,7 @@ pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
                 subject_number: r.get(10)?,
                 subject_state: r.get(11)?,
                 subject_html_url: r.get(12)?,
+                resolved_at: r.get(13)?,
             },
         ))
     })?;

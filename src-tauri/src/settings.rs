@@ -9,7 +9,6 @@
 use rusqlite::{Connection, OptionalExtension};
 
 /// Settings keys.
-pub const KEY_DEPENDABOT_ONLY: &str = "dependabot_only";
 pub const KEY_GITHUB_LOGIN: &str = "github_login";
 pub const KEY_WINDOW_WIDTH: &str = "window_width";
 pub const KEY_WINDOW_HEIGHT: &str = "window_height";
@@ -42,21 +41,6 @@ pub fn set_string(conn: &Connection, key: &str, value: &str) -> rusqlite::Result
 pub fn delete_key(conn: &Connection, key: &str) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM settings WHERE key = ?1", [key])?;
     Ok(())
-}
-
-/// Read a boolean setting (stored as `"true"`/`"false"`), defaulting when unset or when
-/// the stored value is not a recognized boolean.
-pub fn get_bool(conn: &Connection, key: &str, default: bool) -> rusqlite::Result<bool> {
-    Ok(match get_string(conn, key)?.as_deref() {
-        Some("true") => true,
-        Some("false") => false,
-        _ => default,
-    })
-}
-
-/// Write a boolean setting.
-pub fn set_bool(conn: &Connection, key: &str, value: bool) -> rusqlite::Result<()> {
-    set_string(conn, key, if value { "true" } else { "false" })
 }
 
 /// Current polling interval (seconds) from `sync_state`.
@@ -129,21 +113,6 @@ mod tests {
         );
         delete_key(&conn, KEY_GITHUB_LOGIN).unwrap();
         assert_eq!(get_string(&conn, KEY_GITHUB_LOGIN).unwrap(), None);
-    }
-
-    #[test]
-    fn bool_default_and_set() {
-        let conn = mem_conn();
-        assert!(!get_bool(&conn, KEY_DEPENDABOT_ONLY, false).unwrap());
-        set_bool(&conn, KEY_DEPENDABOT_ONLY, true).unwrap();
-        assert!(get_bool(&conn, KEY_DEPENDABOT_ONLY, false).unwrap());
-        set_bool(&conn, KEY_DEPENDABOT_ONLY, false).unwrap();
-        assert!(!get_bool(&conn, KEY_DEPENDABOT_ONLY, true).unwrap());
-
-        // An unrecognized stored value falls back to the provided default.
-        set_string(&conn, KEY_DEPENDABOT_ONLY, "garbage").unwrap();
-        assert!(get_bool(&conn, KEY_DEPENDABOT_ONLY, true).unwrap());
-        assert!(!get_bool(&conn, KEY_DEPENDABOT_ONLY, false).unwrap());
     }
 
     #[test]
