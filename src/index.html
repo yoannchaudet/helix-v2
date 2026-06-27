@@ -278,7 +278,6 @@
                     id="poll-interval"
                     name="poll-interval"
                     type="number"
-                    min="10"
                     step="5"
                     inputmode="numeric"
                     aria-label="Polling interval in seconds"
@@ -289,8 +288,8 @@
             </div>
           </div>
           <p class="sgroup-note" id="settings-note">
-            Helix syncs in the background at this interval. Minimum 10 seconds. Changes
-            apply immediately.
+            Helix syncs in the background at this interval. Minimum
+            <span id="poll-min-label">10</span> seconds. Changes apply immediately.
           </p>
         </section>
 

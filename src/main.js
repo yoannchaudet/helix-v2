@@ -4,6 +4,32 @@ const { listen } = window.__TAURI__.event;
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 
+/* ----------------------------- Tunables ---------------------------------- */
+/* Named knobs gathered here so behavior isn't tuned via scattered magic numbers.
+   The poll-interval floor is NOT here on purpose — it's owned by the Rust backend
+   (`get_settings().min_poll_interval_s`) so the UI can't drift from it. */
+
+/** Automatic-poll heartbeat: how often `pollTick` runs (ms). */
+const POLL_TICK_MS = 1000;
+/** Polling cadence (s) assumed until the saved setting loads. */
+const DEFAULT_POLL_INTERVAL_S = 60;
+/** Fallback poll-interval floor used only until/if `loadSettings()` provides the
+ *  authoritative `min_poll_interval_s` from the backend. Mirrors the Rust default. */
+const FALLBACK_MIN_POLL_INTERVAL_S = 10;
+
+/** Auto-dismiss timings (ms) for transient feedback. */
+const FLASH_DISMISS_MS = 1800;
+const TOAST_DISMISS_MS = 1600;
+const SYNC_PROGRESS_DISMISS_MS = 2600;
+
+/** Sidebar resize bounds (px). The minimum falls back to the CSS `--sidebar-w`. */
+const SIDEBAR_MIN_FALLBACK_PX = 232;
+const SIDEBAR_MAX_PX = 520;
+const SIDEBAR_KEY_STEP_PX = 16;
+
+/** Debounce (ms) before persisting a typed polling-interval value. */
+const SETTINGS_DEBOUNCE_MS = 450;
+
 /** True once the user is authenticated; drives the signed-out empty state. */
 let authenticated = false;
 
@@ -29,7 +55,10 @@ let syncProgressTimer;
 /** 1-second tick driving the automatic poll + the refresh-button clock sweep. */
 let pollTimer = null;
 /** Configured polling cadence (seconds); kept in sync with the saved setting. */
-let pollIntervalSeconds = 60;
+let pollIntervalSeconds = DEFAULT_POLL_INTERVAL_S;
+/** Floor for the poll interval. Authoritative value comes from the backend
+ *  (`get_settings().min_poll_interval_s`); this is just a fallback until settings load. */
+let minPollIntervalS = FALLBACK_MIN_POLL_INTERVAL_S;
 /** Seconds elapsed since the last sync; reset to 0 after every sync. */
 let pollElapsed = 0;
 
@@ -136,7 +165,7 @@ function flash(el, text, kind) {
   clearTimeout(el._flashTimer);
   el._flashTimer = setTimeout(() => {
     el.classList.remove("srow-flash--show");
-  }, 1800);
+  }, FLASH_DISMISS_MS);
 }
 
 /** Show a brief, self-dismissing toast for actions with no inline anchor (e.g. a copy
@@ -159,7 +188,7 @@ function toast(text, kind) {
   void el.offsetWidth;
   el.classList.add("toast--show");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove("toast--show"), 1600);
+  toastTimer = setTimeout(() => el.classList.remove("toast--show"), TOAST_DISMISS_MS);
 }
 
 function escapeHtml(value) {
@@ -564,7 +593,7 @@ async function syncNow() {
     // Transient: the durable record is the "Last synced" row, so clear the inline
     // "Stored N" message shortly after it appears.
     clearTimeout(syncProgressTimer);
-    syncProgressTimer = setTimeout(() => setSyncProgress(""), 2600);
+    syncProgressTimer = setTimeout(() => setSyncProgress(""), SYNC_PROGRESS_DISMISS_MS);
     await loadSyncStatus();
     await loadInbox();
     // A successful sync proves the Keychain is now readable, so refresh the account
@@ -600,7 +629,7 @@ function pollTick() {
   // Hold the countdown while signed out or while a sync is already running.
   if (!authenticated || syncing) return;
   pollElapsed += 1;
-  const interval = Math.max(pollIntervalSeconds, 10);
+  const interval = Math.max(pollIntervalSeconds, minPollIntervalS);
   setPollProgress(Math.min(pollElapsed / interval, 1));
   if (pollElapsed >= interval) syncNow();
 }
@@ -609,7 +638,7 @@ function pollTick() {
 function startPolling() {
   stopPolling();
   resetPollCountdown();
-  pollTimer = setInterval(pollTick, 1000);
+  pollTimer = setInterval(pollTick, POLL_TICK_MS);
 }
 
 function stopPolling() {
@@ -1033,7 +1062,7 @@ function reportMutation(result, verb) {
   } else if (result.ok > 0) {
     setSyncProgress(`${result.ok} ${verb}.`, "success");
     clearTimeout(syncProgressTimer);
-    syncProgressTimer = setTimeout(() => setSyncProgress(""), 2600);
+    syncProgressTimer = setTimeout(() => setSyncProgress(""), SYNC_PROGRESS_DISMISS_MS);
   }
 }
 
@@ -1305,9 +1334,24 @@ let settingsDebounce;
  * toggles/edits can otherwise let a slow, stale response overwrite newer state). */
 let settingsApplySeq = 0;
 
+/** Apply the poll-interval floor to local state, the input's `min`, and the note text.
+ *  Used at init with the fallback, then by `loadSettings()` with the backend's value.
+ *  Guards against a missing/non-numeric value so the clamp can never become NaN. */
+function applyPollMin(seconds) {
+  minPollIntervalS = Number.isInteger(seconds)
+    ? seconds
+    : FALLBACK_MIN_POLL_INTERVAL_S;
+  const input = $("#poll-interval");
+  if (input) input.min = String(minPollIntervalS);
+  const label = $("#poll-min-label");
+  if (label) label.textContent = String(minPollIntervalS);
+}
+
 async function loadSettings() {
   try {
     const s = await invoke("get_settings");
+    // The backend owns the floor; mirror it onto the input + local validation.
+    applyPollMin(s.min_poll_interval_s);
     $("#poll-interval").value = s.poll_interval_s;
     pollIntervalSeconds = s.poll_interval_s;
     const themeInput = $(`input[name="theme"][value="${s.theme}"]`);
@@ -1343,8 +1387,8 @@ async function applySettings() {
 
   // Guard against NaN / out-of-range input before invoking the backend (NaN would
   // serialize to null over IPC and surface a confusing error).
-  if (!Number.isInteger(pollIntervalS) || pollIntervalS < 10) {
-    setSettingsError("Min 10s");
+  if (!Number.isInteger(pollIntervalS) || pollIntervalS < minPollIntervalS) {
+    setSettingsError(`Min ${minPollIntervalS}s`);
     return;
   }
   clearSettingsError();
@@ -1556,9 +1600,11 @@ function initSidebarResize() {
   if (!resizer) return;
 
   const root = document.documentElement;
-  const min = parseInt(getComputedStyle(root).getPropertyValue("--sidebar-w"), 10) || 232;
-  const max = 520;
-  const STEP = 16;
+  const min =
+    parseInt(getComputedStyle(root).getPropertyValue("--sidebar-w"), 10) ||
+    SIDEBAR_MIN_FALLBACK_PX;
+  const max = SIDEBAR_MAX_PX;
+  const STEP = SIDEBAR_KEY_STEP_PX;
   let current = min;
 
   // Single entry point for width changes: clamp, apply, expose to AT, and persist.
@@ -1640,9 +1686,12 @@ window.addEventListener("DOMContentLoaded", () => {
   }
   // Settings auto-apply: the stepper debounces typed values and persists right away on a
   // committed change (blur / arrow click).
+  // Apply the fallback floor synchronously so the input has a sane `min` before the async
+  // loadSettings() resolves with the backend's authoritative value.
+  applyPollMin(FALLBACK_MIN_POLL_INTERVAL_S);
   $("#poll-interval").addEventListener("input", () => {
     clearTimeout(settingsDebounce);
-    settingsDebounce = setTimeout(applySettings, 450);
+    settingsDebounce = setTimeout(applySettings, SETTINGS_DEBOUNCE_MS);
   });
   $("#poll-interval").addEventListener("change", () => {
     clearTimeout(settingsDebounce);
