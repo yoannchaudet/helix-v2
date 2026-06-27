@@ -225,6 +225,7 @@ function escapeHtml(value) {
  *  unavailable/blocked in the macOS WKWebView Tauri uses, so the fallback is what actually
  *  runs there. */
 async function copyText(text) {
+  text = String(text);
   try {
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(text);
@@ -233,6 +234,9 @@ async function copyText(text) {
   } catch {
     // Fall through to the execCommand path below.
   }
+  // Selecting the textarea steals focus; restore it afterwards so keyboard/AT users aren't
+  // dropped to <body> (the async Clipboard path doesn't move focus).
+  const prevFocus = document.activeElement;
   try {
     const ta = document.createElement("textarea");
     ta.value = text;
@@ -247,6 +251,7 @@ async function copyText(text) {
       return document.execCommand("copy");
     } finally {
       ta.remove();
+      if (prevFocus instanceof HTMLElement) prevFocus.focus();
     }
   } catch {
     return false;
