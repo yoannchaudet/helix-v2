@@ -712,6 +712,23 @@ function repoMatches(group, filterId) {
 }
 
 /** Apply the active filter, then the optional repo refinement, to `inboxGroups`. */
+/** Most recent `updated_at` in a notification list (ISO-8601 UTC strings compare lexically,
+ *  so the newest is the max). Empty list → "". */
+function latestUpdatedAt(notifications) {
+  let max = "";
+  for (const n of notifications) {
+    if (n.updated_at > max) max = n.updated_at;
+  }
+  return max;
+}
+
+/** Repo order on the notifications view: most recent (matching) notification first, with
+ *  repo name as a deterministic tie-breaker. Operates on pre-extracted recency/name keys. */
+function compareByRecencyThenName(recencyA, nameA, recencyB, nameB) {
+  if (recencyA !== recencyB) return recencyA < recencyB ? 1 : -1;
+  return nameA.localeCompare(nameB);
+}
+
 function filteredGroups() {
   let groups = inboxGroups
     .map((g) => ({ ...g, notifications: repoMatches(g, activeFilter) }))
@@ -719,6 +736,15 @@ function filteredGroups() {
   if (activeRepo != null) {
     groups = groups.filter((g) => g.repo_id === activeRepo);
   }
+  // Bubble the repo with the most recently updated matching notification to the top.
+  groups.sort((a, b) =>
+    compareByRecencyThenName(
+      latestUpdatedAt(a.notifications),
+      a.full_name,
+      latestUpdatedAt(b.notifications),
+      b.full_name,
+    ),
+  );
   return groups;
 }
 
@@ -808,6 +834,15 @@ function renderSidebar() {
   const visibleRepos = inboxGroups
     .map((g) => ({ group: g, matches: repoMatches(g, activeFilter) }))
     .filter((x) => x.matches.length);
+  // Same most-recent-first ordering as the main list, so the sidebar matches the view.
+  visibleRepos.sort((a, b) =>
+    compareByRecencyThenName(
+      latestUpdatedAt(a.matches),
+      a.group.full_name,
+      latestUpdatedAt(b.matches),
+      b.group.full_name,
+    ),
+  );
   if (!visibleRepos.length) {
     repoList.innerHTML = `<li class="source-empty">No repositories yet.</li>`;
   } else {
