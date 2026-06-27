@@ -647,6 +647,17 @@ const FILTERS = {
   cleanup: { label: "Cleanup", match: (n) => isCleanupCandidate(n) },
 };
 
+/** Per-filter subtitle for the (illustrated) empty state. The title is always the same
+ *  small "you're caught up" win; the subtitle says specifically what's empty. */
+const EMPTY_SUBTITLES = {
+  all: "No notifications right now.",
+  mention: "No mentions right now.",
+  team_mention: "No team mentions right now.",
+  review_requested: "No review requests right now.",
+  assign: "Nothing's assigned to you right now.",
+  cleanup: "No stale subscriptions to clean.",
+};
+
 /** Cleanup candidates: notifications safe to mark as done (design.md §6). A merged or
  *  closed pull request, or a closed issue. Subjects that aren't yet resolved (no
  *  `subject_state`) and other subject types are excluded. The resolved state is only
@@ -734,14 +745,15 @@ function emptyInbox() {
         <button type="button" class="btn js-goto-settings">Open Settings</button>
       </div>`;
   }
-  if (activeFilter === "cleanup") {
-    return `<div class="inbox-empty inbox-empty--art">
-        <img class="inbox-empty-art" src="/assets/helix-muted.svg" alt="" width="116" height="116" />
-        <p class="inbox-empty-title">You're all caught up.</p>
-        <p class="inbox-empty-sub">No stale subscriptions to clean.</p>
-      </div>`;
-  }
-  return `<p class="inbox-empty">Nothing here. Click the refresh button to sync.</p>`;
+  // Authenticated but nothing to show — either the inbox is genuinely empty or the active
+  // filter has no matches. Reaching this is a small win, so show the muted helix mark with a
+  // filter-specific subtitle (the toolbar already exposes sync status + refresh).
+  const sub = EMPTY_SUBTITLES[activeFilter] ?? EMPTY_SUBTITLES.all;
+  return `<div class="inbox-empty inbox-empty--art">
+      <img class="inbox-empty-art" src="/assets/helix-muted.svg" alt="" width="116" height="116" />
+      <p class="inbox-empty-title">You're all caught up.</p>
+      <p class="inbox-empty-sub">${sub}</p>
+    </div>`;
 }
 
 /** Render the main list for the active filter (and optional repo refinement). */
