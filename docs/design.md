@@ -155,8 +155,9 @@ CREATE TABLE done_tombstones (
 ### Reconciliation model
 - **Upsert:** each synced notification is `INSERT ... ON CONFLICT(thread_id) DO UPDATE`.
 - **Deletion/reconcile:** Helix fetches `all=true` (read and unread alike). After a full
-  sync pass we delete local rows not present in the latest result, so the local inbox
-  matches GitHub's list. The set of fetched thread ids (a temp table) identifies stale rows.
+  sync pass we delete local rows whose threads GitHub no longer lists (the set of fetched
+  thread ids, a temp table, identifies the stale rows). Locally-done threads are a
+  deliberate exception — GitHub keeps returning them, but tombstones keep them out (below).
   Read state is not modeled: a notification is shown until it is marked **done** (the only
   thing that removes it), here or elsewhere.
 - **Done threads & durable tombstones:** marking a thread done (`DELETE`) only removes it
@@ -276,8 +277,8 @@ column, no marketing hero):
 - **Notifications:** a full-width, dense list with **sticky, Mail-style repo section
   headers** (repo name, private badge, notification count), each listing its notifications with
   subject type (PR/Issue), number, title, reason, and state label. Hairline row separators.
-  Clicking (or pressing Enter on) a notification opens its subject in the browser; a
-  right-click context menu offers **Copy URL** and **Mark as done**.
+  Once a row's subject is resolved, clicking (or pressing Enter on) it opens the subject in
+  the browser; a right-click context menu offers **Copy URL** and **Mark as done**.
 - **Cleanup:** the **Cleanup** sidebar filter (§6) reuses the same by-repo list, narrowed to
   candidates; clearing them is the toolbar ••• "Mark all as done" flow with live progress.
 - **Settings:** an in-app pane (reached from the sidebar or `⌘,`) for PAT entry, the poll

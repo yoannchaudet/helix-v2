@@ -27,8 +27,8 @@ GitHub day.
 - **Smart filters** in the sidebar — All, Mentions, Team mentions, Review requests,
   Assigned, and **Cleanup** (notifications safe to clear: merged/closed PRs and closed
   issues) — each with live counts.
-- **Open in the browser** — click (or press Enter on) a notification to open its
-  subject; right-click to copy the URL.
+- **Open in the browser** — once a notification's subject is resolved, click (or press
+  Enter on) the row to open it; right-click to copy the URL.
 - **Mark as done** — clear a single notification from its context menu, or bulk-clear the
   visible/filtered set from the toolbar, with optimistic local updates and per-thread
   failure reporting.
