@@ -21,7 +21,7 @@ reconciles with GitHub over the network.
 ### Non-goals (v1)
 - Cross-platform support (macOS only for now).
 - Per-thread actions beyond mark-as-done (mark-read, mute, unsubscribe), search, custom
-  user-defined rules, and a menu-bar/badge poller — all deferred to later milestones.
+  user-defined rules, and a menu-bar/badge poller — all deferred (see §9).
 - Writing/commenting on issues or PRs.
 
 ## 2. Architecture
@@ -47,14 +47,18 @@ reconciles with GitHub over the network.
 - **UI layer (webview):** vanilla HTML + modern CSS, minimal JS. Renders entirely from
   data the Rust core provides. Owns loading animations, color-coded states, and live
   feedback. Never talks to GitHub directly.
-- **Rust core:** exposes Tauri `#[command]` functions to the UI (e.g. `list_notifications`,
-  `sync_now`, `cleanup_candidates`, `mark_done`, `get_settings`, `save_token`). Owns all
-  GitHub I/O, SQLite, and Keychain access.
-- **IPC:** UI → core via `invoke(command, args)`; core → UI via emitted events for
-  progress/state (e.g. `sync:started`, `sync:progress`, `sync:done`, `sync:error`).
+- **Rust core:** exposes Tauri `#[command]` functions to the UI (e.g. `list_inbox`,
+  `sync_now`, `sync_status`, `mark_threads_done`, `sign_in` / `sign_out`, `auth_status`,
+  `get_settings` / `save_settings`, `open_url`). Owns all GitHub I/O, SQLite, and Keychain
+  access.
+- **IPC:** UI → core via `invoke(command, args)`; core → UI via emitted events. The core
+  emits `sync:started` / `sync:progress` / `sync:done` / `sync:error` around a sync and
+  `subjects:resolved` when background subject resolution updates rows; the UI currently
+  reacts to `sync:progress` (live progress) and `subjects:resolved` (re-render), and reads
+  sync status via `sync_status`.
 
 ### Data flow (read path)
-1. UI calls `list_notifications` → core reads SQLite → returns grouped-by-repo data.
+1. UI calls `list_inbox` → core reads SQLite → returns grouped-by-repo data.
 2. UI renders immediately (works offline).
 
 ### Data flow (sync path)
@@ -123,19 +127,48 @@ CREATE TABLE sync_state (
   rate_reset_at   TEXT,
   poll_interval_s INTEGER NOT NULL DEFAULT 60
 );
+
+-- Per-bucket GitHub rate-limit snapshots (one row per resource: core, graphql, search, …),
+-- surfaced as usage bars in Settings. Captured from `X-RateLimit-*` response headers.
+CREATE TABLE rate_limits (
+  resource    TEXT PRIMARY KEY,           -- e.g. "core", "search"
+  lim         INTEGER,
+  remaining   INTEGER,
+  reset_at    INTEGER,                    -- epoch seconds
+  updated_at  TEXT NOT NULL
+);
+
+-- Durable local record of threads the user marked done. GitHub's `DELETE` only removes a
+-- thread from the *unread* list; `all=true` keeps returning done threads as "read", so we
+-- remember "done" locally and suppress those threads until they genuinely re-surface.
+CREATE TABLE done_tombstones (
+  thread_id   TEXT PRIMARY KEY,
+  updated_at  TEXT,                       -- thread updated_at at mark-done time
+  done_at     TEXT NOT NULL               -- re-surface watermark (see reconciliation)
+);
 ```
+
+> Read state is intentionally **not** modeled: the original `unread` / `last_read_at`
+> columns were dropped once Helix switched to showing every notification until it is marked
+> *done*.
 
 ### Reconciliation model
 - **Upsert:** each synced notification is `INSERT ... ON CONFLICT(thread_id) DO UPDATE`.
-- **Deletion/reconcile:** Helix fetches `all=true` (read and unread alike, never *done*
-  threads). After a full sync pass we delete local rows not present in the latest result,
-  so the local inbox matches GitHub's list. The set of fetched thread ids (a temp table)
-  identifies stale rows. Read state is not modeled: a notification is shown until it is
-  marked **done** (the only thing that removes it), here or elsewhere.
+- **Deletion/reconcile:** Helix fetches `all=true` (read and unread alike). After a full
+  sync pass we delete local rows not present in the latest result, so the local inbox
+  matches GitHub's list. The set of fetched thread ids (a temp table) identifies stale rows.
+  Read state is not modeled: a notification is shown until it is marked **done** (the only
+  thing that removes it), here or elsewhere.
+- **Done threads & durable tombstones:** marking a thread done (`DELETE`) only removes it
+  from GitHub's *unread* list — `all=true` keeps returning it as "read". So Helix records a
+  durable row in `done_tombstones` and suppresses that thread on subsequent syncs until it
+  genuinely re-surfaces, i.e. its fetched `updated_at` is newer than the tombstone watermark
+  `max(updated_at, done_at)`. A tombstone is reaped once GitHub stops listing the thread.
 - **Optimistic local mutation:** when the user marks a thread done, the UI updates
   immediately; the core calls the API for each thread (bounded concurrency), then deletes
-  the local rows for the threads that succeeded and reports per-thread failures.
-- The token is **not** stored in SQLite — see §8.
+  the local rows for the threads that succeeded (writing a tombstone) and reports per-thread
+  failures.
+- The token is **not** stored in SQLite for release builds — see §8.
 
 ## 4. GitHub integration
 
@@ -146,7 +179,7 @@ Native REST over HTTPS from the Rust core (no `gh` CLI dependency). A small HTTP
 | Purpose | Method & path |
 | --- | --- |
 | List notifications | `GET /notifications?all=true&per_page=50&page=N` |
-| Resolve PR/Issue subject | `GET {subject_url}` |
+| Resolve a subject (any type with a URL) | `GET {subject_url}` |
 | Mark a thread as done | `DELETE /notifications/threads/{thread_id}` |
 | (Optional) auth check | `GET /user` |
 
@@ -156,16 +189,18 @@ Headers on every request:
 - `Authorization: Bearer <token>`
 
 ### Pagination
-- Always follow the `Link` header (`rel="next"` / `rel="last"`).
-- Fetch page 1, then remaining pages; bound concurrency to a small pool to be polite
-  (the PowerShell prototype used a throttle of ~8). Fall back to sequential `next`
-  walking when `last` is absent.
+- Fetch notifications by following the `Link` header's `rel="next"` URL in a loop,
+  page by page, until there is no `next` — a simple sequential walk (no concurrent
+  page fan-out). Live progress is emitted per page so the UI can show real work.
 
 ### Rate limiting
-- After each response, persist `X-RateLimit-Remaining` and `X-RateLimit-Reset` into
-  `sync_state`.
-- If remaining is exhausted (or a `403/429` with `Retry-After` arrives), pause sync
-  until reset and surface a 🟡 pending state in the UI. Never hard-fail the app.
+- After each response, persist the `X-RateLimit-*` headers. The single most-recent
+  `remaining`/`reset` also lives in `sync_state`, and a **per-bucket** snapshot (core,
+  graphql, search, …) is kept in `rate_limits` and shown as usage bars in Settings.
+- Background subject resolution backs off when a bucket drops below a reserve (~25%
+  remaining), so resolution never starves foreground syncs.
+- There is no automatic pause-until-reset / `Retry-After` backoff yet (deferred); a
+  rate-limit rejection is handled like any other failed request — see the error model below.
 
 ### Error model
 - Network/HTTP errors are caught, recorded in `sync_state.last_error`, emitted to the UI
@@ -177,48 +212,48 @@ A single coordinator in the Rust core:
 
 1. **Fetch** all notifications, read and unread (`all=true`, paginated, §4).
 2. **Upsert** repos + notifications into SQLite (§3).
-3. **Reconcile** rows missing from the latest pass.
-4. **Resolve** subjects lazily — for the cleanup view we resolve PR/Issue metadata
-   (state, merged_at, author, state_reason) with a bounded concurrent pool, caching
-   `resolved_at` so we don't re-resolve unnecessarily.
-5. **Record** `last_sync_at`, status, and rate-limit snapshot.
+3. **Reconcile** rows missing from the latest pass (and honor done tombstones, §3).
+4. **Resolve** subjects in the background — for **any** subject that carries a URL we fetch
+   its `html_url` (so discussions, releases, etc. become clickable), and for
+   PR/Issue/Discussion we also capture state/`merged_at`/`state_reason`/author. A bounded
+   concurrent pool does this, caching `resolved_at` so we don't re-resolve unnecessarily,
+   and it backs off once a rate-limit bucket drops below a reserve (~25% remaining).
+5. **Record** `last_sync_at`, status, and the rate-limit snapshots.
 
-**Polling:** optional periodic sync on a timer. The interval is read from
-`settings`/`sync_state.poll_interval_s` and is **user-configurable** in the Settings
-view (never hard-coded). Manual "Sync now" is always available.
+**Polling:** the UI drives periodic syncs — a 1-second tick calls `sync_now` whenever the
+configured interval has elapsed. The interval is read from `sync_state.poll_interval_s` and
+is **user-configurable** in Settings (never hard-coded). Manual "Sync now" is always
+available.
 
 Progress is streamed to the UI via events so loading animations reflect real work.
 
 ## 6. Cleanup workflow
 
-Ports the proven logic from `yoann-em` (`scripts/cleanup-notifications.ps1` +
-`modules/CleanupNotifications.psm1`).
+Ports the candidate logic from `yoann-em`
+(`scripts/cleanup-notifications.ps1` + `modules/CleanupNotifications.psm1`), surfaced as a
+**sidebar filter** ("Cleanup") rather than a separate preview pane.
 
 ### Candidate rules
-Starting from notifications whose subject is a `PullRequest` or `Issue` (with a
-subject URL), resolve the subject and keep it as a cleanup candidate when:
+A notification is a cleanup candidate when its resolved subject is a closed PR/issue:
 
-- **Pull request:**
-  - `merged_at` is set → state label **`merged`**, **OR**
-  - `state == "closed"` → state label **`closed`**.
-  - Open PRs are skipped.
-- **Issue:**
-  - `state == "closed"` → keep; classify by `state_reason`:
-    - `completed` → **`completed`**
-    - `not_planned` → **`not_planned`**
-    - otherwise → **`closed`**.
-  - Open issues are skipped.
+- **Pull request:** `subject_state` is `merged` (set when `merged_at` is present) or
+  `closed`. Open PRs are skipped.
+- **Issue:** `subject_state` is `closed`. Open issues are skipped.
 
-### Optional filter
-- **Dependabot-only:** restrict candidates to subjects authored by `dependabot[bot]`
-  (`user.login == "dependabot[bot]"`). Off by default; toggled in the UI.
+Only a **current** resolution counts: a candidate is excluded while it looks stale
+(`updated_at > resolved_at`) — e.g. a reopened issue — until background re-resolution
+catches up, so the filter never offers a stale "safe to clear" item. (The `subject_state_reason`
+column — `completed` / `not_planned` — is still resolved and stored, but the UI shows a
+single merged/closed/open state pill and does not classify issues further.)
 
-### Preview + bulk action
-- Candidates are grouped by repo and previewed with their state label and author.
-- The user confirms, then Helix **bulk marks** each thread done via
-  `DELETE /notifications/threads/{thread_id}` (bounded concurrency).
-- Each result is reconciled into SQLite (success removes/updates the row); failures are
-  reported per-thread in 🔴 without aborting the rest.
+### Surfacing + bulk action
+- Selecting the **Cleanup** filter shows the candidates grouped by repo (same by-repo list
+  as every other filter), with a live count in the sidebar.
+- The user clears them via the toolbar **••• → "Mark all as done"** over the visible
+  (filtered) set, with an in-menu confirmation, or one at a time from a row's context menu.
+- Each thread is marked done via `DELETE /notifications/threads/{thread_id}` (bounded
+  concurrency); successes are removed locally and tombstoned (§3); failures are reported
+  per-thread in 🔴 without aborting the rest.
 
 ## 7. UI / UX
 
@@ -227,9 +262,9 @@ A vibrant **sidebar + content** layout that fills the window edge-to-edge (no ce
 column, no marketing hero):
 - **Sidebar** (`NSVisualEffect` *Sidebar* vibrancy via the `window-vibrancy` crate):
   cross-cutting smart filters (**All**, **Mentions**, **Team mentions**, **Review
-  requests**, **Assigned**) with live counts, a **Repositories** list of selectable
-  sources, and a **Settings** entry (`⌘,`) pinned to the bottom. Selection is single-active
-  (a smart filter *or* a repository), Mail-style.
+  requests**, **Assigned**, **Cleanup**) with live counts, a **Repositories** list of
+  selectable sources, and a **Settings** entry (`⌘,`) pinned to the bottom. Selection is
+  single-active (a smart filter *or* a repository), Mail-style.
 - **Content pane:** an opaque pane with a **unified toolbar** fused into the overlay title
   bar (`titleBarStyle: "Overlay"`, `hiddenTitle: true`, transparent window +
   `macOSPrivateApi`). The toolbar shows the active source title (left) and sync
@@ -241,10 +276,13 @@ column, no marketing hero):
 - **Notifications:** a full-width, dense list with **sticky, Mail-style repo section
   headers** (repo name, private badge, notification count), each listing its notifications with
   subject type (PR/Issue), number, title, reason, and state label. Hairline row separators.
-- **Cleanup:** the filtered candidate list (§6) with the dependabot-only toggle, a
-  preview grouped by repo, and a confirm → bulk mark-as-done flow with live progress.
-- **Settings:** an in-app pane (reached from the sidebar or `⌘,`) for PAT entry (stored to
-  Keychain), poll interval, and the dependabot-only default.
+  Clicking (or pressing Enter on) a notification opens its subject in the browser; a
+  right-click context menu offers **Copy URL** and **Mark as done**.
+- **Cleanup:** the **Cleanup** sidebar filter (§6) reuses the same by-repo list, narrowed to
+  candidates; clearing them is the toolbar ••• "Mark all as done" flow with live progress.
+- **Settings:** an in-app pane (reached from the sidebar or `⌘,`) for PAT entry, the poll
+  interval, **per-bucket API rate-limit usage bars**, account info, and local-storage
+  details (DB path, schema version).
 
 ### Conventions (see AGENT.md)
 - **Vanilla CSS + modern HTML**, no heavy framework. System font stack only.
@@ -256,8 +294,9 @@ column, no marketing hero):
 
 ## 8. Security
 
-- **Release builds** store the PAT in the **macOS Keychain** via the Rust `keyring`
-  crate — never in SQLite, never in plaintext on disk, never logged.
+- **Release builds** store the PAT in the **macOS Keychain** (via the `keyring-core` +
+  `apple-native-keyring-store` crates) — never in SQLite, never in plaintext on disk, never
+  logged.
 - **Debug builds** (`tauri dev` / `cargo`) instead store the PAT **unencrypted** in the
   SQLite `settings` table (the Keychain re-prompts on every rebuild for a self-signed
   binary, which is unworkable in dev). The Settings UI warns while this is active. The
@@ -272,21 +311,22 @@ column, no marketing hero):
     Issues/Pull-requests read on the relevant repos for subject resolution.
 - All GitHub traffic is HTTPS to `api.github.com`.
 
-## 9. v1 milestones & open questions
+## 9. Status & deferred work
 
-### Milestones
-1. **Scaffold** — Tauri app, app-data dir, SQLite bootstrap + migrations.
-2. **Auth/settings** — Keychain PAT save/read, settings persistence, auth check.
-3. **Sync engine** — fetch + upsert + reconcile + rate-limit handling.
-4. **Notifications-by-repo view** — read from SQLite, live sync feedback.
-5. **Cleanup workflow** — candidate resolution, preview, bulk mark-as-done.
+### Status
+The v1/MVP scope is implemented: Keychain/SQLite auth + settings, the paginated
+fetch → upsert → reconcile sync engine (with durable done tombstones and per-bucket
+rate-limit handling), the by-repo notifications view, background subject resolution, the
+**Cleanup** filter, and mark-as-done (single + bulk).
 
-### Open questions
-- **Subject resolution cost:** resolving every PR/Issue is N extra calls. Do we resolve
-  eagerly during sync, or lazily only when the cleanup view is opened? (Lean toward lazy
-  for v1; revisit if it feels slow.)
-- **Reconcile vs. retain:** *Resolved.* Helix fetches `all=true` and does not model read
-  state — a notification is shown until it is marked **done** (the only removal path), so
-  reconciliation deletes a local row exactly when its thread leaves GitHub's list.
-- **Read vs. done semantics:** the only action is "mark done" (removes from inbox). Read
-  state is intentionally not tracked.
+### Deferred (post-v1)
+Per-thread mark-as-read, mute, unsubscribe; search; user-defined custom filter rules; a
+menu-bar/badge background poller; and cross-platform support.
+
+### Resolved decisions
+- **Reconcile vs. retain:** Helix fetches `all=true` and does not model read state — a
+  notification is shown until it is marked **done**. Because GitHub keeps done threads in the
+  `all=true` response, "done" is tracked locally via durable tombstones (§3).
+- **Subject resolution cost:** resolution runs in the background after a sync (not eagerly
+  inline), bounded by a concurrent pool and a rate-limit reserve, so it never blocks the
+  inbox or starves foreground syncs.

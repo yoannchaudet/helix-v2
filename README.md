@@ -2,10 +2,10 @@
 
 A personal tool for managing GitHub notifications and automating the workflows around them.
 
-> **Status:** Early development. A macOS desktop app built with [Tauri](https://tauri.app)
+> **Status:** A working MVP. A macOS desktop app built with [Tauri](https://tauri.app)
 > (Rust core + vanilla HTML/CSS UI). Local SQLite is the source of truth, so the app works
-> offline and loads fast. See [`docs/design.md`](docs/design.md) and
-> [`docs/milestones.md`](docs/milestones.md).
+> offline and loads fast. See [`docs/design.md`](docs/design.md) for the technical design
+> and [`AGENT.md`](AGENT.md) for the engineering principles.
 
 ## Why Helix?
 
@@ -19,6 +19,22 @@ GitHub day.
 - **Triage** — cut through notification noise and surface what actually needs attention.
 - **Automate** — turn repetitive notification-driven chores into hands-off workflows.
 - **Personalize** — encode my own rules and habits, not a one-size-fits-all inbox.
+
+## Features
+
+- **Offline-first inbox** grouped **by repository**, served from local SQLite and
+  reconciled with GitHub on each sync.
+- **Smart filters** in the sidebar — All, Mentions, Team mentions, Review requests,
+  Assigned, and **Cleanup** (notifications safe to clear: merged/closed PRs and closed
+  issues) — each with live counts.
+- **Open in the browser** — click (or press Enter on) a notification to open its
+  subject; right-click to copy the URL.
+- **Mark as done** — clear a single notification from its context menu, or bulk-clear the
+  visible/filtered set from the toolbar, with optimistic local updates and per-thread
+  failure reporting.
+- **API rate-limit visibility** — per-bucket usage bars in Settings.
+- **Live, color-coded feedback** — every sync and action shows progress; 🟢 success,
+  🟡 pending, 🔴 error.
 
 ## Tech stack
 
@@ -66,5 +82,5 @@ Rather than fight that, debug builds skip the Keychain entirely.
 ## Project conventions
 
 Engineering principles (lightweight-first, offline-first, API discipline, color-coded
-live feedback) live in [`AGENT.md`](AGENT.md). The incremental path to v1 is tracked in
-[`docs/milestones.md`](docs/milestones.md).
+live feedback) live in [`AGENT.md`](AGENT.md). The technical design lives in
+[`docs/design.md`](docs/design.md).
