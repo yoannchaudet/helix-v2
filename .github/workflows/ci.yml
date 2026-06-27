@@ -83,4 +83,4 @@ jobs:
         # Compile-only smoke test: `--no-bundle` skips bundling, so CI never creates or signs
         # the updater artifact and therefore needs no signing key. The release workflow does
         # the full signed/notarized bundle (with secrets from a protected environment).
-        run: npm run tauri -- build
+        run: npm run tauri -- build --no-bundle
