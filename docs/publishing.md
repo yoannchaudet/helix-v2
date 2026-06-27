@@ -31,8 +31,10 @@ npm run tauri -- signer generate -w ~/.tauri/helix.key
 This writes the **private** key to `~/.tauri/helix.key` and prints/​writes the **public** key
 to `~/.tauri/helix.key.pub`.
 
-- The **public** key is stored in [`src-tauri/tauri.conf.json`](../src-tauri/tauri.conf.json)
-  under `plugins.updater.pubkey` (safe to commit).
+- Copy the **public** key (the contents of `~/.tauri/helix.key.pub`) into
+  [`src-tauri/tauri.conf.json`](../src-tauri/tauri.conf.json) under
+  `plugins.updater.pubkey` (it's committed there — replace it whenever you regenerate the
+  keypair). The app embeds it to verify every update.
 - The **private** key is a CI secret (below). **Never commit it. If you lose it, existing
   installs can never be updated again** — back it up (e.g. a password manager).
 
@@ -106,7 +108,9 @@ Implemented in [`src-tauri/src/lib.rs`](../src-tauri/src/lib.rs) and
 
 ## Local validation
 
-You can produce signed-by-updater (but not Apple-notarized) artifacts locally:
+You can produce signed-by-updater (but not Apple-notarized) artifacts locally.
+`TAURI_SIGNING_PRIVATE_KEY` accepts either the key's **path** (handy locally, shown here)
+or its **contents** (the form used for the CI secret):
 
 ```sh
 export TAURI_SIGNING_PRIVATE_KEY="$HOME/.tauri/helix.key"
