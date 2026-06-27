@@ -241,11 +241,13 @@ async function copyText(text) {
     ta.style.cssText =
       "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;pointer-events:none";
     document.body.appendChild(ta);
-    ta.select();
-    ta.setSelectionRange(0, text.length);
-    const ok = document.execCommand("copy");
-    ta.remove();
-    return ok;
+    try {
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      return document.execCommand("copy");
+    } finally {
+      ta.remove();
+    }
   } catch {
     return false;
   }
@@ -1338,16 +1340,6 @@ function onMenuKeydown(e) {
   }
 }
 
-/** Close the menu when focus genuinely leaves it (e.g. VoiceOver navigating away), without
- *  yanking focus back to the trigger since it has already moved on.
- *
- *  This is DEFERRED on purpose. Clicking a menu item blurs it (on macOS WKWebView a button
- *  blurs to <body> on mousedown — `relatedTarget` is null) and fires `focusout` *before* the
- *  item's `click`. Closing synchronously here would remove the item from the DOM, so the
- *  click would never land on it and the action (e.g. mark-done) would be silently dropped.
- *  By deferring, the item's own click handler runs first (it closes the menu itself); we
- *  only close here if, a tick later, the menu is still open and focus really ended up
- *  outside it. */
 /** Close the menu when focus genuinely moves to another element outside it (e.g. VoiceOver
  *  navigating to a different control). Deliberately ignores a null `relatedTarget`: on macOS
  *  WKWebView a <button> blurs to <body> on **mousedown** — firing `focusout` BEFORE its
@@ -1363,6 +1355,9 @@ function onMenuFocusOut(e) {
   // closed; let that click handler do it, so we don't close-then-immediately-reopen.
   if (to.closest?.("#mark-all-done-btn")) return;
   closeMenu(false);
+  // Focus has already left for good, so drop the pre-menu focus reference rather than
+  // holding a stale node until the next menu opens.
+  menuReturnFocus = null;
 }
 
 /** Open a popover menu of `items` ({ label, danger?, disabled?, action }) anchored at the
