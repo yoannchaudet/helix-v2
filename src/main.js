@@ -78,22 +78,52 @@ if (darkMql.addEventListener) {
   darkMql.addListener(onColorSchemeChange);
 }
 
-/** Paint the chosen theme immediately, then persist it (independent of other settings,
- *  so a mid-edit poll interval can't block it) and mirror to localStorage on success.
- *  On failure, roll the optimistic paint and radio selection back to the persisted value
- *  so the UI never shows a theme that wasn't saved. */
-async function persistTheme(pref) {
-  const prev = themePref;
-  paintThemePref(pref);
+/** Latest desired preference awaiting persistence, and the in-flight save runner.
+ *  Together they serialize theme saves and coalesce rapid toggles to the last choice. */
+let themePending = null;
+let themeSaveRunner = null;
+
+/** Re-sync the picker + paint from SQLite (the source of truth). Used to recover after a
+ *  failed save rather than trusting a possibly-stale in-memory value. */
+async function resyncThemeFromBackend() {
   try {
-    await invoke("set_theme", { theme: pref });
-    mirrorThemePref(pref);
-  } catch (err) {
-    paintThemePref(prev);
-    const prevInput = $(`input[name="theme"][value="${prev}"]`);
-    if (prevInput) prevInput.checked = true;
-    setSettingsError(String(err));
+    const s = await invoke("get_settings");
+    const input = $(`input[name="theme"][value="${s.theme}"]`);
+    if (input) input.checked = true;
+    paintThemePref(s.theme);
+    mirrorThemePref(s.theme);
+  } catch (e) {
+    /* Best-effort recovery; leave the optimistic paint in place. */
   }
+}
+
+/** Paint the chosen theme immediately, then persist it. Saves are serialized (one
+ *  `set_theme` in flight at a time) and coalesced to the latest selection, so rapid
+ *  toggles can't let a slower earlier write land last in SQLite. Persistence is
+ *  independent of the rest of the settings form (a mid-edit poll interval can't block
+ *  it). On failure the UI re-syncs from the persisted value. */
+async function persistTheme(pref) {
+  paintThemePref(pref);
+  themePending = pref;
+  if (themeSaveRunner) return; // an active runner will pick up the latest themePending
+
+  themeSaveRunner = (async () => {
+    try {
+      while (themePending !== null) {
+        const target = themePending;
+        themePending = null;
+        await invoke("set_theme", { theme: target });
+        // Only mirror once this is the settled choice (nothing newer queued meanwhile).
+        if (themePending === null) mirrorThemePref(target);
+      }
+    } catch (err) {
+      themePending = null;
+      setSettingsError(String(err));
+      await resyncThemeFromBackend();
+    } finally {
+      themeSaveRunner = null;
+    }
+  })();
 }
 
 /** Briefly show a transient confirmation element (e.g. "Saved", "Copied"), then fade it
