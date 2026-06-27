@@ -47,10 +47,28 @@ export it from Keychain Access as a `.p12` (with a password). You'll need:
 - the certificate password,
 - the signing identity string, e.g. `Developer ID Application: Your Name (TEAMID)`
   (`security find-identity -v -p codesigning`),
-- your Apple ID, an **app-specific password** (appleid.apple.com → Sign-In and Security),
-  and your **Team ID**.
+- your Apple ID email, an **app-specific password** for notarization (see step 3 below),
+  and your **Team ID** (the `TEAMID` in the identity string above).
 
-### 3. GitHub Actions secrets
+### 3. App-specific password (for notarization)
+
+Notarization signs in to Apple's notary service with your Apple ID via an **app-specific
+password** — a single-purpose password Apple issues so a tool can authenticate without your
+real password (and without triggering a 2FA prompt on every run). It becomes the
+`APPLE_PASSWORD` secret.
+
+1. Sign in at <https://appleid.apple.com>.
+2. Go to **Sign-In and Security → App-Specific Passwords**.
+3. Click **Generate an app-specific password** (the **+**), give it a name (e.g.
+   `helix-notarize`), and confirm with your Apple ID password.
+4. Copy the generated value — it looks like `abcd-efgh-ijkl-mnop`. **Store it now**, Apple
+   only shows it once. This is the `APPLE_PASSWORD` secret.
+
+> It is **not** your Apple ID login password, and it's separate from the certificate's
+> `.p12` export password (`APPLE_CERTIFICATE_PASSWORD`). If it ever leaks, revoke it from the
+> same page and generate a new one.
+
+### 4. GitHub Actions secrets
 
 Add these under **Settings → Secrets and variables → Actions**:
 
