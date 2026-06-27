@@ -440,6 +440,38 @@ code,
   margin-top: 12px;
 }
 
+/* Illustrated empty state (e.g. the Cleanup filter when there's nothing to clear): a
+   muted helix mark above a small "you're caught up" message. */
+.inbox-empty--art {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding-top: 56px;
+}
+
+.inbox-empty-art {
+  width: 116px;
+  height: 116px;
+  margin-bottom: 12px;
+  opacity: 0.85;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.inbox-empty-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.inbox-empty-sub {
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+
 /* Sticky, Mail-style repo section header. */
 .repo-header {
   position: sticky;

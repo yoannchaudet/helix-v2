@@ -734,11 +734,14 @@ function emptyInbox() {
         <button type="button" class="btn js-goto-settings">Open Settings</button>
       </div>`;
   }
-  return `<p class="inbox-empty">${
-    activeFilter === "cleanup"
-      ? "Nothing to clear right now."
-      : "Nothing here. Click the refresh button to sync."
-  }</p>`;
+  if (activeFilter === "cleanup") {
+    return `<div class="inbox-empty inbox-empty--art">
+        <img class="inbox-empty-art" src="/assets/helix-muted.svg" alt="" width="116" height="116" />
+        <p class="inbox-empty-title">You're all caught up.</p>
+        <p class="inbox-empty-sub">No stale subscriptions to clean.</p>
+      </div>`;
+  }
+  return `<p class="inbox-empty">Nothing here. Click the refresh button to sync.</p>`;
 }
 
 /** Render the main list for the active filter (and optional repo refinement). */
