@@ -1098,6 +1098,62 @@ code {
   background: var(--error);
 }
 
+/* ============================ Update banner ============================== */
+/* Shown atop the notifications pane when a newer release is available. */
+.update-banner {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--hairline);
+  background: rgba(124, 92, 255, 0.08);
+}
+
+.update-banner[hidden] {
+  display: none;
+}
+
+.update-banner-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.update-banner-text {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.update-banner-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.update-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--hairline);
+  overflow: hidden;
+}
+
+.update-bar[hidden] {
+  display: none;
+}
+
+.update-bar-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+
 /* Forms */
 .form {
   display: flex;
