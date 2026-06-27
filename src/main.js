@@ -1309,16 +1309,26 @@ function onMenuKeydown(e) {
   }
 }
 
-/** Close the menu when focus leaves it entirely (e.g. via AT navigation), without yanking
- *  focus back to the trigger since it has already moved on. */
-function onMenuFocusOut(e) {
+/** Close the menu when focus genuinely leaves it (e.g. VoiceOver navigating away), without
+ *  yanking focus back to the trigger since it has already moved on.
+ *
+ *  This is DEFERRED on purpose. Clicking a menu item blurs it (on macOS WKWebView a button
+ *  blurs to <body> on mousedown — `relatedTarget` is null) and fires `focusout` *before* the
+ *  item's `click`. Closing synchronously here would remove the item from the DOM, so the
+ *  click would never land on it and the action (e.g. mark-done) would be silently dropped.
+ *  By deferring, the item's own click handler runs first (it closes the menu itself); we
+ *  only close here if, a tick later, the menu is still open and focus really ended up
+ *  outside it. */
+function onMenuFocusOut() {
   if (!openMenu) return;
-  const to = e.relatedTarget;
-  if (to && openMenu.contains(to)) return; // focus moved between items — keep the menu open
-  // Focus moving to the mark-all trigger means the user clicked it to toggle the menu
-  // closed; let that click handler do it, so we don't close-then-immediately-reopen.
-  if (to && to.closest?.("#mark-all-done-btn")) return;
-  closeMenu(false);
+  const menu = openMenu;
+  setTimeout(() => {
+    // Superseded (already closed, or replaced by a reopen) — nothing to do.
+    if (openMenu !== menu) return;
+    // Focus came back into the menu (or a click re-focused an item) — keep it open.
+    if (menu.contains(document.activeElement)) return;
+    closeMenu(false);
+  }, 0);
 }
 
 /** Open a popover menu of `items` ({ label, danger?, disabled?, action }) anchored at the
