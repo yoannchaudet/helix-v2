@@ -1,6 +1,6 @@
 # Helix 🧬
 
-A personal tool for managing GitHub notifications and automating the workflows around them.
+A personal, opinionated tool for managing GitHub notifications and automating the workflows around them.
 
 > **Status:** A working MVP. A macOS desktop app built with [Tauri](https://tauri.app)
 > (Rust core + vanilla HTML/CSS UI). Local SQLite is the source of truth, so the app works
@@ -13,6 +13,19 @@ GitHub notifications are a firehose. Helix is a personal system for taming that 
 triaging what matters, ignoring what doesn't, and automating the repetitive actions that
 follow. The name is a nod to the DNA emoji 🧬 — it's the encoded "DNA" of how I manage my
 GitHub day.
+
+## An opinionated notification model
+
+Helix is deliberately opinionated about how notifications work — it does **not**
+mirror GitHub's model:
+
+- **No concept of "read."** A notification is either in your inbox or it's gone.
+  There is no read/unread state to track or manage.
+- **Nothing disappears on its own.** Notifications never auto-expire or silently
+  vanish; they stay until you act on them.
+- **Acknowledge explicitly.** The only way a notification leaves your inbox is by
+  marking it **done** — one at a time or in bulk. That's the single, deliberate
+  gesture that clears it.
 
 ## Vision
 
