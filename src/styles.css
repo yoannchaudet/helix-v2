@@ -14,8 +14,11 @@
   --muted: #59636e;
 
   --accent: #7c5cff;
-  /* AA-tuned: `--accent-strong` (and the status solids below) are used as small text on
-     light tints (badges/state pills), so they're darkened just enough to clear 4.5:1.
+  /* AA-tuned: `--accent-strong` and the status solids (`--success`, `--pending`,
+     `--error`) are used as small text on light tints (badge/state pills), so they're
+     darkened just enough to clear 4.5:1. NOTE: these solids are intentionally darker
+     than their matching `*-rgb` channels — the channels stay at the base hue so the
+     `rgba(var(--x-rgb), a)` tint *backgrounds* are unchanged; only the text darkens.
      `--accent-fill` is the background for filled accent buttons with white text. */
   --accent-strong: #6242eb;
   --accent-rgb: 124, 92, 255;
@@ -1547,17 +1550,19 @@ input[type="text"]:focus {
 }
 
 /* Respect the OS "reduce motion" setting. We don't remove feedback — state still
-   changes — we just drop the animation/transition movement. Near-zero (not 0)
-   durations keep any animationend/transitionend listeners firing, and
-   `animation-iteration-count: 1` stops the infinite spin/pulse loops while letting
-   each animation settle on its final frame. */
+   changes — we just drop the animation/transition movement. Durations are collapsed to a
+   near-instant 0.01ms (rather than 0) and delays zeroed, so motion is gone but any future
+   animationend/transitionend listeners still fire; `animation-iteration-count: 1` stops
+   the infinite spin/pulse loops on their final frame. */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
-    animation-duration: 0.001ms !important;
+    animation-duration: 0.01ms !important;
+    animation-delay: 0s !important;
     animation-iteration-count: 1 !important;
-    transition-duration: 0.001ms !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0s !important;
     scroll-behavior: auto !important;
   }
 
