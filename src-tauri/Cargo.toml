@@ -29,6 +29,7 @@ apple-native-keyring-store = { version = "1", features = ["keychain"] }
 reqwest = { version = "0.13", features = ["json"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+tauri-plugin-updater = "2.10.1"
 # Translucent NSVisualEffect sidebar — the core "native macOS" cue (vibrant sidebar
 # behind an opaque content pane). macOS-only; gated so other targets don't pull it.
 # Pinned to 0.6 to match the version Tauri already depends on (avoids building two
