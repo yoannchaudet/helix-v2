@@ -1319,8 +1319,12 @@ function onMenuKeydown(e) {
  *  By deferring, the item's own click handler runs first (it closes the menu itself); we
  *  only close here if, a tick later, the menu is still open and focus really ended up
  *  outside it. */
-function onMenuFocusOut() {
+function onMenuFocusOut(e) {
   if (!openMenu) return;
+  // Fast path: focus moved to another item *inside* the menu (arrow keys / Tab trap). No
+  // close needed, and skipping avoids queuing a timer on every keyboard navigation. Note a
+  // null `relatedTarget` (the macOS click case above) deliberately falls through to defer.
+  if (e.relatedTarget && openMenu.contains(e.relatedTarget)) return;
   const menu = openMenu;
   setTimeout(() => {
     // Superseded (already closed, or replaced by a reopen) — nothing to do.
