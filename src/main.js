@@ -961,6 +961,8 @@ function closeMenu(restoreFocus = true) {
   openMenu.remove();
   openMenu = null;
   document.removeEventListener("keydown", onMenuKeydown, true);
+  // Reflect the collapsed state on the toolbar trigger for assistive tech.
+  $("#mark-all-done-btn")?.setAttribute("aria-expanded", "false");
   const target = menuReturnFocus;
   if (restoreFocus) {
     menuReturnFocus = null;
@@ -1378,7 +1380,11 @@ window.addEventListener("DOMContentLoaded", () => {
       closeMenu();
       return;
     }
-    confirmDone(visibleNotifications().map((n) => n.thread_id), e.currentTarget);
+    const btn = e.currentTarget;
+    confirmDone(visibleNotifications().map((n) => n.thread_id), btn);
+    // Reflect the expanded state for assistive tech (closeMenu resets it). Only when the
+    // popover actually opened (confirmDone no-ops on an empty set).
+    if (openMenu) btn.setAttribute("aria-expanded", "true");
   });
   // Dismiss the popover on any outside click or scroll. Ignore the trigger itself — its own
   // click handler toggles the popover, and closing here first (mousedown precedes click)
