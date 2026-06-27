@@ -23,7 +23,8 @@ use tauri::{Emitter, Manager, State};
 mod tuning {
     /// Max concurrent requests when resolving notification subjects in the background.
     pub const SUBJECT_RESOLUTION_POOL: usize = 8;
-    /// Max concurrent `DELETE /threads` requests when marking notifications done.
+    /// Max concurrent `DELETE /notifications/threads/{id}` requests when marking
+    /// notifications done.
     pub const MUTATION_POOL: usize = 8;
     /// Soft reserve for background subject resolution: stop before it eats below this
     /// fraction of any rate-limit bucket, leaving quota for the list fetch + mark-done.
