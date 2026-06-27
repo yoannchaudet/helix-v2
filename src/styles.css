@@ -449,6 +449,12 @@ code,
   margin-top: 12px;
 }
 
+/* Normalize paragraph margins so spacing is controlled by the container's `gap`
+   (the signed-out state uses a bare <p>, which would otherwise add default margins). */
+.inbox-empty p {
+  margin: 0;
+}
+
 .inbox-empty-art {
   width: 116px;
   height: 116px;
