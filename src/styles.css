@@ -510,25 +510,86 @@ code,
   font-weight: 600;
 }
 
+/* Reveal-on-hover "mark as done" affordance (notification rows + repo headers). Kept in
+   layout at opacity 0 so revealing it never reflows the row; focus-visible reveals it for
+   keyboard users. */
+.n-done,
+.repo-done {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0;
+  /* Inert while hidden so a click on the reserved (transparent) slot never marks a row
+     done — it's only revealed + clickable on hover or keyboard focus. */
+  pointer-events: none;
+  transition: opacity 0.12s ease, color 0.12s ease, background 0.12s ease;
+}
+
+.n-done {
+  width: 26px;
+  height: 26px;
+  margin-right: 10px;
+}
+
+.repo-done {
+  width: 22px;
+  height: 22px;
+}
+
+.n-row:hover .n-done,
+.repo-header:hover .repo-done,
+.n-done:focus-visible,
+.repo-done:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.n-done:hover,
+.repo-done:hover {
+  color: var(--success);
+  background: #f3f4f8;
+}
+
+.n-done:focus-visible,
+.repo-done:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 .n-list {
   list-style: none;
   margin: 0;
   padding: 0;
 }
 
-/* Dense rows with hairline separators. */
+/* Dense rows with hairline separators. The row is a structural flex container: the
+   openable content (`.n-open`) is the focusable "link", and `.n-done` is its sibling — so
+   no interactive control is nested inside another. */
 .n-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 7px 16px;
   border-bottom: 1px solid var(--hairline);
+}
+
+.n-open {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  padding: 7px 16px;
 }
 
 /* Rows with a resolved web URL are clickable; give them a clear, on-brand hover
    highlight (matching the context-menu / active-source treatment). */
 .n-row--openable {
-  cursor: pointer;
   transition: background 0.12s ease;
 }
 
@@ -536,7 +597,11 @@ code,
   background: var(--accent-tint);
 }
 
-.n-row--openable:focus-visible {
+.n-row--openable .n-open {
+  cursor: pointer;
+}
+
+.n-open:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
@@ -654,6 +719,14 @@ code,
   color: var(--muted);
   font-size: 0.92rem;
   padding: 24px 16px;
+}
+
+/* The inbox's initial loading state mirrors the empty state: centered in the pane rather
+   than clinging to the top. (Other `.loader` uses — account/storage cards — are unaffected.) */
+.inbox > .loader {
+  min-height: 100%;
+  box-sizing: border-box;
+  justify-content: center;
 }
 
 .spinner {
