@@ -752,7 +752,7 @@ function emptyInbox() {
   return `<div class="inbox-empty">
       <img class="inbox-empty-art" src="/assets/helix-muted.svg" alt="" width="116" height="116" />
       <p class="inbox-empty-title">You're all caught up.</p>
-      <p class="inbox-empty-sub">${sub}</p>
+      <p class="inbox-empty-sub">${escapeHtml(sub)}</p>
     </div>`;
 }
 
