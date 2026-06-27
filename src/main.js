@@ -191,6 +191,21 @@ function toast(text, kind) {
   toastTimer = setTimeout(() => el.classList.remove("toast--show"), TOAST_DISMISS_MS);
 }
 
+/** Announce a concise message to assistive tech via the visually-hidden live region.
+ *  The inbox is not itself a live region (it re-renders wholesale), so user-meaningful
+ *  transitions — filter changes, mark-done outcomes — are surfaced here instead. Re-sets
+ *  identical text by clearing first so repeated messages still announce. */
+function announce(text) {
+  const el = $("#a11y-announcer");
+  if (!el) return;
+  el.textContent = "";
+  // Re-set on the next frame: clearing then setting on a separate frame re-triggers the
+  // live region even when the text is identical to the previous announcement.
+  requestAnimationFrame(() => {
+    el.textContent = text;
+  });
+}
+
 function escapeHtml(value) {
   return String(value).replace(
     /[&<>"']/g,
@@ -734,6 +749,8 @@ function notificationRow(n) {
   const openAttrs = url
     ? ` data-url="${escapeHtml(url)}" role="link" tabindex="0"`
     : "";
+  // Contextual accessible name so each row's button isn't an indistinct "Mark as done".
+  const doneLabel = escapeHtml(`Mark "${n.subject_title}" as done`);
   return `
     <li class="${cls}" data-thread-id="${escapeHtml(n.thread_id)}">
       <div class="n-open"${openAttrs}>
@@ -744,7 +761,7 @@ function notificationRow(n) {
           <div class="n-meta"><span class="n-reason">${reason}</span> · ${escapeHtml(relTime(n.updated_at))}</div>
         </div>
       </div>
-      <button type="button" class="n-done" title="Mark as done" aria-label="Mark as done">${DONE_ICON}</button>
+      <button type="button" class="n-done" title="Mark as done" aria-label="${doneLabel}">${DONE_ICON}</button>
     </li>`;
 }
 
@@ -813,9 +830,11 @@ function repoHeader(group) {
   const counts = `<span class="repo-counts">${group.notifications.length}</span>`;
   // A natural sub-filter: clear just this repo's (filtered) notifications.
   const clear = `<button type="button" class="repo-done" data-done-repo="${group.repo_id}" title="Mark this repo's notifications as done" aria-label="Mark ${escapeHtml(group.full_name)} notifications as done">${DONE_ICON}</button>`;
+  // The repo name is an <h2> so screen-reader users can navigate the inbox by heading; it
+  // also names the group region (see `repoSection`).
   return `
     <div class="repo-header">
-      <span class="repo-name">${escapeHtml(group.full_name)}</span>
+      <h2 class="repo-name" id="repo-h-${group.repo_id}">${escapeHtml(group.full_name)}</h2>
       ${privacy}
       ${counts}
       ${clear}
@@ -824,7 +843,11 @@ function repoHeader(group) {
 
 function repoSection(group) {
   const rows = group.notifications.map(notificationRow).join("");
-  return `${repoHeader(group)}<ul class="n-list">${rows}</ul>`;
+  // `role=group` + `aria-labelledby` ties the list to its repo heading for assistive tech
+  // without creating a landmark per repo (which would be noisy with many repos).
+  return `<section class="repo-section" role="group" aria-labelledby="repo-h-${group.repo_id}">${repoHeader(
+    group,
+  )}<ul class="n-list">${rows}</ul></section>`;
 }
 
 /** Notifications in `group` matching the given type filter. */
@@ -917,6 +940,79 @@ function emptyInbox() {
     </div>`;
 }
 
+/* ------------------------------ Inbox focus ------------------------------ */
+
+/* The inbox re-renders wholesale (filter changes, sync, mark-done), which would otherwise
+ * drop keyboard focus to <body>. We capture where focus was, then restore it after the
+ * new DOM is in place — either to an explicit target (set by mark-done, since the focused
+ * row is gone) or back to the same row the user was on. */
+
+/** An explicit focus target for the *next* render, e.g. after the focused row is removed.
+ *  Shape: { threadId, part } | { selector }. Consumed (cleared) by the next renderInbox. */
+let pendingInboxFocus = null;
+
+/** Snapshot the inbox's current focus so a re-render can restore it. Returns null when
+ *  focus isn't inside the inbox (so background re-renders never steal focus). */
+function captureInboxFocus() {
+  const active = document.activeElement;
+  const inbox = $("#inbox");
+  if (!active || !inbox || !inbox.contains(active)) return null;
+  const row = active.closest(".n-row");
+  if (!row) return null;
+  return {
+    threadId: row.dataset.threadId,
+    part: active.classList.contains("n-done") ? "done" : "open",
+  };
+}
+
+/** Apply a focus target within the freshly-rendered inbox. Returns true if it landed. */
+function applyInboxFocus(target, { preventScroll = false } = {}) {
+  if (!target) return false;
+  const inbox = $("#inbox");
+  if (!inbox) return false;
+  if (target.selector) {
+    const el = $(target.selector);
+    if (el) {
+      el.focus({ preventScroll });
+      return true;
+    }
+    return false;
+  }
+  // Escape `"`/`\` for use inside the double-quoted attribute selector.
+  const safeId = String(target.threadId).replace(/["\\]/g, "\\$&");
+  const row = inbox.querySelector(`.n-row[data-thread-id="${safeId}"]`);
+  if (!row) return false;
+  // Prefer the part the user was on; fall back to whichever focusable the row has.
+  const done = row.querySelector(".n-done");
+  const open = row.querySelector(".n-open[tabindex]");
+  const el = target.part === "done" ? done || open : open || done;
+  if (!el) return false;
+  el.focus({ preventScroll });
+  return true;
+}
+
+/** Pick where focus should land after `removedIds` are removed from the current view:
+ *  the nearest surviving row after the removed block (else before it), or the inbox
+ *  container when the view empties out. Call BEFORE mutating `inboxGroups`. */
+function focusTargetAfterRemoval(removedIds) {
+  const removed = new Set(removedIds);
+  const flat = visibleNotifications();
+  const firstRemoved = flat.findIndex((n) => removed.has(n.thread_id));
+  // None of the removed threads are in the current view (e.g. the list changed while a
+  // confirm menu was open). Don't force focus anywhere — let renderInbox's preserved-focus
+  // path keep the user where they are.
+  if (firstRemoved === -1) return null;
+  const after = flat.slice(firstRemoved + 1).find((n) => !removed.has(n.thread_id));
+  const before = [...flat.slice(0, firstRemoved)]
+    .reverse()
+    .find((n) => !removed.has(n.thread_id));
+  const survivor = after || before;
+  // Nothing left to focus in the list — keep focus in a sensible place by sending it to the
+  // inbox container (made programmatically focusable in renderInbox's empty branch).
+  if (!survivor) return { selector: "#inbox" };
+  return { threadId: survivor.thread_id, part: "open" };
+}
+
 /** Render the main list for the active filter (and optional repo refinement). */
 function renderInbox() {
   const inbox = $("#inbox");
@@ -924,6 +1020,11 @@ function renderInbox() {
   title.innerHTML = activeTitleHtml();
   // The visual `›` is aria-hidden, so give the heading a spelled-out accessible name.
   title.setAttribute("aria-label", activeTitleLabel());
+  // Decide the focus target before the DOM is swapped: an explicit pending target wins,
+  // otherwise keep the user on the same row across the re-render.
+  const preserved = captureInboxFocus();
+  const focusTarget = pendingInboxFocus ?? preserved;
+  pendingInboxFocus = null;
   const groups = filteredGroups();
   // The toolbar "mark all as done" only makes sense when the active filter shows something.
   const markAll = $("#mark-all-done-btn");
@@ -932,9 +1033,28 @@ function renderInbox() {
     inbox.innerHTML = emptyInbox();
     const goto = inbox.querySelector(".js-goto-settings");
     if (goto) goto.addEventListener("click", () => showSettings(true));
+    // If focus was in the list (explicit `#inbox` target, or a now-vanished row), park it
+    // on the (now focusable) inbox container so keyboard focus isn't dropped to <body>.
+    if (focusTarget) {
+      inbox.tabIndex = -1;
+      inbox.focus({ preventScroll: focusTarget === preserved });
+    }
     return;
   }
   inbox.innerHTML = groups.map(repoSection).join("");
+  // Restore focus. An explicit pending target may scroll into view; a passive "stay on the
+  // same row" restore must not yank the scroll position during a background re-render.
+  if (focusTarget) {
+    const preventScroll = focusTarget === preserved;
+    const landed = applyInboxFocus(focusTarget, { preventScroll });
+    // The intended row is gone (e.g. removed by a background reconcile) — keep the user in
+    // the list on the first row rather than dropping focus to <body>.
+    if (!landed) {
+      inbox
+        .querySelector(".n-open[tabindex], .n-done")
+        ?.focus({ preventScroll });
+    }
+  }
 }
 
 /** Update sidebar filter/repo selection styling + the smart-filter counts. */
@@ -996,13 +1116,17 @@ function renderSidebar() {
 
   // Filter and repo are independent selections, so each is highlighted on its own.
   for (const btn of $$(".source[data-filter]")) {
-    btn.classList.toggle("source--active", btn.dataset.filter === activeFilter);
+    const active = btn.dataset.filter === activeFilter;
+    btn.classList.toggle("source--active", active);
+    // Expose the selection to assistive tech, not just via color.
+    if (active) btn.setAttribute("aria-current", "true");
+    else btn.removeAttribute("aria-current");
   }
   for (const btn of $$(".source[data-repo]")) {
-    btn.classList.toggle(
-      "source--active",
-      activeRepo != null && Number(btn.dataset.repo) === activeRepo,
-    );
+    const active = activeRepo != null && Number(btn.dataset.repo) === activeRepo;
+    btn.classList.toggle("source--active", active);
+    if (active) btn.setAttribute("aria-current", "true");
+    else btn.removeAttribute("aria-current");
   }
 }
 
@@ -1017,6 +1141,7 @@ function selectFilter(filterId) {
   showSettings(false);
   renderSidebar();
   renderInbox();
+  announceView();
 }
 
 /** Toggle the repository refinement: select it, or clear it if already active. */
@@ -1025,6 +1150,15 @@ function selectRepo(repoId) {
   showSettings(false);
   renderSidebar();
   renderInbox();
+  announceView();
+}
+
+/** Announce the current view (its spelled-out label + how many notifications it shows) to
+ *  assistive tech, since the visual heading update isn't announced on its own. */
+function announceView() {
+  const count = visibleNotifications().length;
+  const noun = count === 1 ? "notification" : "notifications";
+  announce(`${activeTitleLabel()}, ${count} ${noun}.`);
 }
 
 async function loadInbox() {
@@ -1076,6 +1210,9 @@ async function markDone(threadIds) {
   }
   const ids = [...new Set(threadIds)];
   if (!ids.length) return;
+  // Where should focus go once these rows vanish? Compute against the current view before
+  // we mutate it, so keyboard users aren't dropped to <body> when their row is removed.
+  const focusTarget = focusTargetAfterRemoval(ids);
   // Optimistic: drop the rows locally so they disappear immediately.
   const idSet = new Set(ids);
   inboxGroups = inboxGroups
@@ -1091,7 +1228,13 @@ async function markDone(threadIds) {
     activeRepo = null;
   }
   renderSidebar();
+  pendingInboxFocus = focusTarget;
   renderInbox();
+  announce(
+    ids.length === 1
+      ? "Notification marked as done."
+      : `${ids.length} notifications marked as done.`,
+  );
   try {
     const result = await invoke("mark_threads_done", { threadIds: ids });
     reportMutation(result, "marked done");
@@ -1101,6 +1244,10 @@ async function markDone(threadIds) {
     setSyncProgress(String(err), "error");
   }
   await loadSyncStatus();
+  // The authoritative reload re-renders again. Only keep focus pinned through it if the
+  // user is still in the list (they may have Tabbed away during the round-trip); pin to
+  // wherever they actually are now so an arrow-key move since the optimistic render sticks.
+  pendingInboxFocus = captureInboxFocus();
   await loadInbox();
 }
 
@@ -1116,8 +1263,12 @@ let menuReturnFocus = null;
  *  pass `restoreFocus = false` when immediately reopening, to avoid a focus flicker. */
 function closeMenu(restoreFocus = true) {
   if (!openMenu) return;
-  openMenu.remove();
+  const menu = openMenu;
+  // Clear the handle first so the focusout fired while detaching the menu is a no-op
+  // (removing a focused element blurs it synchronously, which would re-enter here).
   openMenu = null;
+  menu.removeEventListener("focusout", onMenuFocusOut);
+  menu.remove();
   document.removeEventListener("keydown", onMenuKeydown, true);
   // Reflect the collapsed state on the toolbar trigger for assistive tech.
   $("#mark-all-done-btn")?.setAttribute("aria-expanded", "false");
@@ -1145,10 +1296,29 @@ function onMenuKeydown(e) {
     next = items[idx <= 0 ? items.length - 1 : idx - 1];
   else if (e.key === "Home") next = items[0];
   else if (e.key === "End") next = items[items.length - 1];
+  else if (e.key === "Tab") {
+    // Trap Tab within the popover (wrapping at the ends) so keyboard focus can't escape to
+    // the page behind it; Escape / outside-click / an item activation are the ways out.
+    e.preventDefault();
+    const step = e.shiftKey ? -1 : 1;
+    next = items[(idx < 0 ? 0 : idx + step + items.length) % items.length];
+  }
   if (next) {
     e.preventDefault();
     next.focus();
   }
+}
+
+/** Close the menu when focus leaves it entirely (e.g. via AT navigation), without yanking
+ *  focus back to the trigger since it has already moved on. */
+function onMenuFocusOut(e) {
+  if (!openMenu) return;
+  const to = e.relatedTarget;
+  if (to && openMenu.contains(to)) return; // focus moved between items — keep the menu open
+  // Focus moving to the mark-all trigger means the user clicked it to toggle the menu
+  // closed; let that click handler do it, so we don't close-then-immediately-reopen.
+  if (to && to.closest?.("#mark-all-done-btn")) return;
+  closeMenu(false);
 }
 
 /** Open a popover menu of `items` ({ label, danger?, disabled?, action }) anchored at the
@@ -1200,6 +1370,9 @@ function openContextMenu(x, y, items) {
   menu.style.top = `${Math.max(8, top)}px`;
   openMenu = menu;
   document.addEventListener("keydown", onMenuKeydown, true);
+  // Close if focus leaves the popover entirely (Tab is trapped, but AT or programmatic
+  // moves can still pull focus out).
+  menu.addEventListener("focusout", onMenuFocusOut);
   // Move focus into the menu so keyboard users land in the popover (the trigger, e.g. the
   // ••• button, otherwise keeps focus and Tab never reaches it). Escape closes the menu.
   menu.querySelector(".context-menu-item:not(:disabled)")?.focus();
