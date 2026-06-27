@@ -144,7 +144,8 @@ mod tests {
     }
 
     #[test]
-    fn window_size_round_trip() {        let conn = mem_conn();
+    fn window_size_round_trip() {
+        let conn = mem_conn();
         // Unset until both dimensions are stored.
         assert_eq!(get_window_size(&conn).unwrap(), None);
         set_window_size(&conn, 1024, 768).unwrap();

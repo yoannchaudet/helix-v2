@@ -78,6 +78,18 @@ if (darkMql.addEventListener) {
   darkMql.addListener(onColorSchemeChange);
 }
 
+/** Paint the chosen theme immediately, then persist it (independent of other settings,
+ *  so a mid-edit poll interval can't block it) and mirror to localStorage on success. */
+async function persistTheme(pref) {
+  paintThemePref(pref);
+  try {
+    await invoke("set_theme", { theme: pref });
+    mirrorThemePref(pref);
+  } catch (err) {
+    setSettingsError(String(err));
+  }
+}
+
 /** Briefly show a transient confirmation element (e.g. "Saved", "Copied"), then fade it
  * out. Reuses the `.srow-flash` styling. Pass `kind = "error"` for a red message. */
 function flash(el, text, kind) {
@@ -1301,18 +1313,12 @@ async function applySettings() {
   }
   clearSettingsError();
 
-  // The theme picker is part of the same settings payload; read the current choice.
-  const theme =
-    document.querySelector('input[name="theme"]:checked')?.value ?? themePref;
-
   try {
-    const s = await invoke("save_settings", { pollIntervalS, theme });
+    const s = await invoke("save_settings", { pollIntervalS });
     // Ignore a stale response superseded by a newer apply, so it can't clobber the
     // current UI state or show an outdated flash.
     if (seq !== settingsApplySeq) return;
     flash($("#settings-flash"), "Saved");
-    // Now that the theme is persisted, mirror it for the next launch's no-FOUC script.
-    mirrorThemePref(s.theme);
     // Adopt the new cadence immediately and restart the countdown so the change is
     // reflected without waiting out the previous interval.
     if (s.poll_interval_s !== pollIntervalSeconds) {
@@ -1607,13 +1613,10 @@ window.addEventListener("DOMContentLoaded", () => {
     applySettings();
   });
 
-  // Theme picker: paint the webview theme optimistically for instant feedback, then
-  // persist (which mirrors to localStorage on success and updates the native chrome).
+  // Theme picker: paint + persist independently of the rest of the settings form, so
+  // toggling theme always saves even if another field (e.g. poll interval) is mid-edit.
   for (const input of $$('input[name="theme"]')) {
-    input.addEventListener("change", () => {
-      paintThemePref(input.value);
-      applySettings();
-    });
+    input.addEventListener("change", () => persistTheme(input.value));
   }
   for (const btn of $$(".js-sync-btn")) btn.addEventListener("click", syncNow);
 

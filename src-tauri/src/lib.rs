@@ -149,13 +149,10 @@ fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
     })
 }
 
-/// Persist user-facing settings. Rejects a polling interval below the minimum or an
-/// unrecognized theme, then applies the theme to the native window chrome.
+/// Persist user-facing settings. Rejects a polling interval below the minimum.
 #[tauri::command]
 fn save_settings(
     poll_interval_s: i64,
-    theme: String,
-    window: tauri::WebviewWindow,
     state: State<'_, AppState>,
 ) -> Result<Settings, String> {
     if poll_interval_s < settings::MIN_POLL_INTERVAL_S {
@@ -164,22 +161,34 @@ fn save_settings(
             settings::MIN_POLL_INTERVAL_S
         ));
     }
+    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+    settings::set_poll_interval(&conn, poll_interval_s).map_err(|e| e.to_string())?;
+    Ok(Settings {
+        poll_interval_s,
+        github_login: settings::get_string(&conn, settings::KEY_GITHUB_LOGIN)
+            .map_err(|e| e.to_string())?,
+        theme: settings::get_theme(&conn).map_err(|e| e.to_string())?,
+    })
+}
+
+/// Persist the appearance preference and apply it to the native window chrome. Kept
+/// separate from `save_settings` so an unrelated invalid field (e.g. a mid-edit poll
+/// interval) can never block a theme change.
+#[tauri::command]
+fn set_theme(
+    theme: String,
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     if !settings::is_valid_theme(&theme) {
         return Err(format!("Unknown theme: {theme}"));
     }
     {
         let conn = state.db.0.lock().map_err(|e| e.to_string())?;
-        settings::set_poll_interval(&conn, poll_interval_s).map_err(|e| e.to_string())?;
         settings::set_string(&conn, settings::KEY_THEME, &theme).map_err(|e| e.to_string())?;
     }
     apply_window_theme(&window, &theme);
-    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
-    Ok(Settings {
-        poll_interval_s,
-        github_login: settings::get_string(&conn, settings::KEY_GITHUB_LOGIN)
-            .map_err(|e| e.to_string())?,
-        theme,
-    })
+    Ok(())
 }
 
 /// Result of a successful sync, returned to the caller and emitted as `sync:done`.
@@ -847,6 +856,7 @@ pub fn run() {
             sign_out,
             get_settings,
             save_settings,
+            set_theme,
             sync_now,
             sync_status,
             list_inbox,

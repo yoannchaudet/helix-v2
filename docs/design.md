@@ -298,8 +298,9 @@ column, no marketing hero):
   `data-theme` on the root; an inline `<head>` script mirrors the pref via `localStorage`
   to paint the correct theme before first frame (no flash).
 - The native macOS window chrome (title bar + vibrancy) is matched to the preference via
-  `Window::set_theme` — applied at launch in `setup()` and on every save. `system` leaves
-  the window following the OS appearance.
+  `Window::set_theme` — applied at launch in `setup()` and by a dedicated `set_theme`
+  command on each change (kept separate from `save_settings` so an unrelated invalid field
+  can't block a theme change). `system` leaves the window following the OS appearance.
 
 ### Conventions (see AGENT.md)
 - **Vanilla CSS + modern HTML**, no heavy framework. System font stack only.
