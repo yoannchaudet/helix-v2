@@ -440,8 +440,8 @@ code,
   margin-top: 12px;
 }
 
-/* Illustrated empty state (e.g. the Cleanup filter when there's nothing to clear): a
-   muted helix mark above a small "you're caught up" message. */
+/* Illustrated empty state (any authenticated view with nothing to show — every filter):
+   a muted helix mark above a small "you're caught up" message. */
 .inbox-empty--art {
   display: flex;
   flex-direction: column;
