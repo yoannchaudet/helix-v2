@@ -75,6 +75,14 @@ Run the Rust tests (e.g. the SQLite bootstrap) with:
 cd src-tauri && cargo test
 ```
 
+Run the frontend unit tests (the pure logic in `src/js/` — filtering, cleanup
+candidacy, sorting, time formatting) with Node's built-in test runner (no extra
+dependencies):
+
+```sh
+npm test
+```
+
 ### Token storage (macOS)
 
 Where Helix keeps your GitHub PAT depends on the build:
