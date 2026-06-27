@@ -430,14 +430,51 @@ code,
 }
 
 .inbox-empty {
+  /* Fill the scroll area and center the message both axes, so an empty view sits in the
+     middle of the pane rather than clinging to the top. */
+  min-height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
   color: var(--muted);
   font-size: 0.92rem;
-  padding: 40px 24px;
+  padding: 24px;
   text-align: center;
 }
 
 .inbox-empty .btn {
   margin-top: 12px;
+}
+
+/* Normalize paragraph margins so spacing is controlled by the container's `gap`
+   (the signed-out state uses a bare <p>, which would otherwise add default margins). */
+.inbox-empty p {
+  margin: 0;
+}
+
+.inbox-empty-art {
+  width: 116px;
+  height: 116px;
+  margin-bottom: 12px;
+  opacity: 0.85;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.inbox-empty-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.inbox-empty-sub {
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--muted);
 }
 
 /* Sticky, Mail-style repo section header. */
