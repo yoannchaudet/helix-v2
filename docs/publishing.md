@@ -97,12 +97,19 @@ The release workflow declares `environment: release`, so it can read these; CI b
 
 ## Cutting a release
 
-1. **Bump the version** in [`src-tauri/tauri.conf.json`](../src-tauri/tauri.conf.json)
-   (and `src-tauri/Cargo.toml` to match). The tag must equal this version with a leading
-   `v` — e.g. config `0.2.0` → tag `v0.2.0`.
+1. **Bump the version** to the new `X.Y.Z` in three files:
+   - [`src-tauri/tauri.conf.json`](../src-tauri/tauri.conf.json) → `"version"` — the
+     **authoritative** app version (drives the bundle name and the updater version).
+   - [`src-tauri/Cargo.toml`](../src-tauri/Cargo.toml) → `version` — keep it in sync.
+   - [`src-tauri/Cargo.lock`](../src-tauri/Cargo.lock) — it records the `helix` package
+     version, so refresh it by running `cargo build` (or `cargo update -p helix`) and commit
+     the change.
+
+   The git tag must equal this version with a leading `v` (config `0.2.0` → tag `v0.2.0`).
 2. Commit and merge to `main`.
-3. **Tag and push:**
+3. **Tag and push** — this is what kicks off the release (replace `0.2.0`):
    ```sh
+   git checkout main && git pull
    git tag v0.2.0
    git push origin v0.2.0
    ```
@@ -111,8 +118,10 @@ The release workflow declares `environment: release`, so it can read these; CI b
    `release` environment, the run waits for your approval before it starts.)
 5. **Review the draft**, edit the notes, then **publish** it.
 
-> The in-app updater only sees **published, non-draft, non-prerelease** releases (the
-> endpoint resolves `releases/latest`). Nothing updates until you publish.
+> Don't create the release/tag from the GitHub UI — push the git tag; the workflow creates
+> the draft Release itself. The in-app updater only sees **published, non-draft,
+> non-prerelease** releases (the endpoint resolves `releases/latest`), so nothing updates
+> until you publish. To abort, delete the draft and the tag: `git push origin :v0.2.0`.
 
 ## How auto-update reaches users
 
