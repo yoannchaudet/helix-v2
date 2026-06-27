@@ -79,13 +79,19 @@ if (darkMql.addEventListener) {
 }
 
 /** Paint the chosen theme immediately, then persist it (independent of other settings,
- *  so a mid-edit poll interval can't block it) and mirror to localStorage on success. */
+ *  so a mid-edit poll interval can't block it) and mirror to localStorage on success.
+ *  On failure, roll the optimistic paint and radio selection back to the persisted value
+ *  so the UI never shows a theme that wasn't saved. */
 async function persistTheme(pref) {
+  const prev = themePref;
   paintThemePref(pref);
   try {
     await invoke("set_theme", { theme: pref });
     mirrorThemePref(pref);
   } catch (err) {
+    paintThemePref(prev);
+    const prevInput = $(`input[name="theme"][value="${prev}"]`);
+    if (prevInput) prevInput.checked = true;
     setSettingsError(String(err));
   }
 }

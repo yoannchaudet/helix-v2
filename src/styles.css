@@ -89,8 +89,8 @@
   --success-rgb: 80, 250, 123;
   --pending: #f1fa8c;
   --pending-rgb: 241, 250, 140;
-  --error: #ff6e6e;
-  --error-rgb: 255, 85, 85;
+  --error: #ff8585;
+  --error-rgb: 255, 133, 133;
   --neutral-rgb: 154, 163, 178;
 
   --surface-hover: #3c3f52;
