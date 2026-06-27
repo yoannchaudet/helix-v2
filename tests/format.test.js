@@ -1,4 +1,4 @@
-import { test, mock } from "node:test";
+import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { fmtTimestamp, relTime } from "../src/js/format.js";
@@ -31,16 +31,18 @@ test("fmtTimestamp: a valid timestamp is rendered via Date.toLocaleString", (t) 
 
 /* ------------------------------------ relTime ----------------------------------- */
 
-/** Run `fn` with Date.now() pinned to a fixed instant so relative-time boundaries are
- *  deterministic. `new Date(<specific value>)` is unaffected by the mock, so parsing the
- *  input timestamps still works normally. */
+/** Run `fn` with `Date.now()` pinned to a fixed instant so relative-time boundaries are
+ *  deterministic. Stubs `Date.now` directly (which is all `relTime` reads) rather than the
+ *  newer `node:test` timer mocking, for portability; `new Date(<specific iso>)` parsing is
+ *  untouched. */
 function atFixedNow(fn) {
   const now = new Date("2020-06-15T12:00:00Z").getTime();
-  mock.timers.enable({ apis: ["Date"], now });
+  const realNow = Date.now;
+  Date.now = () => now;
   try {
     fn(now);
   } finally {
-    mock.timers.reset();
+    Date.now = realNow;
   }
 }
 
