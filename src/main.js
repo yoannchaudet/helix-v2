@@ -220,6 +220,44 @@ function escapeHtml(value) {
   );
 }
 
+/** Copy `text` to the clipboard, returning whether it succeeded. Tries the async Clipboard
+ *  API first, then falls back to a hidden-textarea `execCommand("copy")` — the async API is
+ *  unavailable/blocked in the macOS WKWebView Tauri uses, so the fallback is what actually
+ *  runs there. */
+async function copyText(text) {
+  text = String(text);
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Fall through to the execCommand path below.
+  }
+  // Selecting the textarea steals focus; restore it afterwards so keyboard/AT users aren't
+  // dropped to <body> (the async Clipboard path doesn't move focus).
+  const prevFocus = document.activeElement;
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    // Keep it out of view and inert, but selectable so `execCommand("copy")` has a target.
+    ta.setAttribute("readonly", "");
+    ta.style.cssText =
+      "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;pointer-events:none";
+    document.body.appendChild(ta);
+    try {
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      return document.execCommand("copy");
+    } finally {
+      ta.remove();
+      if (prevFocus instanceof HTMLElement) prevFocus.focus();
+    }
+  } catch {
+    return false;
+  }
+}
+
 /* ----------------------------- Local storage ----------------------------- */
 
 async function loadStorage() {
@@ -257,11 +295,9 @@ async function loadStorage() {
       });
     });
     const copyPath = async () => {
-      try {
-        await navigator.clipboard.writeText(path);
+      if (await copyText(path)) {
         flash($("#db-copy-flash"), "Copied");
-      } catch (err) {
-        console.error(err);
+      } else {
         flash($("#db-copy-flash"), "Copy failed", "error");
       }
     };
@@ -1309,16 +1345,24 @@ function onMenuKeydown(e) {
   }
 }
 
-/** Close the menu when focus leaves it entirely (e.g. via AT navigation), without yanking
- *  focus back to the trigger since it has already moved on. */
+/** Close the menu when focus genuinely moves to another element outside it (e.g. VoiceOver
+ *  navigating to a different control). Deliberately ignores a null `relatedTarget`: on macOS
+ *  WKWebView a <button> blurs to <body> on **mousedown** — firing `focusout` BEFORE its
+ *  `click` — so closing on that would remove the item and swallow the click (the action
+ *  would never run). Plain outside clicks are dismissed by the document `mousedown` listener,
+ *  and Escape / scroll / window-blur also close the menu. */
 function onMenuFocusOut(e) {
   if (!openMenu) return;
   const to = e.relatedTarget;
-  if (to && openMenu.contains(to)) return; // focus moved between items — keep the menu open
+  if (!to) return; // focus fell to <body> (incl. the WKWebView mousedown blur) — keep open
+  if (openMenu.contains(to)) return; // moved between items (arrow keys / Tab trap) — keep open
   // Focus moving to the mark-all trigger means the user clicked it to toggle the menu
   // closed; let that click handler do it, so we don't close-then-immediately-reopen.
-  if (to && to.closest?.("#mark-all-done-btn")) return;
+  if (to.closest?.("#mark-all-done-btn")) return;
   closeMenu(false);
+  // Focus has already left for good, so drop the pre-menu focus reference rather than
+  // holding a stale node until the next menu opens.
+  menuReturnFocus = null;
 }
 
 /** Open a popover menu of `items` ({ label, danger?, disabled?, action }) anchored at the
@@ -1390,11 +1434,10 @@ function openNotification(url) {
 /** Copy a notification's subject URL to the clipboard. */
 async function copyNotificationUrl(url) {
   if (!url) return;
-  try {
-    await navigator.clipboard.writeText(url);
+  if (await copyText(url)) {
     toast("Copied URL");
-  } catch (err) {
-    console.error(`failed to copy ${url}: ${err}`);
+  } else {
+    console.error(`failed to copy ${url}`);
     toast("Copy failed", "error");
   }
 }
