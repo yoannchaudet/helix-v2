@@ -28,20 +28,20 @@ reconciles with GitHub over the network.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                        Tauri App (macOS)                     │
-│                                                              │
+│                      Tauri App (macOS)                      │
+│                                                             │
 │  ┌──────────────────────┐        ┌────────────────────────┐ │
-│  │   Web UI (webview)    │  IPC   │     Rust core          │ │
-│  │  vanilla HTML/CSS/JS  │ <────> │  (Tauri commands)      │ │
-│  │  - notifications view │ invoke │  - sync engine         │ │
-│  │  - settings view      │ events │  - GitHub REST client  │ │
-│  │  - live state/loading │        │  - SQLite (rusqlite)   │ │
+│  │   Web UI (webview)   │  IPC   │       Rust core        │ │
+│  │ vanilla HTML/CSS/JS  │ <────> │    (Tauri commands)    │ │
+│  │  - notifications view│ invoke │  - sync engine         │ │
+│  │  - settings view     │ events │  - GitHub REST client  │ │
+│  │  - live state/loading│        │  - SQLite (rusqlite)   │ │
 │  └──────────────────────┘        │  - Keychain (keyring)  │ │
-│                                   └───────────┬────────────┘ │
+│                                  └────────────┬───────────┘ │
 └───────────────────────────────────────────────┼─────────────┘
-                                                 │ HTTPS (REST)
-                                                 ▼
-                                        api.github.com
+                                                │ HTTPS (REST)
+                                                ▼
+                                         api.github.com
 ```
 
 - **UI layer (webview):** vanilla HTML + modern CSS, minimal JS. Renders entirely from
