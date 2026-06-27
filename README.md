@@ -46,6 +46,9 @@ mirror GitHub's model:
   visible/filtered set from the toolbar, with optimistic local updates and per-thread
   failure reporting.
 - **API rate-limit visibility** — per-bucket usage bars in Settings.
+- **Light & dark themes** — a Dracula-inspired dark mode; choose System (default),
+  Light, or Dark in Settings. System follows your macOS appearance live, and the
+  native window chrome switches with it.
 - **Live, color-coded feedback** — every sync and action shows progress; 🟢 success,
   🟡 pending, 🔴 error.
 

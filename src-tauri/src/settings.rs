@@ -12,12 +12,32 @@ use rusqlite::{Connection, OptionalExtension};
 pub const KEY_GITHUB_LOGIN: &str = "github_login";
 pub const KEY_WINDOW_WIDTH: &str = "window_width";
 pub const KEY_WINDOW_HEIGHT: &str = "window_height";
+/// Appearance preference: `system` (default), `light`, or `dark`.
+pub const KEY_THEME: &str = "theme";
 /// Dev-only: the PAT stored *unencrypted* in SQLite for debug builds (see `auth.rs`).
 /// Release builds keep the PAT in the Keychain and never use this key.
 pub const KEY_DEV_GITHUB_PAT: &str = "dev_github_pat";
 
 /// Lower bound for the polling interval, to avoid hammering the API.
 pub const MIN_POLL_INTERVAL_S: i64 = 10;
+
+/// Default appearance preference when none is stored.
+pub const DEFAULT_THEME: &str = "system";
+
+/// The accepted appearance preferences.
+pub const THEMES: [&str; 3] = ["system", "light", "dark"];
+
+/// Whether `value` is a recognized appearance preference.
+pub fn is_valid_theme(value: &str) -> bool {
+    THEMES.contains(&value)
+}
+
+/// Current appearance preference, defaulting to `system` when unset or invalid.
+pub fn get_theme(conn: &Connection) -> rusqlite::Result<String> {
+    Ok(get_string(conn, KEY_THEME)?
+        .filter(|v| is_valid_theme(v))
+        .unwrap_or_else(|| DEFAULT_THEME.to_string()))
+}
 
 /// Read a string setting, or `None` if unset.
 pub fn get_string(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
@@ -124,8 +144,7 @@ mod tests {
     }
 
     #[test]
-    fn window_size_round_trip() {
-        let conn = mem_conn();
+    fn window_size_round_trip() {        let conn = mem_conn();
         // Unset until both dimensions are stored.
         assert_eq!(get_window_size(&conn).unwrap(), None);
         set_window_size(&conn, 1024, 768).unwrap();
@@ -137,5 +156,24 @@ mod tests {
         // A non-numeric stored value is treated as unset.
         set_string(&conn, KEY_WINDOW_WIDTH, "garbage").unwrap();
         assert_eq!(get_window_size(&conn).unwrap(), None);
+    }
+
+    #[test]
+    fn theme_defaults_validates_and_round_trips() {
+        let conn = mem_conn();
+        // Defaults to `system` when unset.
+        assert_eq!(get_theme(&conn).unwrap(), "system");
+
+        // Round-trips each valid value.
+        for theme in THEMES {
+            assert!(is_valid_theme(theme));
+            set_string(&conn, KEY_THEME, theme).unwrap();
+            assert_eq!(get_theme(&conn).unwrap(), theme);
+        }
+
+        // An unrecognized stored value falls back to the default rather than leaking through.
+        assert!(!is_valid_theme("solarized"));
+        set_string(&conn, KEY_THEME, "solarized").unwrap();
+        assert_eq!(get_theme(&conn).unwrap(), "system");
     }
 }

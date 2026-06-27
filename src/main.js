@@ -33,6 +33,51 @@ let pollIntervalSeconds = 60;
 /** Seconds elapsed since the last sync; reset to 0 after every sync. */
 let pollElapsed = 0;
 
+/* ----------------------------- Theme state ------------------------------- */
+
+/** Appearance preference: "system" | "light" | "dark". Source of truth is SQLite
+ *  (loaded via get_settings); mirrored to localStorage for the no-FOUC head script. */
+let themePref = "system";
+const darkMql = window.matchMedia("(prefers-color-scheme: dark)");
+
+/** Resolve a preference to the concrete theme to paint ("light" | "dark"). */
+function resolveTheme(pref) {
+  if (pref === "dark" || pref === "light") return pref;
+  return darkMql.matches ? "dark" : "light";
+}
+
+/** Paint the webview for a preference (data-theme + module state) without persisting.
+ *  Used for optimistic feedback before a save round-trips. */
+function paintThemePref(pref) {
+  themePref = pref;
+  document.documentElement.dataset.theme = resolveTheme(pref);
+}
+
+/** Mirror the preference to localStorage for the no-FOUC head script. Only called once
+ *  the value is known to match SQLite (on load or after a successful save), so the cache
+ *  never diverges from the persisted source of truth. */
+function mirrorThemePref(pref) {
+  try {
+    localStorage.setItem("helix-theme", pref);
+  } catch (e) {
+    /* localStorage unavailable — the setting still persists in SQLite. */
+  }
+}
+
+// In "system" mode, follow live OS appearance changes. `addEventListener` on a
+// MediaQueryList is unavailable on the oldest supported WebKit (macOS 10.15 / Safari
+// 13), so fall back to the deprecated `addListener`.
+function onColorSchemeChange() {
+  if (themePref === "system") {
+    document.documentElement.dataset.theme = resolveTheme("system");
+  }
+}
+if (darkMql.addEventListener) {
+  darkMql.addEventListener("change", onColorSchemeChange);
+} else if (darkMql.addListener) {
+  darkMql.addListener(onColorSchemeChange);
+}
+
 /** Briefly show a transient confirmation element (e.g. "Saved", "Copied"), then fade it
  * out. Reuses the `.srow-flash` styling. Pass `kind = "error"` for a red message. */
 function flash(el, text, kind) {
@@ -1217,6 +1262,10 @@ async function loadSettings() {
     const s = await invoke("get_settings");
     $("#poll-interval").value = s.poll_interval_s;
     pollIntervalSeconds = s.poll_interval_s;
+    const themeInput = $(`input[name="theme"][value="${s.theme}"]`);
+    if (themeInput) themeInput.checked = true;
+    paintThemePref(s.theme);
+    mirrorThemePref(s.theme);
     clearSettingsError();
   } catch (err) {
     setSettingsError(String(err));
@@ -1238,6 +1287,10 @@ function clearSettingsError() {
 
 /** Auto-apply: read the current controls, validate, persist, and confirm transiently. */
 async function applySettings() {
+  // Bump the sequence first so that even an invalid attempt supersedes any older
+  // in-flight save — its late response must not flash "Saved" or clear this error.
+  const seq = ++settingsApplySeq;
+
   const pollIntervalS = Number.parseInt($("#poll-interval").value, 10);
 
   // Guard against NaN / out-of-range input before invoking the backend (NaN would
@@ -1248,13 +1301,18 @@ async function applySettings() {
   }
   clearSettingsError();
 
-  const seq = ++settingsApplySeq;
+  // The theme picker is part of the same settings payload; read the current choice.
+  const theme =
+    document.querySelector('input[name="theme"]:checked')?.value ?? themePref;
+
   try {
-    const s = await invoke("save_settings", { pollIntervalS });
+    const s = await invoke("save_settings", { pollIntervalS, theme });
     // Ignore a stale response superseded by a newer apply, so it can't clobber the
     // current UI state or show an outdated flash.
     if (seq !== settingsApplySeq) return;
     flash($("#settings-flash"), "Saved");
+    // Now that the theme is persisted, mirror it for the next launch's no-FOUC script.
+    mirrorThemePref(s.theme);
     // Adopt the new cadence immediately and restart the countdown so the change is
     // reflected without waiting out the previous interval.
     if (s.poll_interval_s !== pollIntervalSeconds) {
@@ -1548,6 +1606,15 @@ window.addEventListener("DOMContentLoaded", () => {
     clearTimeout(settingsDebounce);
     applySettings();
   });
+
+  // Theme picker: paint the webview theme optimistically for instant feedback, then
+  // persist (which mirrors to localStorage on success and updates the native chrome).
+  for (const input of $$('input[name="theme"]')) {
+    input.addEventListener("change", () => {
+      paintThemePref(input.value);
+      applySettings();
+    });
+  }
   for (const btn of $$(".js-sync-btn")) btn.addEventListener("click", syncNow);
 
   initSidebarResize();
