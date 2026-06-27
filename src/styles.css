@@ -535,6 +535,11 @@ code,
   margin-top: 1px;
   color: var(--muted);
   font-size: 0.76rem;
+}
+
+/* Only the reason is title-cased (e.g. "Review Requested"); the relative timestamp keeps
+   its natural casing ("9h ago", "just now"). */
+.n-reason {
   text-transform: capitalize;
 }
 

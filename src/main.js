@@ -615,7 +615,7 @@ function notificationRow(n) {
       <div class="n-main">
         <div class="n-title">${number}${escapeHtml(n.subject_title)}</div>
         ${stateLine}
-        <div class="n-meta">${reason} · ${escapeHtml(relTime(n.updated_at))}</div>
+        <div class="n-meta"><span class="n-reason">${reason}</span> · ${escapeHtml(relTime(n.updated_at))}</div>
       </div>
     </li>`;
 }
