@@ -22,6 +22,9 @@ jobs:
   release:
     name: Build, sign, notarize & publish
     runs-on: macos-latest
+    # Signing + notarization secrets live in the protected `release` environment (restricted
+    # to version tags), so only a tagged release can read them — routine CI never can.
+    environment: release
 
     steps:
       - name: Check out repository

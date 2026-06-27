@@ -50,9 +50,17 @@ export it from Keychain Access as a `.p12` (with a password). You'll need:
 - your Apple ID, an **app-specific password** (appleid.apple.com → Sign-In and Security),
   and your **Team ID**.
 
-### 3. GitHub Actions secrets
+### 3. GitHub Actions secrets (a protected `release` environment)
 
-Add these under **Settings → Secrets and variables → Actions**:
+The signing/notarization secrets are sensitive, so keep them out of routine CI: store them
+in a **GitHub Environment** named `release` (not repository secrets), readable only by the
+release workflow.
+
+1. **Settings → Environments → New environment** → name it **`release`**.
+2. Under **Deployment branches and tags**, choose **Selected branches and tags** and add a
+   rule **`v*`** of type **Tag** — so the environment (and its secrets) is only usable on a
+   version tag. Optionally add a **required reviewer** to approve each release.
+3. Add these as **environment secrets** of `release` (Environment → *Add secret*):
 
 | Secret | Purpose |
 | ------ | ------- |
@@ -64,6 +72,10 @@ Add these under **Settings → Secrets and variables → Actions**:
 | `APPLE_ID` | Your Apple ID email |
 | `APPLE_PASSWORD` | App-specific password for notarization |
 | `APPLE_TEAM_ID` | Your Apple Developer Team ID |
+
+The release workflow declares `environment: release`, so it can read these; CI builds with
+`--no-bundle` and never needs the signing key. (If you previously added these as
+*repository* secrets, delete those copies so they're only in the `release` environment.)
 
 ## Cutting a release
 
@@ -77,7 +89,8 @@ Add these under **Settings → Secrets and variables → Actions**:
    git push origin v0.2.0
    ```
 4. The **Release** workflow builds, signs, notarizes, and creates a **draft** GitHub
-   Release with the `.dmg` + updater assets.
+   Release with the `.dmg` + updater assets. (If you added a required reviewer to the
+   `release` environment, the run waits for your approval before it starts.)
 5. **Review the draft**, edit the notes, then **publish** it.
 
 > The in-app updater only sees **published, non-draft, non-prerelease** releases (the
