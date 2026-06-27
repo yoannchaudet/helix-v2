@@ -991,8 +991,8 @@ function applyInboxFocus(target, { preventScroll = false } = {}) {
 }
 
 /** Pick where focus should land after `removedIds` are removed from the current view:
- *  the nearest surviving row after the removed block (else before it), or the toolbar
- *  when the view empties out. Call BEFORE mutating `inboxGroups`. */
+ *  the nearest surviving row after the removed block (else before it), or the inbox
+ *  container when the view empties out. Call BEFORE mutating `inboxGroups`. */
 function focusTargetAfterRemoval(removedIds) {
   const removed = new Set(removedIds);
   const flat = visibleNotifications();
@@ -1226,7 +1226,9 @@ async function markDone(threadIds) {
   pendingInboxFocus = focusTarget;
   renderInbox();
   announce(
-    ids.length === 1 ? "Notification marked as done." : `${ids.length} marked as done.`,
+    ids.length === 1
+      ? "Notification marked as done."
+      : `${ids.length} notifications marked as done.`,
   );
   try {
     const result = await invoke("mark_threads_done", { threadIds: ids });
