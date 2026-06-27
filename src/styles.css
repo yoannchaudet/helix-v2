@@ -14,16 +14,24 @@
   --muted: #59636e;
 
   --accent: #7c5cff;
-  --accent-strong: #6a48ff;
+  /* AA-tuned: `--accent-strong` and the status solids (`--success`, `--pending`,
+     `--error`) are used as small text on light tints (badge/state pills), so they're
+     darkened just enough to clear 4.5:1. NOTE: these solids are intentionally darker
+     than their matching `*-rgb` channels — the channels stay at the base hue so the
+     `rgba(var(--x-rgb), a)` tint *backgrounds* are unchanged; only the text darkens.
+     `--accent-fill` is the background for filled accent buttons with white text. */
+  --accent-strong: #6242eb;
   --accent-rgb: 124, 92, 255;
   --accent-tint: rgba(var(--accent-rgb), 0.14);
+  --accent-fill: var(--accent-strong);
+  --accent-fill-hover: #4f2ec2;
   --on-accent: #ffffff;
 
-  --success: #1f883d;
+  --success: #1a7434;
   --success-rgb: 31, 136, 61;
-  --pending: #9a6700;
+  --pending: #895c00;
   --pending-rgb: 154, 103, 0;
-  --error: #cf222e;
+  --error: #be1f2a;
   --error-rgb: 207, 34, 46;
   --neutral-rgb: 140, 149, 159;
 
@@ -83,6 +91,9 @@
   --accent: #bd93f9;
   --accent-strong: #d7bbff;
   --accent-rgb: 189, 147, 249;
+  /* In dark, the accent is light, so filled buttons keep dark `--on-accent` text. */
+  --accent-fill: var(--accent);
+  --accent-fill-hover: var(--accent-strong);
   --on-accent: #21222c;
 
   --success: #50fa7b;
@@ -500,8 +511,8 @@ code,
 }
 
 #sync-btn.is-due {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--accent-fill);
+  border-color: var(--accent-fill);
   color: var(--on-accent);
   /* The button is disabled (opacity 0.5) while syncing; keep the accent crisp. */
   opacity: 1;
@@ -1321,14 +1332,14 @@ input[type="text"]:focus {
 }
 
 .btn--primary {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--accent-fill);
+  border-color: var(--accent-fill);
   color: var(--on-accent);
 }
 
 .btn--primary:hover {
-  background: var(--accent-strong);
-  border-color: var(--accent-strong);
+  background: var(--accent-fill-hover);
+  border-color: var(--accent-fill-hover);
 }
 
 .form-msg {
@@ -1535,6 +1546,31 @@ input[type="text"]:focus {
   }
   to {
     opacity: 1;
+  }
+}
+
+/* Respect the OS "reduce motion" setting. We don't remove feedback — state still
+   changes — we just drop the animation/transition movement. Durations are collapsed to a
+   near-instant 0.01ms (rather than 0) and delays zeroed, so motion is gone but any future
+   animationend/transitionend listeners still fire; `animation-iteration-count: 1` stops
+   the infinite spin/pulse loops on their final frame. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0s !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* The poll-countdown "clock" sweep is JS-driven (not a CSS animation), so it isn't
+     caught by the reset above. Hide it; the refresh button still signals the due/syncing
+     state via color, and the status pill reports sync progress. */
+  #sync-btn .poll-sweep {
+    display: none;
   }
 }
 
