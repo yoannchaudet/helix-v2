@@ -199,7 +199,8 @@ function announce(text) {
   const el = $("#a11y-announcer");
   if (!el) return;
   el.textContent = "";
-  // A microtask/rAF gap ensures the change is observed even when the text is unchanged.
+  // Re-set on the next frame: clearing then setting on a separate frame re-triggers the
+  // live region even when the text is identical to the previous announcement.
   requestAnimationFrame(() => {
     el.textContent = text;
   });
@@ -997,6 +998,10 @@ function focusTargetAfterRemoval(removedIds) {
   const removed = new Set(removedIds);
   const flat = visibleNotifications();
   const firstRemoved = flat.findIndex((n) => removed.has(n.thread_id));
+  // None of the removed threads are in the current view (e.g. the list changed while a
+  // confirm menu was open). Don't force focus anywhere — let renderInbox's preserved-focus
+  // path keep the user where they are.
+  if (firstRemoved === -1) return null;
   const after = flat.slice(firstRemoved + 1).find((n) => !removed.has(n.thread_id));
   const before = [...flat.slice(0, firstRemoved)]
     .reverse()
