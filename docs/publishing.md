@@ -122,7 +122,8 @@ The release workflow declares `environment: release`, so it can read these; CI b
 > Don't create the release/tag from the GitHub UI — push the git tag; the workflow creates
 > the draft Release itself. The in-app updater only sees **published, non-draft,
 > non-prerelease** releases (the endpoint resolves `releases/latest`), so nothing updates
-> until you publish. To abort, delete the draft and the tag: `git push origin :v0.2.0`.
+> until you publish. To abort, delete the draft Release, then delete the tag locally and
+> remotely: `git tag -d v0.2.0 && git push origin --delete v0.2.0`.
 
 ## How auto-update reaches users
 
