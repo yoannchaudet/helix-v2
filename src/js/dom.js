@@ -24,6 +24,28 @@ export function escapeHtml(value) {
   );
 }
 
+const RAW_HTML = Symbol("rawHtml");
+
+/** Mark a trusted HTML fragment so `html` inserts it without escaping. */
+export function rawHtml(value) {
+  return { [RAW_HTML]: true, value: String(value) };
+}
+
+function isRawHtml(value) {
+  return Boolean(value && value[RAW_HTML]);
+}
+
+/** Tagged template helper that escapes interpolated values by default. */
+export function html(strings, ...values) {
+  let out = strings[0] ?? "";
+  for (let i = 0; i < values.length; i += 1) {
+    const value = values[i];
+    out += isRawHtml(value) ? value.value : escapeHtml(value);
+    out += strings[i + 1] ?? "";
+  }
+  return out;
+}
+
 /** Briefly show a transient confirmation in `el` (e.g. "Saved", "Copied"), then fade it
  *  out. Reuses the `.srow-flash` styling. Pass `kind = "error"` for a red message. */
 export function flash(el, text, kind) {

@@ -1,4 +1,4 @@
-import { escapeHtml } from "./dom.js";
+import { html, rawHtml } from "./dom.js";
 
 /* Small presentational render helpers shared across the generated views. They keep the
  * repeated markup (label pills, icon-only buttons, sidebar source entries) in one place
@@ -9,8 +9,8 @@ import { escapeHtml } from "./dom.js";
 /** An inline label pill — `<span class="{className}">…</span>` with the text escaped.
  *  Used for the subject/state badges and the private-repo lock badge. */
 export function pill(text, className, { title = "" } = {}) {
-  const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
-  return `<span class="${escapeHtml(className)}"${titleAttr}>${escapeHtml(text)}</span>`;
+  const titleAttr = title ? html` title="${title}"` : "";
+  return html`<span class="${className}"${rawHtml(titleAttr)}>${text}</span>`;
 }
 
 /** An icon-only button with the a11y essentials baked in: an explicit `type`, an
@@ -18,10 +18,8 @@ export function pill(text, className, { title = "" } = {}) {
  *  `attrs` is a pre-built (trusted) attribute string for extras (ids, data-*). */
 export function iconButton({ icon, label, className = "icon-btn", title, attrs = "" }) {
   const tooltip = title ?? label;
-  return (
-    `<button type="button" class="${escapeHtml(className)}" title="${escapeHtml(tooltip)}"` +
-    ` aria-label="${escapeHtml(label)}"${attrs ? ` ${attrs}` : ""}>${icon}</button>`
-  );
+  const extraAttrs = attrs ? rawHtml(` ${attrs}`) : "";
+  return html`<button type="button" class="${className}" title="${tooltip}" aria-label="${label}"${extraAttrs}>${rawHtml(icon)}</button>`;
 }
 
 /** A sidebar "source" entry (a smart filter or a repository) as an `<li><button>`: the
@@ -41,18 +39,18 @@ export function sourceButton({
   countKey = "",
 }) {
   const cls = `source${className ? ` ${className}` : ""}${active ? " source--active" : ""}`;
-  const current = active ? ` aria-current="true"` : "";
-  const titleAttr = labelTitle ? ` title="${escapeHtml(labelTitle)}"` : "";
+  const current = active ? rawHtml(` aria-current="true"`) : "";
+  const titleAttr = labelTitle ? html` title="${labelTitle}"` : "";
   const lockSuffix = lock ? " 🔒" : "";
   const countHtml =
     count !== "" || countKey
-      ? `<span class="source-count"${countKey ? ` data-count="${escapeHtml(countKey)}"` : ""}>${escapeHtml(count)}</span>`
+      ? html`<span class="source-count"${countKey ? rawHtml(html` data-count="${countKey}"`) : ""}>${count}</span>`
       : "";
-  return `<li>
-      <button type="button" class="${escapeHtml(cls)}"${attrs ? ` ${attrs}` : ""}${current}>
-        <span class="source-icon" aria-hidden="true">${icon}</span>
-        <span class="source-label"${titleAttr}>${escapeHtml(label)}${lockSuffix}</span>
-        ${countHtml}
-      </button>
-    </li>`;
+  return html`<li>
+    <button type="button" class="${cls}"${attrs ? rawHtml(` ${attrs}`) : ""}${current}>
+      <span class="source-icon" aria-hidden="true">${rawHtml(icon)}</span>
+      <span class="source-label"${rawHtml(titleAttr)}>${label}${lockSuffix}</span>
+      ${rawHtml(countHtml)}
+    </button>
+  </li>`;
 }

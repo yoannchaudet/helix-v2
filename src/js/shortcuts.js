@@ -1,5 +1,5 @@
 import { listen } from "./api.js";
-import { escapeHtml } from "./dom.js";
+import { html, rawHtml } from "./dom.js";
 
 /* The keyboard-shortcuts cheatsheet: a single in-app overlay opened by `?` or the macOS
  * "Keyboard Shortcuts" menu item (which emits `menu:shortcuts`). The SHORTCUTS registry
@@ -44,22 +44,23 @@ const SHORTCUTS = [
  *  description; groups become labelled sections. */
 export function renderShortcuts(groups) {
   return groups
-    .map(
-      (g) => `
+    .map((g) => {
+      const items = g.items
+        .map((it) => {
+          const keys = it.keys.map((k) => html`<kbd>${k}</kbd>`).join(" ");
+          return html`
+            <div class="shortcuts-row">
+              <dt class="shortcuts-keys">${rawHtml(keys)}</dt>
+              <dd class="shortcuts-desc">${it.desc}</dd>
+            </div>`;
+        })
+        .join("");
+      return html`
       <section class="shortcuts-group">
-        <h3 class="shortcuts-group-title">${escapeHtml(g.group)}</h3>
-        <dl class="shortcuts-list">
-          ${g.items
-            .map(
-              (it) => `<div class="shortcuts-row">
-            <dt class="shortcuts-keys">${it.keys.map((k) => `<kbd>${escapeHtml(k)}</kbd>`).join(" ")}</dt>
-            <dd class="shortcuts-desc">${escapeHtml(it.desc)}</dd>
-          </div>`,
-            )
-            .join("")}
-        </dl>
-      </section>`,
-    )
+        <h3 class="shortcuts-group-title">${g.group}</h3>
+        <dl class="shortcuts-list">${rawHtml(items)}</dl>
+      </section>`;
+    })
     .join("");
 }
 
@@ -81,15 +82,15 @@ export function openShortcuts() {
   overlay.setAttribute("role", "dialog");
   overlay.setAttribute("aria-modal", "true");
   overlay.setAttribute("aria-labelledby", "shortcuts-title");
-  overlay.innerHTML = `
+  overlay.innerHTML = html`
     <div class="shortcuts-panel" role="document">
       <div class="shortcuts-head">
         <h2 class="shortcuts-title" id="shortcuts-title">Keyboard shortcuts</h2>
         <button type="button" class="icon-btn shortcuts-close" aria-label="Close">
-          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+          ${rawHtml('<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>')}
         </button>
       </div>
-      <div class="shortcuts-grid">${renderShortcuts(SHORTCUTS)}</div>
+      <div class="shortcuts-grid">${rawHtml(renderShortcuts(SHORTCUTS))}</div>
     </div>`;
 
   // Backdrop click (outside the panel) closes; clicks inside don't bubble out to close.

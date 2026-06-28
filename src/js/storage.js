@@ -2,7 +2,7 @@
    table list, with reveal-in-Finder and copy-path affordances. */
 
 import { invoke } from "./api.js";
-import { $, escapeHtml, flash, copyText } from "./dom.js";
+import { $, html, rawHtml, flash, copyText } from "./dom.js";
 import { iconButton } from "./ui.js";
 
 /** Folder icon for the reveal-in-Finder affordance. */
@@ -14,29 +14,31 @@ export async function loadStorage() {
   try {
     const status = await invoke("db_status");
     const tables = status.tables.length
-      ? status.tables.map((t) => `<li><code>${escapeHtml(t)}</code></li>`).join("")
-      : "<li><em>no tables</em></li>";
-    $("#storage-body").innerHTML = `
+      ? status.tables.map((t) => html`<li><code>${t}</code></li>`).join("")
+      : html`<li><em>no tables</em></li>`;
+    $("#storage-body").innerHTML = html`
       <div class="srow">
         <span class="srow-label">Database</span>
         <span class="srow-value">
           <span class="dbpath" id="db-path" role="button" tabindex="0"
-          title="Copy database path" aria-label="Copy database path">${escapeHtml(status.path)}</span>
+          title="Copy database path" aria-label="Copy database path">${status.path}</span>
           <span class="srow-flash" id="db-copy-flash" role="status" aria-live="polite">Copied</span>
-          ${iconButton({
-            icon: REVEAL_ICON,
-            label: "Reveal in Finder",
-            attrs: 'id="reveal-db"',
-          })}
+          ${rawHtml(
+            iconButton({
+              icon: REVEAL_ICON,
+              label: "Reveal in Finder",
+              attrs: 'id="reveal-db"',
+            }),
+          )}
         </span>
       </div>
       <div class="srow">
         <span class="srow-label">Schema version</span>
-        <span class="srow-value">v${escapeHtml(status.schema_version)}</span>
+        <span class="srow-value">v${status.schema_version}</span>
       </div>
       <div class="srow">
         <span class="srow-label">Tables</span>
-        <span class="srow-value"><ul class="tables">${tables}</ul></span>
+        <span class="srow-value"><ul class="tables">${rawHtml(tables)}</ul></span>
       </div>`;
 
     const path = status.path;
@@ -63,12 +65,12 @@ export async function loadStorage() {
       }
     });
   } catch (err) {
-    $("#storage-body").innerHTML = `
+    $("#storage-body").innerHTML = html`
       <div class="srow">
         <p class="error-text">Could not open the local database.</p>
       </div>
       <div class="srow">
-        <pre class="error-detail">${escapeHtml(err)}</pre>
+        <pre class="error-detail">${err}</pre>
       </div>`;
   }
 }
