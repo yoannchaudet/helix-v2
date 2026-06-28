@@ -29,6 +29,25 @@ mod tuning {
     pub const RATE_RESERVE_FRACTION: f64 = 0.25;
 }
 
+/// Take the DB lock and run a best-effort write, logging (rather than surfacing) either a
+/// poisoned lock or a write failure. These writes are optional — the app keeps working
+/// without them — but a silent failure would hide real problems (a corrupt or locked DB), so
+/// we make them observable instead of dropping them with `let _ = …`.
+fn best_effort<E: std::fmt::Display>(
+    db: &std::sync::Mutex<rusqlite::Connection>,
+    what: &str,
+    write: impl FnOnce(&rusqlite::Connection) -> Result<(), E>,
+) {
+    match db.lock() {
+        Ok(conn) => {
+            if let Err(e) = write(&conn) {
+                eprintln!("helix: {what} failed: {e}");
+            }
+        }
+        Err(e) => eprintln!("helix: {what} failed: database lock poisoned: {e}"),
+    }
+}
+
 /// Result of a successful sync, returned to the caller and emitted as `sync:done`.
 #[derive(Clone, Serialize)]
 pub struct SyncResult {
@@ -63,9 +82,11 @@ pub async fn sync_now(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
     let outcome = match outcome {
         Ok(o) => o,
         Err(err) => {
-            if let Ok(conn) = state.db.0.lock() {
-                let _ = sync::record_error(&conn, &err);
-            }
+            // Structured GitHubError → user-facing string at this command boundary.
+            let err = err.to_string();
+            best_effort(&state.db.0, "recording the sync error", |conn| {
+                sync::record_error(conn, &err)
+            });
             let _ = app.emit("sync:error", serde_json::json!({ "message": err.clone() }));
             return Err(err);
         }
@@ -85,9 +106,9 @@ pub async fn sync_now(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
     let stored = match store_result {
         Ok(s) => s,
         Err(err) => {
-            if let Ok(conn) = state.db.0.lock() {
-                let _ = sync::record_error(&conn, &err);
-            }
+            best_effort(&state.db.0, "recording the sync error", |conn| {
+                sync::record_error(conn, &err)
+            });
             let _ = app.emit("sync:error", serde_json::json!({ "message": err.clone() }));
             return Err(err);
         }
@@ -187,16 +208,18 @@ async fn resolve_pending_subjects(app: tauri::AppHandle, token: String) {
                 Ok(result) => {
                     rate.observe(result.rate.clone());
                     if let Ok(conn) = state.db.0.lock() {
-                        if sync::store_resolved_subject(&conn, &thread_id, &result.subject).is_ok()
-                        {
-                            changed += 1;
+                        match sync::store_resolved_subject(&conn, &thread_id, &result.subject) {
+                            Ok(()) => changed += 1,
+                            Err(e) => eprintln!(
+                                "helix: storing resolved subject for {thread_id} failed: {e}"
+                            ),
                         }
                     }
                 }
                 Err(err) => {
                     // A failed resolution still spent quota — count it toward the reserve.
                     rate.observe(err.rate.clone());
-                    eprintln!("subject resolution failed for {thread_id}: {}", err.message);
+                    eprintln!("subject resolution failed for {thread_id}: {}", err.error);
                 }
             }
         }
@@ -208,9 +231,7 @@ async fn resolve_pending_subjects(app: tauri::AppHandle, token: String) {
     }
 
     // Persist the post-resolution quota so Settings shows the true per-bucket usage.
-    if let Ok(conn) = state.db.0.lock() {
-        let _ = rate.persist(&conn);
-    }
+    best_effort(&state.db.0, "persisting rate limits", |conn| rate.persist(conn));
 
     if changed > 0 {
         let _ = app.emit("subjects:resolved", serde_json::json!({ "count": changed }));
@@ -340,7 +361,7 @@ where
                     rate.observe(err.rate);
                     failed.push(FailedThread {
                         thread_id: id,
-                        error: err.message,
+                        error: err.error.to_string(),
                     });
                 }
             }
@@ -353,7 +374,10 @@ where
         apply_local(conn, &succeeded).map_err(|e| e.to_string())?;
     }
     let rate_remaining = rate.lowest_remaining();
-    let _ = rate.persist(conn);
+    // The lock is already held here, so log inline rather than re-locking via `best_effort`.
+    if let Err(e) = rate.persist(conn) {
+        eprintln!("helix: persisting rate limits failed: {e}");
+    }
 
     Ok(MutationResult {
         ok: succeeded.len(),

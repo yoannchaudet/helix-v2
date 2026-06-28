@@ -125,7 +125,9 @@ async fn sign_in(token: String, state: State<'_, AppState>) -> Result<GitHubUser
         settings::set_string(&conn, settings::KEY_GITHUB_LOGIN, &user.login)
             .map_err(|e| e.to_string())?;
         // New credentials may have broader scope — re-resolve all subjects on next sync.
-        let _ = sync::reset_resolution(&conn);
+        if let Err(e) = sync::reset_resolution(&conn) {
+            eprintln!("helix: resetting subject resolution after sign-in failed: {e}");
+        }
     }
     Ok(user)
 }
