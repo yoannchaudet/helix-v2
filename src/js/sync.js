@@ -16,9 +16,6 @@ let syncProgressTimer;
 let pollTimer = null;
 /** Seconds elapsed since the last sync; reset to 0 after every sync. */
 let pollElapsed = 0;
-/** GitHub's requested poll-cadence floor (X-Poll-Interval / Retry-After) from the last
- *  sync status, honored on top of the user's interval. 0 = GitHub requested nothing. */
-let githubPollFloorS = 0;
 
 /** Called when a sync (or background subject resolution) makes the inbox stale; wired by
  *  main.js to reload the inbox. Kept as a hook so the inbox view can stay in main.js
@@ -129,8 +126,10 @@ function renderSyncStats(status) {
   const lastEl = $("#last-synced");
   if (lastEl) lastEl.textContent = fmtTimestamp(status.last_sync_at);
   renderRateBuckets(status.rate_buckets || []);
-  // Adopt GitHub's requested poll floor so the next automatic poll honors its cadence.
-  githubPollFloorS = Number(status.github_poll_interval_s) || 0;
+  // Adopt GitHub's requested poll floor so the next automatic poll honors its cadence, and
+  // reflect it in the refresh button's tooltip when it's actually raising the user's interval.
+  poll.githubFloorS = Number(status.github_poll_interval_s) || 0;
+  updateSyncButtonHint();
 
   if (status.last_status === "error" && status.last_error) {
     setSyncStatus("error", "Error");
@@ -145,6 +144,20 @@ function renderSyncStats(status) {
   } else {
     setSyncStatus("pending", "Never synced");
   }
+}
+
+/** Update the refresh button's tooltip to explain when GitHub's requested cadence is
+ *  raising the user's poll interval (the common source of "why isn't my interval honored?").
+ *  Leaves the accessible name as the plain action; the Settings note carries this for AT.
+ *  Exported so Settings can also refresh it when the user changes their interval. */
+export function updateSyncButtonHint() {
+  const btn = $("#sync-btn");
+  if (!btn) return;
+  const userInterval = Math.max(poll.intervalSeconds, poll.minIntervalS);
+  btn.title =
+    poll.githubFloorS > userInterval
+      ? `Sync now — GitHub asks for ≥${poll.githubFloorS}s between polls, raising your ${userInterval}s`
+      : "Sync now";
 }
 
 /* The sync controls live in two places (the Notifications header and the Settings
@@ -253,7 +266,7 @@ function pollTick() {
   pollElapsed += 1;
   // Honor GitHub's requested cadence (X-Poll-Interval / Retry-After) on top of the user's
   // interval and the app's hard minimum.
-  const interval = Math.max(poll.intervalSeconds, poll.minIntervalS, githubPollFloorS);
+  const interval = Math.max(poll.intervalSeconds, poll.minIntervalS, poll.githubFloorS);
   setPollProgress(Math.min(pollElapsed / interval, 1));
   if (pollElapsed >= interval) syncNow();
 }

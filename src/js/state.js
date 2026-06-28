@@ -12,6 +12,10 @@ export const poll = {
   /** Floor for the poll interval. Authoritative value comes from the backend
    *  (`get_settings().min_poll_interval_s`); this is just a fallback until settings load. */
   minIntervalS: FALLBACK_MIN_POLL_INTERVAL_S,
+  /** GitHub's requested poll-cadence floor (`X-Poll-Interval` / `Retry-After`), in seconds,
+   *  from the last sync status; 0 when GitHub requested nothing. Honored on top of the
+   *  user's interval and surfaced in the UI (refresh tooltip + Settings note). */
+  githubFloorS: 0,
 };
 
 /** Per-session flags reset when the signed-in identity changes. */

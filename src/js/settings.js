@@ -2,7 +2,7 @@ import { invoke } from "./api.js";
 import { FALLBACK_MIN_POLL_INTERVAL_S, SETTINGS_DEBOUNCE_MS } from "./constants.js";
 import { $, $$, flash } from "./dom.js";
 import { poll } from "./state.js";
-import { startPolling } from "./sync.js";
+import { startPolling, updateSyncButtonHint } from "./sync.js";
 import { isAuthenticated } from "./account.js";
 import { isShortcutsOpen } from "./shortcuts.js";
 
@@ -118,6 +118,22 @@ function applyPollMin(seconds) {
   if (label) label.textContent = String(poll.minIntervalS);
 }
 
+/** Show/hide the note explaining that GitHub's requested cadence is raising the user's
+ *  interval, so the setting doesn't look silently ignored. Reads the latest floor captured
+ *  from sync status (`poll.githubFloorS`); safe to call whenever the pane is shown. */
+function updateSyncingNote() {
+  const el = $("#poll-github-note");
+  if (!el) return;
+  const userInterval = Math.max(poll.intervalSeconds, poll.minIntervalS);
+  if (poll.githubFloorS > userInterval) {
+    el.textContent = ` GitHub is currently asking for at least ${poll.githubFloorS}s between polls, so that's the effective interval.`;
+    el.hidden = false;
+  } else {
+    el.textContent = "";
+    el.hidden = true;
+  }
+}
+
 export async function loadSettings() {
   try {
     const s = await invoke("get_settings");
@@ -125,6 +141,8 @@ export async function loadSettings() {
     applyPollMin(s.min_poll_interval_s);
     $("#poll-interval").value = s.poll_interval_s;
     poll.intervalSeconds = s.poll_interval_s;
+    updateSyncingNote();
+    updateSyncButtonHint();
     const themeInput = $(`input[name="theme"][value="${s.theme}"]`);
     if (themeInput) themeInput.checked = true;
     paintThemePref(s.theme);
@@ -176,6 +194,9 @@ async function applySettings() {
       poll.intervalSeconds = s.poll_interval_s;
       if (isAuthenticated()) startPolling();
     }
+    // The user's interval may now be below/above GitHub's floor — refresh the note + tooltip.
+    updateSyncingNote();
+    updateSyncButtonHint();
   } catch (err) {
     if (seq !== settingsApplySeq) return;
     setSettingsError(String(err));
@@ -194,6 +215,10 @@ export function showSettings(show) {
   // Settings is a focused, full-width pane: hide the sidebar (and its resizer) so the
   // content spans the whole window. CSS also insets the toolbar past the traffic lights.
   document.querySelector(".app")?.classList.toggle("app--settings", show);
+  if (show) {
+    // Refresh the GitHub-cadence note with the latest floor learned from sync status.
+    updateSyncingNote();
+  }
   if (show === wasShown) return;
   // The sidebar (and its #open-settings trigger) is hidden in Settings, so keyboard focus
   // would otherwise fall to <body>. Move focus to a sensible target on each transition:
