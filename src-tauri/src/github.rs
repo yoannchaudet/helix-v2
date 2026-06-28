@@ -31,30 +31,86 @@ struct UserResponse {
     avatar_url: Option<String>,
 }
 
+/// A structured error from a GitHub API call. It converts to the user-facing string only at
+/// the command boundary (via `Display` / `From<GitHubError> for String`); internally, callers
+/// can branch on the kind — e.g. an invalid token vs a transient network failure vs being
+/// rate-limited — which a bare `String` can't express.
+#[derive(Debug)]
+pub enum GitHubError {
+    /// Transport-level failure before any HTTP response (offline, DNS, TLS, timeout).
+    Network(String),
+    /// 401 — the token is missing, invalid, or expired.
+    Unauthorized,
+    /// 403 — rate limit hit or the token lacks a required scope. Carries GitHub's body.
+    Forbidden(String),
+    /// Any other non-success HTTP status, with the (trimmed) response body.
+    Status {
+        status: reqwest::StatusCode,
+        body: String,
+    },
+    /// A response arrived but couldn't be parsed; `what` names the payload (e.g. "subject").
+    Parse {
+        what: &'static str,
+        source: String,
+    },
+}
+
+impl std::fmt::Display for GitHubError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GitHubError::Network(e) => write!(f, "network error: {e}"),
+            GitHubError::Unauthorized => {
+                write!(f, "Invalid or expired token — GitHub returned 401.")
+            }
+            GitHubError::Forbidden(body) => write!(
+                f,
+                "GitHub returned 403 Forbidden (rate limit or insufficient scope): {body}"
+            ),
+            GitHubError::Status { status, body } => write!(f, "GitHub returned {status}: {body}"),
+            GitHubError::Parse { what, source } => write!(f, "failed to parse {what}: {source}"),
+        }
+    }
+}
+
+impl std::error::Error for GitHubError {}
+
+impl From<GitHubError> for String {
+    fn from(e: GitHubError) -> Self {
+        e.to_string()
+    }
+}
+
 /// Verify a PAT by fetching the authenticated user (`GET /user`).
 ///
-/// Returns the user on success, or a human-readable error (invalid token, network
+/// Returns the user on success, or a structured [`GitHubError`] (invalid token, network
 /// failure, unexpected status).
-pub async fn fetch_user(token: &str) -> Result<GitHubUser, String> {
+pub async fn fetch_user(token: &str) -> Result<GitHubUser, GitHubError> {
     let client = reqwest::Client::new();
     let resp = authed_get(&client, &format!("{API_BASE}/user"), token)
         .send()
         .await
-        .map_err(|e| format!("network error: {e}"))?;
+        .map_err(|e| GitHubError::Network(e.to_string()))?;
 
     let status = resp.status();
     if status == reqwest::StatusCode::UNAUTHORIZED {
-        return Err("Invalid token — GitHub returned 401 Unauthorized.".to_string());
+        return Err(GitHubError::Unauthorized);
+    }
+    if status == reqwest::StatusCode::FORBIDDEN {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(GitHubError::Forbidden(body.trim().to_string()));
     }
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("GitHub returned {status}: {}", body.trim()));
+        return Err(GitHubError::Status {
+            status,
+            body: body.trim().to_string(),
+        });
     }
 
-    let user: UserResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("failed to parse GitHub response: {e}"))?;
+    let user: UserResponse = resp.json().await.map_err(|e| GitHubError::Parse {
+        what: "GitHub response",
+        source: e.to_string(),
+    })?;
 
     Ok(GitHubUser {
         login: user.login,
@@ -192,7 +248,7 @@ pub async fn resolve_subject(
         .map_err(|e| ResolveError {
             // A transport error before any response carries no rate snapshot.
             rate: RateLimit::default(),
-            message: format!("network error: {e}"),
+            error: GitHubError::Network(e.to_string()),
         })?;
 
     let status = resp.status();
@@ -205,13 +261,23 @@ pub async fn resolve_subject(
             rate,
         });
     }
+    if status == reqwest::StatusCode::FORBIDDEN {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(ResolveError {
+            rate,
+            error: GitHubError::Forbidden(body.trim().to_string()),
+        });
+    }
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
         // A failed (non-404) request still consumed quota — carry its rate snapshot so the
         // caller's budget accounting stays accurate.
         return Err(ResolveError {
             rate,
-            message: format!("GitHub returned {status} resolving subject: {}", body.trim()),
+            error: GitHubError::Status {
+                status,
+                body: body.trim().to_string(),
+            },
         });
     }
 
@@ -222,7 +288,10 @@ pub async fn resolve_subject(
         }),
         Err(e) => Err(ResolveError {
             rate,
-            message: format!("failed to parse subject: {e}"),
+            error: GitHubError::Parse {
+                what: "subject",
+                source: e.to_string(),
+            },
         }),
     }
 }
@@ -232,7 +301,7 @@ pub async fn resolve_subject(
 /// caller folds this `rate` into its budget accounting.
 pub struct ResolveError {
     pub rate: RateLimit,
-    pub message: String,
+    pub error: GitHubError,
 }
 
 /* -------------------------------- Mutations ------------------------------- */
@@ -242,7 +311,7 @@ pub struct ResolveError {
 /// count to keep it accurate even when some/all mutations fail.
 pub struct MutationError {
     pub rate: RateLimit,
-    pub message: String,
+    pub error: GitHubError,
 }
 
 /// Mark a notification thread as **done** (`DELETE /notifications/threads/{thread_id}`).
@@ -262,7 +331,7 @@ pub async fn mark_thread_done(
         .await
         .map_err(|e| MutationError {
             rate: RateLimit::default(),
-            message: format!("network error: {e}"),
+            error: GitHubError::Network(e.to_string()),
         })?;
 
     let status = resp.status();
@@ -275,13 +344,23 @@ pub async fn mark_thread_done(
     if status == reqwest::StatusCode::UNAUTHORIZED {
         return Err(MutationError {
             rate,
-            message: "Invalid or expired token — GitHub returned 401.".to_string(),
+            error: GitHubError::Unauthorized,
+        });
+    }
+    if status == reqwest::StatusCode::FORBIDDEN {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(MutationError {
+            rate,
+            error: GitHubError::Forbidden(body.trim().to_string()),
         });
     }
     let body = resp.text().await.unwrap_or_default();
     Err(MutationError {
         rate,
-        message: format!("GitHub returned {status}: {}", body.trim()),
+        error: GitHubError::Status {
+            status,
+            body: body.trim().to_string(),
+        },
     })
 }
 
@@ -339,7 +418,7 @@ pub struct FetchOutcome {
 /// invoked after each page with `(page_number, total_fetched_so_far)` so the caller can
 /// surface live progress. Rate-limit headers from the last response are returned in
 /// [`FetchOutcome::rate`].
-pub async fn fetch_all_notifications<F>(token: &str, on_page: F) -> Result<FetchOutcome, String>
+pub async fn fetch_all_notifications<F>(token: &str, on_page: F) -> Result<FetchOutcome, GitHubError>
 where
     F: Fn(u32, usize) + Send,
 {
@@ -354,31 +433,32 @@ where
         let resp = authed_get(&client, &url, token)
             .send()
             .await
-            .map_err(|e| format!("network error: {e}"))?;
+            .map_err(|e| GitHubError::Network(e.to_string()))?;
 
         let status = resp.status();
         rate.update_from(resp.headers());
 
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err("Invalid or expired token — GitHub returned 401.".to_string());
+            return Err(GitHubError::Unauthorized);
         }
         if status == reqwest::StatusCode::FORBIDDEN {
             let body = resp.text().await.unwrap_or_default();
-            return Err(format!(
-                "GitHub returned 403 Forbidden (rate limit or insufficient scope): {}",
-                body.trim()
-            ));
+            return Err(GitHubError::Forbidden(body.trim().to_string()));
         }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(format!("GitHub returned {status}: {}", body.trim()));
+            return Err(GitHubError::Status {
+                status,
+                body: body.trim().to_string(),
+            });
         }
 
         let next = next_page_url(resp.headers());
-        let page_threads: Vec<NotificationThread> = resp
-            .json()
-            .await
-            .map_err(|e| format!("failed to parse notifications: {e}"))?;
+        let page_threads: Vec<NotificationThread> =
+            resp.json().await.map_err(|e| GitHubError::Parse {
+                what: "notifications",
+                source: e.to_string(),
+            })?;
         threads.extend(page_threads);
         on_page(page, threads.len());
 
@@ -440,6 +520,45 @@ fn next_page_url(headers: &HeaderMap) -> Option<String> {
 mod tests {
     use super::*;
     use reqwest::header::{HeaderMap, HeaderValue};
+
+    #[test]
+    fn github_error_display_matches_user_facing_messages() {
+        assert_eq!(
+            GitHubError::Network("connection refused".into()).to_string(),
+            "network error: connection refused"
+        );
+        assert_eq!(
+            GitHubError::Unauthorized.to_string(),
+            "Invalid or expired token — GitHub returned 401."
+        );
+        assert_eq!(
+            GitHubError::Forbidden("rate limit exceeded".into()).to_string(),
+            "GitHub returned 403 Forbidden (rate limit or insufficient scope): rate limit exceeded"
+        );
+        assert_eq!(
+            GitHubError::Status {
+                status: reqwest::StatusCode::NOT_FOUND,
+                body: "missing".into(),
+            }
+            .to_string(),
+            "GitHub returned 404 Not Found: missing"
+        );
+        assert_eq!(
+            GitHubError::Parse {
+                what: "subject",
+                source: "expected value".into(),
+            }
+            .to_string(),
+            "failed to parse subject: expected value"
+        );
+    }
+
+    #[test]
+    fn github_error_flattens_to_string_at_the_boundary() {
+        // The IPC boundary returns `String`; `?`/`.into()` go through Display.
+        let s: String = GitHubError::Unauthorized.into();
+        assert_eq!(s, "Invalid or expired token — GitHub returned 401.");
+    }
 
     #[test]
     fn parses_next_link() {
