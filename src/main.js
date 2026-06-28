@@ -4,9 +4,6 @@ import {
   DEFAULT_POLL_INTERVAL_S,
   FALLBACK_MIN_POLL_INTERVAL_S,
   SYNC_PROGRESS_DISMISS_MS,
-  SIDEBAR_MIN_FALLBACK_PX,
-  SIDEBAR_MAX_PX,
-  SIDEBAR_KEY_STEP_PX,
   SETTINGS_DEBOUNCE_MS,
   STATES,
 } from "./js/constants.js";
@@ -19,6 +16,9 @@ import {
   sortReposByRecency,
   filterGroups,
 } from "./js/inbox-model.js";
+import { loadStorage } from "./js/storage.js";
+import { initUpdates } from "./js/updates.js";
+import { initSidebarResize } from "./js/sidebar-resize.js";
 
 /** True once the user is authenticated; drives the signed-out empty state. */
 let authenticated = false;
@@ -144,67 +144,7 @@ async function persistTheme(pref) {
 }
 
 /* ----------------------------- Local storage ----------------------------- */
-
-async function loadStorage() {
-  try {
-    const status = await invoke("db_status");
-    const tables = status.tables.length
-      ? status.tables.map((t) => `<li><code>${escapeHtml(t)}</code></li>`).join("")
-      : "<li><em>no tables</em></li>";
-    $("#storage-body").innerHTML = `
-      <div class="srow">
-        <span class="srow-label">Database</span>
-        <span class="srow-value">
-          <span class="dbpath" id="db-path" role="button" tabindex="0"
-          title="Copy database path" aria-label="Copy database path">${escapeHtml(status.path)}</span>
-          <span class="srow-flash" id="db-copy-flash" role="status" aria-live="polite">Copied</span>
-          <button type="button" class="icon-btn" id="reveal-db" title="Reveal in Finder" aria-label="Reveal in Finder">
-            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M1.75 5.25V4c0-.7.55-1.25 1.25-1.25h2.8c.33 0 .65.13.88.37l.99.96H13c.7 0 1.25.55 1.25 1.25v6c0 .7-.55 1.25-1.25 1.25H3c-.7 0-1.25-.55-1.25-1.25z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
-          </button>
-        </span>
-      </div>
-      <div class="srow">
-        <span class="srow-label">Schema version</span>
-        <span class="srow-value">v${escapeHtml(status.schema_version)}</span>
-      </div>
-      <div class="srow">
-        <span class="srow-label">Tables</span>
-        <span class="srow-value"><ul class="tables">${tables}</ul></span>
-      </div>`;
-
-    const path = status.path;
-    $("#reveal-db").addEventListener("click", () => {
-      invoke("reveal_in_finder", { path }).catch((err) => {
-        console.error(err);
-        flash($("#db-copy-flash"), "Reveal failed", "error");
-      });
-    });
-    const copyPath = async () => {
-      if (await copyText(path)) {
-        flash($("#db-copy-flash"), "Copied");
-      } else {
-        flash($("#db-copy-flash"), "Copy failed", "error");
-      }
-    };
-    const dbPathEl = $("#db-path");
-    dbPathEl.addEventListener("click", copyPath);
-    // Keyboard support for the button-role path (Enter / Space activate copy).
-    dbPathEl.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
-        copyPath();
-      }
-    });
-  } catch (err) {
-    $("#storage-body").innerHTML = `
-      <div class="srow">
-        <p class="error-text">Could not open the local database.</p>
-      </div>
-      <div class="srow">
-        <pre class="error-detail">${escapeHtml(err)}</pre>
-      </div>`;
-  }
-}
+/* See `js/storage.js` (loadStorage). */
 
 /* -------------------------------- Account -------------------------------- */
 
@@ -1408,161 +1348,7 @@ async function applySettings() {
 /* --------------------------------- Panes --------------------------------- */
 
 /* -------------------------------- Updates ------------------------------- */
-
-/** True when this build ships the auto-updater (release macOS only). Set in initUpdates. */
-let updaterEnabled = false;
-/** The running app version string (e.g. "0.1.0"). */
-let appVersion = "";
-/** Metadata for an available update ({version, current_version, notes}), or null. */
-let availableUpdate = null;
-/** True while an update is downloading/installing, to lock out re-entrancy. */
-let updateInstalling = false;
-
-function setUpdateStatus(text) {
-  const el = $("#update-status");
-  if (el) el.textContent = text;
-}
-
-/** Bootstrap the update UI: read the build's updater capability + version, wire the
- *  Settings controls and the prompt banner, and (release only) auto-check on launch. */
-async function initUpdates() {
-  try {
-    updaterEnabled = await invoke("updater_enabled");
-  } catch {
-    updaterEnabled = false;
-  }
-  try {
-    appVersion = await invoke("app_version");
-  } catch {
-    appVersion = "";
-  }
-  const verEl = $("#app-version");
-  if (verEl) verEl.textContent = appVersion ? `v${appVersion}` : "—";
-
-  $("#update-later")?.addEventListener("click", dismissUpdateBanner);
-  $("#update-now")?.addEventListener("click", runUpdateInstall);
-
-  const checkBtn = $("#check-updates-btn");
-  if (!updaterEnabled) {
-    // No updater in this build: debug builds, or a (non-shipped) non-macOS build. Word the
-    // status to match the actual reason rather than always blaming "dev builds".
-    const isMac = navigator.userAgent.includes("Macintosh");
-    setUpdateStatus(
-      isMac ? "Updates are disabled in dev builds" : "Updates aren't available on this platform",
-    );
-    if (checkBtn) checkBtn.disabled = true;
-    return;
-  }
-
-  checkBtn?.addEventListener("click", () => checkForUpdate(true));
-
-  // Download progress + completion are driven by the Rust installer (see lib.rs).
-  listen("update:progress", (e) => {
-    const { downloaded, total } = e.payload ?? {};
-    setUpdateProgress(downloaded, total);
-  });
-  listen("update:installed", () => {
-    const t = $("#update-banner-text");
-    if (t) t.textContent = "Update installed — restarting…";
-  });
-
-  // Auto-check on launch — silent unless an update is actually available.
-  checkForUpdate(false);
-}
-
-/** Ask the backend whether a newer release exists. `manual` adds inline feedback for the
- *  Settings "Check for updates" button; the launch check stays silent when up to date. */
-async function checkForUpdate(manual) {
-  if (!updaterEnabled || updateInstalling) return;
-  const btn = $("#check-updates-btn");
-  if (btn) btn.disabled = true;
-  if (manual) setUpdateStatus("Checking…");
-  try {
-    const info = await invoke("check_for_update");
-    if (info) {
-      onUpdateAvailable(info);
-    } else {
-      availableUpdate = null;
-      hideUpdateBanner();
-      // The launch check is silent unless an update is available: only the manual
-      // "Check for updates" button reports an up-to-date / failed result inline.
-      if (manual) {
-        setUpdateStatus("Up to date");
-        flash($("#update-flash"), "Up to date");
-      }
-    }
-  } catch (err) {
-    if (manual) {
-      setUpdateStatus("Couldn't check for updates");
-      flash($("#update-flash"), "Failed", "error");
-    }
-  } finally {
-    if (btn && !updateInstalling) btn.disabled = false;
-  }
-}
-
-function onUpdateAvailable(info) {
-  availableUpdate = info;
-  setUpdateStatus(`Update available: v${info.version}`);
-  const text = $("#update-banner-text");
-  if (text) text.textContent = `Helix v${info.version} is available.`;
-  $("#update-bar").hidden = true;
-  $("#update-bar-fill").style.width = "0%";
-  const now = $("#update-now");
-  now.disabled = false;
-  now.textContent = "Update & restart";
-  $("#update-later").hidden = false;
-  $("#update-banner").hidden = false;
-}
-
-function setUpdateProgress(downloaded, total) {
-  $("#update-bar").hidden = false;
-  const text = $("#update-banner-text");
-  if (total && total > 0) {
-    const pct = Math.min(100, Math.round((downloaded / total) * 100));
-    $("#update-bar-fill").style.width = `${pct}%`;
-    if (text) text.textContent = `Downloading update… ${pct}%`;
-  } else if (text) {
-    text.textContent = "Downloading update…";
-  }
-}
-
-/** Download + install the update, then relaunch (the backend restarts the app on success,
- *  tearing down this page). On failure, restore the prompt and surface the error. */
-async function runUpdateInstall() {
-  if (!updaterEnabled || updateInstalling || !availableUpdate) return;
-  updateInstalling = true;
-  const now = $("#update-now");
-  now.disabled = true;
-  $("#update-later").hidden = true;
-  $("#update-bar").hidden = false;
-  $("#update-bar-fill").style.width = "0%";
-  $("#update-banner-text").textContent = "Downloading update…";
-  if ($("#check-updates-btn")) $("#check-updates-btn").disabled = true;
-  try {
-    await invoke("install_update");
-    // Success relaunches the app; nothing below runs.
-  } catch (err) {
-    updateInstalling = false;
-    $("#update-banner-text").textContent = "Update failed.";
-    $("#update-bar").hidden = true;
-    now.disabled = false;
-    $("#update-later").hidden = false;
-    if ($("#check-updates-btn")) $("#check-updates-btn").disabled = false;
-    toast(String(err), "error");
-  }
-}
-
-/** Dismiss the prompt banner. The update stays reachable from Settings → Updates. */
-function dismissUpdateBanner() {
-  if (updateInstalling) return;
-  hideUpdateBanner();
-}
-
-function hideUpdateBanner() {
-  const b = $("#update-banner");
-  if (b) b.hidden = true;
-}
+/* See `js/updates.js` (initUpdates + the prompt banner / Settings → Updates flow). */
 
 /** Toggle between the notifications pane and the Settings pane (single window). */
 function showSettings(show) {
@@ -1586,89 +1372,7 @@ function showSettings(show) {
 }
 
 /* ----------------------------- Sidebar resize ---------------------------- */
-
-/** Make the sidebar width draggable. The CSS default is treated as the minimum;
- *  the chosen width is persisted across launches in localStorage. */
-function initSidebarResize() {
-  const resizer = $("#sidebar-resizer");
-  if (!resizer) return;
-
-  const root = document.documentElement;
-  const min =
-    parseInt(getComputedStyle(root).getPropertyValue("--sidebar-w"), 10) ||
-    SIDEBAR_MIN_FALLBACK_PX;
-  const max = SIDEBAR_MAX_PX;
-  const STEP = SIDEBAR_KEY_STEP_PX;
-  let current = min;
-
-  // Single entry point for width changes: clamp, apply, expose to AT, and persist.
-  const setWidth = (w, persist = true) => {
-    current = Math.max(min, Math.min(max, Math.round(w)));
-    root.style.setProperty("--sidebar-w", `${current}px`);
-    resizer.setAttribute("aria-valuenow", String(current));
-    if (persist) localStorage.setItem("helix:sidebar-w", String(current));
-  };
-
-  resizer.setAttribute("aria-valuemin", String(min));
-  resizer.setAttribute("aria-valuemax", String(max));
-
-  const saved = Number.parseInt(localStorage.getItem("helix:sidebar-w"), 10);
-  setWidth(Number.isFinite(saved) ? saved : min, false);
-
-  let dragging = false;
-  const onMove = (e) => {
-    if (!dragging) return;
-    // The sidebar starts at the window's left edge, so its width === cursor X.
-    setWidth(e.clientX, false);
-  };
-  const onUp = () => {
-    if (!dragging) return;
-    dragging = false;
-    resizer.classList.remove("sidebar-resizer--dragging");
-    document.body.style.cursor = "";
-    localStorage.setItem("helix:sidebar-w", String(current));
-  };
-
-  resizer.addEventListener("mousedown", (e) => {
-    e.preventDefault(); // don't start a text/window-drag interaction
-    dragging = true;
-    resizer.classList.add("sidebar-resizer--dragging");
-    document.body.style.cursor = "col-resize";
-  });
-  window.addEventListener("mousemove", onMove);
-  window.addEventListener("mouseup", onUp);
-  // A mouseup outside the webview is never delivered; terminate on blur so the
-  // drag can't get stuck (cursor left as col-resize).
-  window.addEventListener("blur", onUp);
-
-  // Keyboard operability for the separator (arrows step, Home/End jump).
-  resizer.addEventListener("keydown", (e) => {
-    let next = current;
-    switch (e.key) {
-      case "ArrowLeft":
-      case "ArrowDown":
-        next = current - STEP;
-        break;
-      case "ArrowRight":
-      case "ArrowUp":
-        next = current + STEP;
-        break;
-      case "Home":
-        next = min;
-        break;
-      case "End":
-        next = max;
-        break;
-      default:
-        return;
-    }
-    e.preventDefault();
-    setWidth(next);
-  });
-
-  // Double-click resets to the default (minimum) width.
-  resizer.addEventListener("dblclick", () => setWidth(min));
-}
+/* See `js/sidebar-resize.js` (initSidebarResize). */
 
 /* --------------------------------- Init ---------------------------------- */
 
