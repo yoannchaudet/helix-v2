@@ -12,12 +12,13 @@ on:
 permissions:
   contents: read
 
-# Cancel superseded runs on the same ref. With CI triggered by pull_request (PR branches)
-# and push to main only, this means a rapid re-push to a PR branch cancels its earlier
-# in-flight run — saving slow/expensive macOS minutes — without ever double-running a
-# commit (feature-branch pushes no longer trigger a duplicate run alongside the PR).
+# Cancel superseded runs for the same PR (or the same branch on push to main). Keying on
+# the PR number when present — and the ref otherwise — keeps PR and push-to-main runs in
+# separate groups (a fork PR branch named `main` can't collide with push to main), while
+# still cancelling a PR's earlier in-flight run on a rapid re-push. Feature-branch pushes
+# no longer trigger a duplicate run alongside the PR, so a commit is never double-run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 env:
