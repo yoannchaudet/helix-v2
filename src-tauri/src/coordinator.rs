@@ -179,6 +179,7 @@ async fn resolve_pending_subjects(app: tauri::AppHandle, token: String) {
                     remaining: b.remaining,
                     reset: b.reset_at,
                     poll_interval: None,
+                    retry_after: None,
                 });
             }
         }

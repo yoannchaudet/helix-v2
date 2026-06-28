@@ -383,6 +383,9 @@ pub struct RateLimit {
     pub reset: Option<i64>,
     /// Minimum seconds between polls requested by GitHub (`X-Poll-Interval`).
     pub poll_interval: Option<i64>,
+    /// Seconds GitHub asked us to wait before retrying (`Retry-After`), sent on a 403/429
+    /// secondary rate-limit. Parsed as delta-seconds (GitHub's form for rate limits).
+    pub retry_after: Option<i64>,
 }
 
 impl RateLimit {
@@ -401,6 +404,19 @@ impl RateLimit {
         }
         if let Some(v) = header_i64(headers, "x-poll-interval") {
             self.poll_interval = Some(v);
+        }
+        if let Some(v) = header_i64(headers, "retry-after") {
+            self.retry_after = Some(v);
+        }
+    }
+
+    /// The cadence floor GitHub is asking us to honor before the next poll: the larger of
+    /// `X-Poll-Interval` (steady-state) and `Retry-After` (backoff after a rejection), or
+    /// `None` when GitHub requested neither.
+    pub fn poll_floor(&self) -> Option<i64> {
+        match (self.poll_interval, self.retry_after) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
         }
     }
 }
@@ -595,6 +611,7 @@ mod tests {
         h.insert("x-ratelimit-remaining", HeaderValue::from_static("4998"));
         h.insert("x-ratelimit-reset", HeaderValue::from_static("1700000000"));
         h.insert("x-poll-interval", HeaderValue::from_static("60"));
+        h.insert("retry-after", HeaderValue::from_static("45"));
         let mut rate = RateLimit::default();
         rate.update_from(&h);
         assert_eq!(rate.resource.as_deref(), Some("core"));
@@ -602,6 +619,21 @@ mod tests {
         assert_eq!(rate.remaining, Some(4998));
         assert_eq!(rate.reset, Some(1700000000));
         assert_eq!(rate.poll_interval, Some(60));
+        assert_eq!(rate.retry_after, Some(45));
+    }
+
+    #[test]
+    fn poll_floor_is_the_max_of_poll_interval_and_retry_after() {
+        let floor = |p, r| RateLimit {
+            poll_interval: p,
+            retry_after: r,
+            ..RateLimit::default()
+        }
+        .poll_floor();
+        assert_eq!(floor(Some(60), Some(120)), Some(120));
+        assert_eq!(floor(Some(60), None), Some(60));
+        assert_eq!(floor(None, Some(90)), Some(90));
+        assert_eq!(floor(None, None), None);
     }
 
     #[test]

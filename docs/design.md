@@ -129,7 +129,8 @@ CREATE TABLE sync_state (
   last_error      TEXT,
   rate_remaining  INTEGER,
   rate_reset_at   TEXT,
-  poll_interval_s INTEGER NOT NULL DEFAULT 60
+  poll_interval_s INTEGER NOT NULL DEFAULT 60,  -- user's configured interval
+  github_poll_interval_s INTEGER                -- GitHub's requested floor (X-Poll-Interval / Retry-After)
 );
 
 -- Per-bucket GitHub rate-limit snapshots (one row per resource: core, graphql, search, …),
@@ -202,10 +203,15 @@ Headers on every request:
 - After each response, persist the `X-RateLimit-*` headers. The single most-recent
   `remaining`/`reset` also lives in `sync_state`, and a **per-bucket** snapshot (core,
   graphql, search, …) is kept in `rate_limits` and shown as usage bars in Settings.
+- **Honor GitHub's requested poll cadence**: a successful sync records `X-Poll-Interval`
+  (and any `Retry-After`, whichever is larger) in `sync_state.github_poll_interval_s`, and
+  the frontend floors its automatic poll interval by it — so the effective cadence is
+  `max(user interval, app minimum, GitHub's requested floor)`.
 - Background subject resolution backs off when a bucket drops below a reserve (~25%
   remaining), so resolution never starves foreground syncs.
-- There is no automatic pause-until-reset / `Retry-After` backoff yet (deferred); a
-  rate-limit rejection is handled like any other failed request — see the error model below.
+- A full automatic pause-until-reset / `Retry-After` backoff after a rate-limit *rejection*
+  is still deferred; such a rejection is handled like any other failed request — see the
+  error model below.
 
 ### Error model
 - Network/HTTP errors are caught, recorded in `sync_state.last_error`, emitted to the UI
