@@ -3,6 +3,10 @@
 
 import { invoke } from "./api.js";
 import { $, escapeHtml, flash, copyText } from "./dom.js";
+import { iconButton } from "./ui.js";
+
+/** Folder icon for the reveal-in-Finder affordance. */
+const REVEAL_ICON = `<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M1.75 5.25V4c0-.7.55-1.25 1.25-1.25h2.8c.33 0 .65.13.88.37l.99.96H13c.7 0 1.25.55 1.25 1.25v6c0 .7-.55 1.25-1.25 1.25H3c-.7 0-1.25-.55-1.25-1.25z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>`;
 
 /** Populate the Local storage settings group from `db_status`, wiring the reveal/copy
  *  controls. On error, renders an inline message instead. */
@@ -19,9 +23,11 @@ export async function loadStorage() {
           <span class="dbpath" id="db-path" role="button" tabindex="0"
           title="Copy database path" aria-label="Copy database path">${escapeHtml(status.path)}</span>
           <span class="srow-flash" id="db-copy-flash" role="status" aria-live="polite">Copied</span>
-          <button type="button" class="icon-btn" id="reveal-db" title="Reveal in Finder" aria-label="Reveal in Finder">
-            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M1.75 5.25V4c0-.7.55-1.25 1.25-1.25h2.8c.33 0 .65.13.88.37l.99.96H13c.7 0 1.25.55 1.25 1.25v6c0 .7-.55 1.25-1.25 1.25H3c-.7 0-1.25-.55-1.25-1.25z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
-          </button>
+          ${iconButton({
+            icon: REVEAL_ICON,
+            label: "Reveal in Finder",
+            attrs: 'id="reveal-db"',
+          })}
         </span>
       </div>
       <div class="srow">

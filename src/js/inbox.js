@@ -8,6 +8,7 @@ import {
   filterGroups,
 } from "./inbox-model.js";
 import { repoSection } from "./inbox-view.js";
+import { sourceButton } from "./ui.js";
 import { openContextMenu, closeMenu, isMenuOpen, menuContains } from "./menu.js";
 import { isAuthenticated } from "./account.js";
 import { setSyncProgress, flashSyncProgress, loadSyncStatus } from "./sync.js";
@@ -196,6 +197,36 @@ function renderInbox() {
   }
 }
 
+/* Inline-SVG icons for the sidebar smart filters (keyed by FILTERS id) and repositories.
+ * Presentational only; kept here next to the sidebar that renders them. */
+const FILTER_ICONS = {
+  all: `<svg viewBox="0 0 16 16" width="15" height="15"><circle cx="8" cy="8" r="5.25" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M5.5 8l1.6 1.7L10.6 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  mention: `<svg viewBox="0 0 16 16" width="15" height="15"><path d="M10.3 8a2.3 2.3 0 10-2.3 2.3M10.3 5.7v3a1.4 1.4 0 002.5.8A5.2 5.2 0 108 13.2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>`,
+  team_mention: `<svg viewBox="0 0 16 16" width="15" height="15"><circle cx="6" cy="6" r="2.2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M2.5 12.5a3.5 3.5 0 017 0" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M10.4 4.2a2.2 2.2 0 010 4.1M11.2 12.5a3.5 3.5 0 00-1.3-2.7" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>`,
+  review_requested: `<svg viewBox="0 0 16 16" width="15" height="15"><circle cx="4" cy="4" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="4" cy="12" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="12" cy="8" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M5.6 4H9a2 2 0 012 2v.4M4 5.6v4.8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>`,
+  assign: `<svg viewBox="0 0 16 16" width="15" height="15"><circle cx="8" cy="5.2" r="2.4" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M3.5 13a4.5 4.5 0 019 0" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>`,
+  cleanup: `<svg viewBox="0 0 16 16" width="15" height="15"><path d="M9.5 2.5l4 4-5.5 5.5H4v-4z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M2.5 13.5h6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>`,
+};
+const REPO_ICON = `<svg viewBox="0 0 16 16" width="15" height="15"><path d="M3 2.5h7.5L13 5v8.5H3z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M5 6h4M5 8.5h6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>`;
+
+/** Render the static set of smart-filter buttons from FILTERS (in order), each with an
+ *  empty `data-count` badge that `renderSidebar` populates live. Called once at init. */
+function renderFilterList() {
+  const list = $("#filter-list");
+  if (!list) return;
+  list.innerHTML = Object.entries(FILTERS)
+    .map(([id, { label }]) =>
+      sourceButton({
+        icon: FILTER_ICONS[id] ?? "",
+        label,
+        attrs: `data-filter="${id}"`,
+        active: id === activeFilter,
+        countKey: id,
+      }),
+    )
+    .join("");
+}
+
 /** Update sidebar filter/repo selection styling + the smart-filter counts. */
 function renderSidebar() {
   const all = inboxGroups.flatMap((g) => g.notifications);
@@ -229,24 +260,18 @@ function renderSidebar() {
     repoList.innerHTML = `<li class="source-empty">No repositories yet.</li>`;
   } else {
     repoList.innerHTML = visibleRepos
-      .map(({ group: g, matches }) => {
-        // Total notifications matching the active filter in this repo (read state untracked).
-        const count = matches.length
-          ? `<span class="source-count">${matches.length}</span>`
-          : "";
-        const lock = g.private ? " 🔒" : "";
-        return `<li>
-          <button type="button" class="source repo-source" data-repo="${g.repo_id}">
-            <span class="source-icon" aria-hidden="true">
-              <svg viewBox="0 0 16 16" width="15" height="15"><path d="M3 2.5h7.5L13 5v8.5H3z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M5 6h4M5 8.5h6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
-            </span>
-            <span class="source-label" title="${escapeHtml(g.full_name)}">${escapeHtml(
-              g.full_name,
-            )}${lock}</span>
-            ${count}
-          </button>
-        </li>`;
-      })
+      .map(({ group: g, matches }) =>
+        sourceButton({
+          icon: REPO_ICON,
+          label: g.full_name,
+          labelTitle: g.full_name,
+          lock: g.private,
+          className: "repo-source",
+          attrs: `data-repo="${g.repo_id}"`,
+          // Total notifications matching the active filter in this repo (read state untracked).
+          count: matches.length ? String(matches.length) : "",
+        }),
+      )
       .join("");
     for (const btn of repoList.querySelectorAll(".repo-source")) {
       btn.addEventListener("click", () => selectRepo(Number(btn.dataset.repo)));
@@ -511,6 +536,8 @@ function confirmDone(ids, anchorEl) {
 /** Wire all inbox DOM listeners (row actions, sidebar filters, the bulk-done popover and
  *  its dismissal). Call once on DOMContentLoaded. `loadInbox()` then fetches + renders. */
 export function initInbox() {
+  // Render the smart-filter buttons (data-driven from FILTERS) before wiring their clicks.
+  renderFilterList();
   // Sidebar smart filters.
   for (const btn of $$(".source[data-filter]")) {
     btn.addEventListener("click", () => selectFilter(btn.dataset.filter));
