@@ -110,6 +110,12 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE sync_state ADD COLUMN github_poll_interval_s INTEGER;
     "#,
+    // v6 — flag for notifications that are new or had a state change since the previous
+    // sync, so the UI can highlight them. Each sync recomputes it (1 for inserted/changed
+    // rows, 0 for unchanged), and it persists across restarts. Cleared on the next sync.
+    r#"
+    ALTER TABLE notifications ADD COLUMN is_new INTEGER NOT NULL DEFAULT 0;
+    "#,
 ];
 
 /// Open the database at `db_path`, apply any pending migrations, and return the

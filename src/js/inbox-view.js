@@ -49,7 +49,8 @@ export function notificationRow(n) {
   const stateLine = badge ? html`<div class="n-state">${rawHtml(badge)}</div>` : "";
   // Only rows with a resolved web URL are openable (clickable + hover affordance).
   const url = n.subject_html_url || "";
-  const cls = `n-row${url ? " n-row--openable" : ""}`;
+  const isNew = n.is_new ? " n-row--new" : "";
+  const cls = `n-row${url ? " n-row--openable" : ""}${isNew}`;
   const openAttrs = url ? html` data-url="${url}" role="link" tabindex="0"` : "";
   // Contextual accessible name so each row's button isn't an indistinct "Mark as done".
   const doneBtn = iconButton({

@@ -24,6 +24,14 @@ const baseNotification = {
   updated_at: "2026-01-01T00:00:00Z",
 };
 
+test("notificationRow adds n-row--new only when is_new is set", () => {
+  const flagged = notificationRow({ ...baseNotification, is_new: true });
+  assert.ok(flagged.includes("n-row--new"));
+  const plain = notificationRow({ ...baseNotification, is_new: false });
+  assert.ok(!plain.includes("n-row--new"));
+  assert.ok(!notificationRow(baseNotification).includes("n-row--new"));
+});
+
 test("subjectBadge maps a known type to its label + class", () => {
   assert.equal(subjectBadge("PullRequest"), '<span class="badge badge--pr">PR</span>');
   assert.equal(subjectBadge("Issue"), '<span class="badge badge--issue">Issue</span>');

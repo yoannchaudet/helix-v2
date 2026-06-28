@@ -757,6 +757,17 @@ code,
   border-bottom: 1px solid var(--hairline);
 }
 
+/* New or changed since the last sync: a subtle accent tint + left edge so they're easy
+   to spot. Cleared on the next sync. Uses accent vars so it tracks light/dark mode. */
+.n-row--new {
+  background: var(--accent-tint);
+  box-shadow: inset 3px 0 0 0 var(--accent);
+}
+
+.n-row--new.n-row--openable:hover {
+  background: rgba(var(--accent-rgb), 0.22);
+}
+
 .n-open {
   display: flex;
   align-items: center;
