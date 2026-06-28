@@ -238,7 +238,8 @@ export function initSettings() {
     input.addEventListener("change", () => persistTheme(input.value));
   }
 
-  // Settings pane: opened from the sidebar or ⌘, ; closed via the back button.
+  // Settings pane: opened from the sidebar or via the ⌘, shortcut; closed via the back
+  // button (and toggled by ⌘, again).
   $("#open-settings").addEventListener("click", () => showSettings(true));
   $("#settings-back").addEventListener("click", () => showSettings(false));
   document.addEventListener("keydown", (e) => {
