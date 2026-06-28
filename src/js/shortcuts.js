@@ -1,12 +1,12 @@
 import { listen } from "./api.js";
-import { $, escapeHtml } from "./dom.js";
+import { escapeHtml } from "./dom.js";
 
 /* The keyboard-shortcuts cheatsheet: a single in-app overlay opened by `?` or the macOS
  * "Keyboard Shortcuts" menu item (which emits `menu:shortcuts`). The SHORTCUTS registry
  * below is the single source of truth for what the overlay shows; the actual key handling
  * for the inbox-scoped commands lives in inbox.js. */
 
-/** Grouped shortcut reference. `keys` are rendered as <kbd> chips joined by "or". */
+/** Grouped shortcut reference. `keys` are rendered as individual <kbd> chips. */
 const SHORTCUTS = [
   {
     group: "Navigation",
@@ -93,8 +93,10 @@ export function openShortcuts() {
     </div>`;
 
   // Backdrop click (outside the panel) closes; clicks inside don't bubble out to close.
+  // Normalize text-node targets so `.closest` is always called on an Element.
   overlay.addEventListener("mousedown", (e) => {
-    if (!e.target.closest(".shortcuts-panel")) closeShortcuts();
+    const el = e.target instanceof Element ? e.target : e.target?.parentElement;
+    if (!el?.closest(".shortcuts-panel")) closeShortcuts();
   });
   overlay.querySelector(".shortcuts-close").addEventListener("click", closeShortcuts);
 
