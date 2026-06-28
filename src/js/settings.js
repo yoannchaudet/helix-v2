@@ -4,6 +4,7 @@ import { $, $$, flash } from "./dom.js";
 import { poll } from "./state.js";
 import { startPolling } from "./sync.js";
 import { isAuthenticated } from "./account.js";
+import { isShortcutsOpen } from "./shortcuts.js";
 
 /* The Settings pane: appearance/theme, the polling-interval form, and the pane toggle.
  * Theme and the settings form are persisted independently (toggling theme always saves,
@@ -243,6 +244,8 @@ export function initSettings() {
   $("#open-settings").addEventListener("click", () => showSettings(true));
   $("#settings-back").addEventListener("click", () => showSettings(false));
   document.addEventListener("keydown", (e) => {
+    // Don't toggle Settings behind the (modal) shortcuts overlay.
+    if (isShortcutsOpen()) return;
     if ((e.metaKey || e.ctrlKey) && e.key === ",") {
       e.preventDefault();
       showSettings($("#view-settings").hidden);

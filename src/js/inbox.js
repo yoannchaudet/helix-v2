@@ -11,8 +11,9 @@ import { repoSection } from "./inbox-view.js";
 import { sourceButton } from "./ui.js";
 import { openContextMenu, closeMenu, isMenuOpen, menuContains } from "./menu.js";
 import { isAuthenticated } from "./account.js";
-import { setSyncProgress, flashSyncProgress, loadSyncStatus } from "./sync.js";
+import { setSyncProgress, flashSyncProgress, loadSyncStatus, syncNow } from "./sync.js";
 import { showSettings } from "./settings.js";
+import { isShortcutsOpen } from "./shortcuts.js";
 
 /* The inbox: the notification list + its sidebar (type filters + repo refinement), keyboard
  * focus preservation across re-renders, the mark-done flows, and row interactions. Pure
@@ -472,6 +473,102 @@ function onInboxKeydown(e) {
   openNotification(open.dataset.url);
 }
 
+/* ----------------------- Keyboard command model -------------------------- */
+
+/* Single-key triage shortcuts for power users (j/k navigate, d/e done, c copy, r sync,
+ * 1–6 filter). These layer on TOP of the existing Tab + Enter a11y (they don't replace
+ * it): j/k just move focus among the row anchors so the list is fast without Tabbing. */
+
+/** All notification rows currently in the DOM, in visual order. */
+function inboxRows() {
+  return [...$("#inbox").querySelectorAll(".n-row")];
+}
+
+/** The row the keyboard "cursor" is on: whichever row contains focus, or null. */
+function activeRow() {
+  const el = document.activeElement;
+  return el instanceof HTMLElement ? el.closest("#inbox .n-row") : null;
+}
+
+/** A row's primary focus target: its openable link, else its (revealed-on-focus) done
+ *  button — so every row, openable or not, has a keyboard anchor. */
+function focusRow(row) {
+  (row.querySelector(".n-open[tabindex]") || row.querySelector(".n-done"))?.focus();
+}
+
+/** Move the keyboard cursor by `delta` rows (clamped). From outside the list, enter at the
+ *  first (j/↓) or last (k/↑) row. */
+function moveActiveRow(delta) {
+  const rows = inboxRows();
+  if (!rows.length) return;
+  const current = activeRow();
+  const at = current ? rows.indexOf(current) : -1;
+  const next =
+    at === -1
+      ? delta > 0
+        ? 0
+        : rows.length - 1
+      : Math.min(rows.length - 1, Math.max(0, at + delta));
+  focusRow(rows[next]);
+}
+
+function markActiveRowDone() {
+  const row = activeRow();
+  if (row?.dataset.threadId) markDone([row.dataset.threadId]);
+}
+
+function copyActiveRowUrl() {
+  const url = activeRow()?.querySelector(".n-open")?.dataset.url;
+  if (url) copyNotificationUrl(url);
+}
+
+/** Global triage keydown: active only on the notifications pane, with no modifier held,
+ *  not while typing, and not while a menu/overlay owns the keyboard. */
+function onCommandKeydown(e) {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const t = e.target;
+  if (t instanceof HTMLElement && (t.matches("input, textarea, select") || t.isContentEditable)) {
+    return;
+  }
+  if (isMenuOpen() || isShortcutsOpen()) return;
+  if ($("#view-notifications")?.hidden) return;
+
+  switch (e.key) {
+    case "j":
+    case "ArrowDown":
+      e.preventDefault();
+      moveActiveRow(1);
+      return;
+    case "k":
+    case "ArrowUp":
+      e.preventDefault();
+      moveActiveRow(-1);
+      return;
+    case "d":
+    case "e":
+      markActiveRowDone();
+      return;
+    case "c":
+      copyActiveRowUrl();
+      return;
+    case "r":
+      e.preventDefault();
+      syncNow();
+      return;
+  }
+
+  // 1–6 select a smart filter by position (FILTERS insertion order).
+  if (e.key >= "1" && e.key <= "9") {
+    const ids = Object.keys(FILTERS);
+    const idx = Number(e.key) - 1;
+    if (idx < ids.length) {
+      e.preventDefault();
+      selectFilter(ids[idx]);
+    }
+  }
+}
+
+
 /** Confirm + mark all of one repo's (filtered) notifications done, from its header icon. */
 function confirmRepoDone(btn) {
   const repoId = Number(btn.dataset.doneRepo);
@@ -544,6 +641,9 @@ export function initInbox() {
   $("#inbox").addEventListener("click", onInboxClick);
   $("#inbox").addEventListener("keydown", onInboxKeydown);
   $("#inbox").addEventListener("contextmenu", onInboxContextMenu);
+  // Power-user triage shortcuts (j/k/d/e/c/r/1–6) — global so filter/sync keys work from
+  // anywhere on the notifications pane, not just when a row has focus.
+  document.addEventListener("keydown", onCommandKeydown);
   $("#mark-all-done-btn").addEventListener("click", (e) => {
     e.stopPropagation();
     // Toggle: a second click on the trigger closes the open confirm popover.

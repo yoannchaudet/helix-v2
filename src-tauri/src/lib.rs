@@ -772,6 +772,44 @@ fn persist_window_size(window: &tauri::Window) {
     }
 }
 
+/// Build the application menu: the standard menu plus a Help → "Keyboard Shortcuts" item
+/// (⌘/) that drives the in-app cheatsheet (it emits `menu:shortcuts`, which the frontend
+/// opens the overlay on). Returns an error only on a menu-construction failure; callers
+/// fall back to the default menu so this can never block launch.
+fn build_app_menu<R: tauri::Runtime>(
+    handle: &tauri::AppHandle<R>,
+) -> tauri::Result<tauri::menu::Menu<R>> {
+    use tauri::menu::{Menu, MenuItemBuilder, MenuItemKind, SubmenuBuilder};
+
+    // Try with the ⌘/ accelerator; if the platform rejects that accelerator string, still
+    // add the item (just without the shortcut) rather than losing it.
+    let shortcuts = MenuItemBuilder::with_id("shortcuts", "Keyboard Shortcuts")
+        .accelerator("CmdOrCtrl+Slash")
+        .build(handle)
+        .or_else(|_| {
+            MenuItemBuilder::with_id("shortcuts", "Keyboard Shortcuts").build(handle)
+        })?;
+    // Start from the standard menu (app menu, Edit with copy/paste for the PAT field, etc.).
+    let menu = Menu::default(handle)?;
+    // Reuse the default's Help submenu if it has one (so we don't create a duplicate);
+    // otherwise add our own Help submenu.
+    let mut placed = false;
+    for item in menu.items()? {
+        if let MenuItemKind::Submenu(sub) = item {
+            if sub.text().map(|t| t == "Help").unwrap_or(false) {
+                sub.append(&shortcuts)?;
+                placed = true;
+                break;
+            }
+        }
+    }
+    if !placed {
+        let help = SubmenuBuilder::new(handle, "Help").item(&shortcuts).build()?;
+        menu.append(&help)?;
+    }
+    Ok(menu)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Install the macOS login-Keychain credential store for keyring-core. Only release
@@ -792,6 +830,13 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
 
     builder
+        .menu(|handle| build_app_menu(handle).or_else(|_| tauri::menu::Menu::default(handle)))
+        .on_menu_event(|app, event| {
+            // The "Keyboard Shortcuts" item opens the in-app cheatsheet (see shortcuts.js).
+            if event.id().as_ref() == "shortcuts" {
+                let _ = app.emit("menu:shortcuts", ());
+            }
+        })
         .on_window_event(|window, event| {
             // Persist the window size to SQLite so the next launch reopens at the same
             // size (macOS/Tauri don't restore it automatically). Resize fires

@@ -46,11 +46,29 @@ mirror GitHub's model:
   visible/filtered set from the toolbar, with optimistic local updates and per-thread
   failure reporting.
 - **API rate-limit visibility** — per-bucket usage bars in Settings.
+- **Keyboard-first triage** — a power-user command model for the inbox; press <kbd>?</kbd>
+  (or **Help → Keyboard Shortcuts**) for the full cheatsheet.
 - **Light & dark themes** — a Dracula-inspired dark mode; choose System (default),
   Light, or Dark in Settings. System follows your macOS appearance live, and the
   native window chrome switches with it.
 - **Live, color-coded feedback** — every sync and action shows progress; 🟢 success,
   🟡 pending, 🔴 error.
+
+### Keyboard shortcuts
+
+Triage without leaving the keyboard (active on the notifications pane; <kbd>?</kbd> opens an
+in-app cheatsheet, also reachable from **Help → Keyboard Shortcuts**):
+
+| Keys | Action |
+| --- | --- |
+| <kbd>j</kbd> / <kbd>↓</kbd>, <kbd>k</kbd> / <kbd>↑</kbd> | Move between notifications |
+| <kbd>Enter</kbd> | Open the focused notification in the browser |
+| <kbd>d</kbd> or <kbd>e</kbd> | Mark the active notification done |
+| <kbd>c</kbd> | Copy the active notification's link |
+| <kbd>r</kbd> | Sync now |
+| <kbd>1</kbd>–<kbd>6</kbd> | Switch smart filter (All … Cleanup) |
+| <kbd>?</kbd> | Show the shortcuts cheatsheet |
+| <kbd>⌘</kbd><kbd>,</kbd> | Open Settings |
 
 ## Tech stack
 
