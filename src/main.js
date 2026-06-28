@@ -19,13 +19,8 @@ import {
 import { loadStorage } from "./js/storage.js";
 import { initUpdates } from "./js/updates.js";
 import { initSidebarResize } from "./js/sidebar-resize.js";
-
-/** True once the user is authenticated; drives the signed-out empty state. */
-let authenticated = false;
-
-/** True when the backend stores the PAT unencrypted in SQLite (debug builds) rather than
- *  the Keychain; drives the Settings warning. Set from `auth_status` in `loadAccount`. */
-let unencryptedStorage = false;
+import { openContextMenu, closeMenu, isMenuOpen, menuContains } from "./js/menu.js";
+import { loadAccount, isAuthenticated, configureAccount } from "./js/account.js";
 
 /** True while a sync is in flight; gates stale sync:progress events. */
 let syncing = false;
@@ -147,144 +142,7 @@ async function persistTheme(pref) {
 /* See `js/storage.js` (loadStorage). */
 
 /* -------------------------------- Account -------------------------------- */
-
-/** Markup for the "token stored unencrypted" warning shown in debug builds, or "" in
- *  release. Rendered inside the Account group so it sits next to the credential UI. */
-function unencryptedStorageWarning() {
-  if (!unencryptedStorage) return "";
-  return `
-    <div class="callout callout--warn" role="note">
-      <strong>Dev build:</strong> your GitHub token is stored
-      <strong>unencrypted</strong> in this app's local database (SQLite), not the macOS
-      Keychain. Use a low-privilege token and don't ship this build.
-    </div>`;
-}
-
-function renderSignedIn(login, name) {
-  authenticated = true;
-  // Signed in → begin the automatic poll loop (idempotent; restarts the countdown).
-  startPolling();
-  // Treat a missing or placeholder login as "no avatar": fetching
-  // github.com/(unknown).png would 404 and the fallback letter would be "(".
-  const hasLogin = Boolean(login) && login !== "(unknown)";
-  const safeLogin = escapeHtml(login);
-  const hasName = Boolean(name);
-  const primary = hasName ? escapeHtml(name) : hasLogin ? `@${safeLogin}` : "Signed in";
-  const secondary =
-    hasName && hasLogin ? `<span class="account-login">@${safeLogin}</span>` : "";
-  const avatar = hasLogin
-    ? `<img class="avatar" id="account-avatar" alt=""
-        src="https://github.com/${encodeURIComponent(login)}.png?size=96" />`
-    : `<span class="avatar avatar--fallback" aria-hidden="true">?</span>`;
-  $("#account-body").innerHTML = `
-    ${unencryptedStorageWarning()}
-    <div class="srow srow--account">
-      ${avatar}
-      <div class="account-meta">
-        <span class="account-name">${primary}</span>
-        ${secondary}
-      </div>
-      <button type="button" class="btn" id="sign-out">Sign out</button>
-    </div>`;
-
-  // Graceful fallback to an initial-letter chip if the avatar image can't load.
-  const img = $("#account-avatar");
-  if (img) {
-    img.addEventListener("error", () => {
-      const fallback = document.createElement("span");
-      fallback.className = "avatar avatar--fallback";
-      fallback.setAttribute("aria-hidden", "true");
-      fallback.textContent = login.charAt(0);
-      img.replaceWith(fallback);
-    });
-  }
-  $("#sign-out").addEventListener("click", signOut);
-}
-
-function renderSignedOut(message) {
-  authenticated = false;
-  // A new session must re-prove a successful sync before the status pill goes green
-  // again, so a stale persisted "success" doesn't show as green after re-signing in.
-  syncedThisSession = false;
-  // Signed out → stop polling so we never hit the API without a token.
-  stopPolling();
-  $("#account-body").innerHTML = `
-    ${unencryptedStorageWarning()}
-    <form id="signin-form" class="form">
-      <div class="field">
-        <label for="pat">GitHub Personal Access Token</label>
-        <input id="pat" name="pat" type="password" autocomplete="off"
-          placeholder="ghp_… or github_pat_…" />
-        <p class="hint">
-          Needs the <code>notifications</code> scope (add <code>repo</code> for private
-          repositories). ${
-            unencryptedStorage
-              ? "Stored <strong>unencrypted</strong> in this app's local database (dev build)."
-              : "Stored in your macOS Keychain."
-          }
-        </p>
-      </div>
-      <div class="form-actions">
-        <button type="submit" class="btn btn--primary" id="signin-btn">Connect</button>
-        <span class="form-msg ${message ? "form-msg--error" : ""}" id="signin-msg">
-          ${message ? escapeHtml(message) : ""}
-        </span>
-      </div>
-    </form>`;
-  $("#signin-form").addEventListener("submit", signIn);
-}
-
-async function signIn(event) {
-  event.preventDefault();
-  const token = $("#pat").value;
-  const btn = $("#signin-btn");
-  const msg = $("#signin-msg");
-
-  btn.disabled = true;
-  msg.className = "form-msg";
-  msg.textContent = "Verifying with GitHub…";
-
-  try {
-    const user = await invoke("sign_in", { token });
-    renderSignedIn(user.login, user.name);
-    await loadSettings(); // refresh cached login display
-    await loadSyncStatus();
-  } catch (err) {
-    renderSignedOut(String(err));
-  }
-}
-
-async function signOut() {
-  try {
-    await invoke("sign_out");
-  } catch (err) {
-    // Even on error, fall back to the signed-out view.
-    console.error(err);
-  }
-  renderSignedOut();
-}
-
-async function loadAccount() {
-  const body = $("#account-body");
-  body.classList.remove("slist--error");
-  try {
-    const status = await invoke("auth_status");
-    unencryptedStorage = Boolean(status.unencrypted_storage);
-    // The "stored in the macOS Keychain" footer is only true for release builds.
-    const keychainNote = $("#keychain-note");
-    if (keychainNote) keychainNote.hidden = unencryptedStorage;
-    if (status.authenticated && status.login) {
-      renderSignedIn(status.login);
-    } else if (status.authenticated) {
-      renderSignedIn("(unknown)");
-    } else {
-      renderSignedOut();
-    }
-  } catch (err) {
-    body.classList.add("slist--error");
-    body.innerHTML = `<div class="srow"><span class="srow-error">${escapeHtml(err)}</span></div>`;
-  }
-}
+/* See `js/account.js` (loadAccount / isAuthenticated / configureAccount). */
 
 /* ------------------------------ Notifications ----------------------------- */
 
@@ -497,7 +355,7 @@ function resetPollCountdown() {
 /** One-second tick: advance the sweep and fire an automatic sync when due. */
 function pollTick() {
   // Hold the countdown while signed out or while a sync is already running.
-  if (!authenticated || syncing) return;
+  if (!isAuthenticated() || syncing) return;
   pollElapsed += 1;
   const interval = Math.max(pollIntervalSeconds, minPollIntervalS);
   setPollProgress(Math.min(pollElapsed / interval, 1));
@@ -677,7 +535,7 @@ function activeTitleLabel() {
 }
 
 function emptyInbox() {
-  if (!authenticated) {
+  if (!isAuthenticated()) {
     return `<div class="inbox-empty">
         <p>Connect your GitHub account to start receiving notifications.</p>
         <button type="button" class="btn js-goto-settings">Open Settings</button>
@@ -957,7 +815,7 @@ function reportMutation(result, verb) {
 /** Mark the given thread ids as done: optimistically remove them, call the backend, then
  *  reconcile from SQLite. */
 async function markDone(threadIds) {
-  if (!authenticated) {
+  if (!isAuthenticated()) {
     clearTimeout(syncProgressTimer);
     setSyncProgress("Connect a GitHub token to mark notifications as done.", "error");
     return;
@@ -1006,139 +864,7 @@ async function markDone(threadIds) {
 }
 
 /* ------------------------------ Context menu ------------------------------ */
-
-/** The open popover menu element, if any (single-instance; closed on any outside action). */
-let openMenu = null;
-/** The element that had focus before the menu opened, so focus can return there on close
- *  (otherwise removing the focused menu item dumps focus to <body>). */
-let menuReturnFocus = null;
-
-/** Close the open menu. By default returns focus to wherever it was before the menu opened;
- *  pass `restoreFocus = false` when immediately reopening, to avoid a focus flicker. */
-function closeMenu(restoreFocus = true) {
-  if (!openMenu) return;
-  const menu = openMenu;
-  // Clear the handle first so the focusout fired while detaching the menu is a no-op
-  // (removing a focused element blurs it synchronously, which would re-enter here).
-  openMenu = null;
-  menu.removeEventListener("focusout", onMenuFocusOut);
-  menu.remove();
-  document.removeEventListener("keydown", onMenuKeydown, true);
-  // Reflect the collapsed state on the toolbar trigger for assistive tech.
-  $("#mark-all-done-btn")?.setAttribute("aria-expanded", "false");
-  const target = menuReturnFocus;
-  if (restoreFocus) {
-    menuReturnFocus = null;
-    if (target && document.contains(target)) target.focus();
-  }
-}
-
-function onMenuKeydown(e) {
-  if (e.key === "Escape") {
-    e.preventDefault();
-    closeMenu();
-    return;
-  }
-  if (!openMenu) return;
-  // ARIA menu semantics: arrow keys (and Home/End) move between enabled items.
-  const items = [...openMenu.querySelectorAll(".context-menu-item:not(:disabled)")];
-  if (!items.length) return;
-  const idx = items.indexOf(document.activeElement);
-  let next = null;
-  if (e.key === "ArrowDown") next = items[idx < 0 ? 0 : (idx + 1) % items.length];
-  else if (e.key === "ArrowUp")
-    next = items[idx <= 0 ? items.length - 1 : idx - 1];
-  else if (e.key === "Home") next = items[0];
-  else if (e.key === "End") next = items[items.length - 1];
-  else if (e.key === "Tab") {
-    // Trap Tab within the popover (wrapping at the ends) so keyboard focus can't escape to
-    // the page behind it; Escape / outside-click / an item activation are the ways out.
-    e.preventDefault();
-    const step = e.shiftKey ? -1 : 1;
-    next = items[(idx < 0 ? 0 : idx + step + items.length) % items.length];
-  }
-  if (next) {
-    e.preventDefault();
-    next.focus();
-  }
-}
-
-/** Close the menu when focus genuinely moves to another element outside it (e.g. VoiceOver
- *  navigating to a different control). Deliberately ignores a null `relatedTarget`: on macOS
- *  WKWebView a <button> blurs to <body> on **mousedown** — firing `focusout` BEFORE its
- *  `click` — so closing on that would remove the item and swallow the click (the action
- *  would never run). Plain outside clicks are dismissed by the document `mousedown` listener,
- *  and Escape / scroll / window-blur also close the menu. */
-function onMenuFocusOut(e) {
-  if (!openMenu) return;
-  const to = e.relatedTarget;
-  if (!to) return; // focus fell to <body> (incl. the WKWebView mousedown blur) — keep open
-  if (openMenu.contains(to)) return; // moved between items (arrow keys / Tab trap) — keep open
-  // Focus moving to the mark-all trigger means the user clicked it to toggle the menu
-  // closed; let that click handler do it, so we don't close-then-immediately-reopen.
-  if (to.closest?.("#mark-all-done-btn")) return;
-  closeMenu(false);
-  // Focus has already left for good, so drop the pre-menu focus reference rather than
-  // holding a stale node until the next menu opens.
-  menuReturnFocus = null;
-}
-
-/** Open a popover menu of `items` ({ label, danger?, disabled?, action }) anchored at the
- *  given viewport point, clamped to stay on-screen. */
-function openContextMenu(x, y, items) {
-  // Capture the pre-menu focus target before we move focus into the popover. When a menu
-  // is already open (reopening), keep the original target and close without restoring it,
-  // so focus lands directly in the new menu rather than flickering back to the trigger.
-  const reopening = openMenu != null;
-  const previouslyFocused = document.activeElement;
-  closeMenu(false);
-  if (!reopening) {
-    menuReturnFocus =
-      previouslyFocused instanceof HTMLElement ? previouslyFocused : null;
-  }
-  const menu = document.createElement("div");
-  menu.className = "context-menu";
-  menu.setAttribute("role", "menu");
-  for (const item of items) {
-    if (item.separator) {
-      const sep = document.createElement("div");
-      sep.className = "context-menu-sep";
-      menu.appendChild(sep);
-      continue;
-    }
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = `context-menu-item${item.danger ? " context-menu-item--danger" : ""}`;
-    btn.setAttribute("role", "menuitem");
-    btn.textContent = item.label;
-    if (item.disabled) {
-      btn.disabled = true;
-    } else {
-      btn.addEventListener("click", () => {
-        closeMenu();
-        item.action();
-      });
-    }
-    menu.appendChild(btn);
-  }
-  // Place off-screen first to measure, then clamp into the viewport.
-  menu.style.left = "0px";
-  menu.style.top = "0px";
-  document.body.appendChild(menu);
-  const { width, height } = menu.getBoundingClientRect();
-  const left = Math.min(x, window.innerWidth - width - 8);
-  const top = Math.min(y, window.innerHeight - height - 8);
-  menu.style.left = `${Math.max(8, left)}px`;
-  menu.style.top = `${Math.max(8, top)}px`;
-  openMenu = menu;
-  document.addEventListener("keydown", onMenuKeydown, true);
-  // Close if focus leaves the popover entirely (Tab is trapped, but AT or programmatic
-  // moves can still pull focus out).
-  menu.addEventListener("focusout", onMenuFocusOut);
-  // Move focus into the menu so keyboard users land in the popover (the trigger, e.g. the
-  // ••• button, otherwise keeps focus and Tab never reaches it). Escape closes the menu.
-  menu.querySelector(".context-menu-item:not(:disabled)")?.focus();
-}
+/* See `js/menu.js` (openContextMenu / closeMenu / isMenuOpen / menuContains). */
 
 /** Open a notification's subject in the default browser via the backend. */
 function openNotification(url) {
@@ -1337,7 +1063,7 @@ async function applySettings() {
     // reflected without waiting out the previous interval.
     if (s.poll_interval_s !== pollIntervalSeconds) {
       pollIntervalSeconds = s.poll_interval_s;
-      if (authenticated) startPolling();
+      if (isAuthenticated()) startPolling();
     }
   } catch (err) {
     if (seq !== settingsApplySeq) return;
@@ -1422,7 +1148,7 @@ window.addEventListener("DOMContentLoaded", () => {
   $("#mark-all-done-btn").addEventListener("click", (e) => {
     e.stopPropagation();
     // Toggle: a second click on the trigger closes the open confirm popover.
-    if (openMenu) {
+    if (isMenuOpen()) {
       closeMenu();
       return;
     }
@@ -1430,14 +1156,14 @@ window.addEventListener("DOMContentLoaded", () => {
     confirmDone(visibleNotifications().map((n) => n.thread_id), btn);
     // Reflect the expanded state for assistive tech (closeMenu resets it). Only when the
     // popover actually opened (confirmDone no-ops on an empty set).
-    if (openMenu) btn.setAttribute("aria-expanded", "true");
+    if (isMenuOpen()) btn.setAttribute("aria-expanded", "true");
   });
   // Dismiss the popover on any outside click or scroll. Ignore the trigger itself — its own
   // click handler toggles the popover, and closing here first (mousedown precedes click)
   // would let the click immediately reopen it, making it impossible to close.
   document.addEventListener("mousedown", (e) => {
     const onTrigger = e.target.closest?.("#mark-all-done-btn");
-    if (openMenu && !openMenu.contains(e.target) && !onTrigger) closeMenu();
+    if (isMenuOpen() && !menuContains(e.target) && !onTrigger) closeMenu();
   });
   window.addEventListener("blur", closeMenu);
   $("#inbox").addEventListener("scroll", closeMenu, true);
@@ -1449,6 +1175,26 @@ window.addEventListener("DOMContentLoaded", () => {
   });
 
   registerSyncEvents();
+  // Wire account auth transitions to the poll/sync lifecycle. account.js doesn't import the
+  // sync machinery directly (avoids a circular dependency); it fires these hooks instead.
+  configureAccount({
+    onAuthenticated: (justSignedIn) => {
+      // Signed in → begin the automatic poll loop (idempotent; restarts the countdown).
+      startPolling();
+      if (justSignedIn) {
+        // Fresh sign-in: refresh the cached login display + sync status with the new creds.
+        loadSettings();
+        loadSyncStatus();
+      }
+    },
+    onSignedOut: () => {
+      // A new session must re-prove a successful sync before the status pill goes green
+      // again, so a stale persisted "success" doesn't show as green after re-signing in.
+      syncedThisSession = false;
+      // Signed out → stop polling so we never hit the API without a token.
+      stopPolling();
+    },
+  });
   loadStorage();
   loadSyncStatus();
   loadSettings();
