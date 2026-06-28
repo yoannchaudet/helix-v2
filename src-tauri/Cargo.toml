@@ -34,4 +34,4 @@ tauri-plugin-updater = "2.10.1"
 # behind an opaque content pane). macOS-only; gated so other targets don't pull it.
 # Pinned to 0.6 to match the version Tauri already depends on (avoids building two
 # copies of the crate).
-window-vibrancy = "0.6"
+window-vibrancy = "0.7"
