@@ -114,6 +114,9 @@ export function openContextMenu(x, y, items) {
     if (item.separator) {
       const sep = document.createElement("div");
       sep.className = "context-menu-sep";
+      // Expose the divider to assistive tech rather than as an unlabeled element in the menu.
+      sep.setAttribute("role", "separator");
+      sep.setAttribute("aria-orientation", "horizontal");
       menu.appendChild(sep);
       continue;
     }
