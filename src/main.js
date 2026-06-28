@@ -1,14 +1,10 @@
-import { invoke, listen } from "./js/api.js";
+import { invoke } from "./js/api.js";
 import {
-  POLL_TICK_MS,
-  DEFAULT_POLL_INTERVAL_S,
   FALLBACK_MIN_POLL_INTERVAL_S,
-  SYNC_PROGRESS_DISMISS_MS,
   SETTINGS_DEBOUNCE_MS,
-  STATES,
 } from "./js/constants.js";
 import { $, $$, escapeHtml, flash, toast, announce, copyText } from "./js/dom.js";
-import { relTime, fmtTimestamp } from "./js/format.js";
+import { relTime } from "./js/format.js";
 import {
   FILTERS,
   EMPTY_SUBTITLES,
@@ -21,29 +17,20 @@ import { initUpdates } from "./js/updates.js";
 import { initSidebarResize } from "./js/sidebar-resize.js";
 import { openContextMenu, closeMenu, isMenuOpen, menuContains } from "./js/menu.js";
 import { loadAccount, isAuthenticated, configureAccount } from "./js/account.js";
+import { poll, session } from "./js/state.js";
+import {
+  loadSyncStatus,
+  syncNow,
+  setSyncProgress,
+  flashSyncProgress,
+  startPolling,
+  stopPolling,
+  registerSyncEvents,
+  configureSync,
+} from "./js/sync.js";
 
-/** True while a sync is in flight; gates stale sync:progress events. */
-let syncing = false;
-
-/** True once a sync has succeeded *in this session*. Until then the status pill stays
- *  neutral: at launch we only show cached local state and haven't confirmed Keychain or
- *  network access, so an affirmative green "Synced" would be misleading. */
-let syncedThisSession = false;
-
-/** Timer that clears the transient post-sync "Stored N" progress message. */
-let syncProgressTimer;
-
-/* ----------------------------- Poll state -------------------------------- */
-
-/** 1-second tick driving the automatic poll + the refresh-button clock sweep. */
-let pollTimer = null;
-/** Configured polling cadence (seconds); kept in sync with the saved setting. */
-let pollIntervalSeconds = DEFAULT_POLL_INTERVAL_S;
-/** Floor for the poll interval. Authoritative value comes from the backend
- *  (`get_settings().min_poll_interval_s`); this is just a fallback until settings load. */
-let minPollIntervalS = FALLBACK_MIN_POLL_INTERVAL_S;
-/** Seconds elapsed since the last sync; reset to 0 after every sync. */
-let pollElapsed = 0;
+/* Cross-module sync/poll state lives in `js/state.js`; the sync domain lives in
+ * `js/sync.js`. */
 
 /* ----------------------------- Theme state ------------------------------- */
 
@@ -144,255 +131,8 @@ async function persistTheme(pref) {
 /* -------------------------------- Account -------------------------------- */
 /* See `js/account.js` (loadAccount / isAuthenticated / configureAccount). */
 
-/* ------------------------------ Notifications ----------------------------- */
-
-/* Human label for a GitHub rate-limit bucket. Falls back to the raw resource name (which
- * is escaped before insertion) so a future/unknown bucket still renders sensibly. */
-const RATE_BUCKET_LABELS = {
-  core: "Core (REST)",
-  search: "Search",
-  graphql: "GraphQL",
-  integration_manifest: "Integration manifest",
-  source_import: "Source import",
-  code_scanning_upload: "Code scanning upload",
-  code_search: "Code search",
-};
-
-function rateBucketLabel(resource) {
-  return RATE_BUCKET_LABELS[resource] || resource;
-}
-
-/* Countdown to a rate-limit window reset, given as epoch seconds. Future-facing
- * complement to relTime ("resets in 12m" / "resets now"). */
-function resetCountdown(epochSeconds) {
-  if (epochSeconds == null) return "";
-  const secs = Math.floor(epochSeconds - Date.now() / 1000);
-  if (secs <= 0) return "resets now";
-  const m = Math.floor(secs / 60);
-  if (m < 1) return `resets in ${secs}s`;
-  if (m < 60) return `resets in ${m}m`;
-  const h = Math.floor(m / 60);
-  return h < 24 ? `resets in ${h}h` : `resets in ${Math.floor(h / 24)}d`;
-}
-
-/* Render one usage bar per rate-limit bucket. The bar fills with how much of the token's
- * allowance is *used* (limit − remaining), turning amber/red as it approaches the cap. */
-function renderRateBuckets(buckets) {
-  const host = $("#rate-buckets");
-  if (!host) return;
-
-  if (!buckets.length) {
-    host.innerHTML =
-      '<div class="srow"><span class="srow-value srow-muted">No requests yet.</span></div>';
-    return;
-  }
-
-  host.innerHTML = buckets
-    .map((b) => {
-      const label = escapeHtml(rateBucketLabel(b.resource));
-      const hasNums = b.limit != null && b.remaining != null && b.limit > 0;
-
-      // Without limit/remaining we genuinely don't know usage — render an inert,
-      // unlabelled track rather than a misleading "0% used" progressbar.
-      if (!hasNums) {
-        return `
-        <div class="rate-row">
-          <div class="rate-head">
-            <span class="rate-name">${label}</span>
-            <span class="rate-counts">—</span>
-          </div>
-          <div class="rate-bar rate-bar--unknown"></div>
-          <div class="rate-foot">
-            <span class="rate-used">usage unknown</span>
-            <span class="rate-reset">${escapeHtml(resetCountdown(b.reset_at))}</span>
-          </div>
-        </div>`;
-      }
-
-      // Once the window's reset time has passed, the stored snapshot is stale: GitHub has
-      // rolled the bucket over and refilled it, so render it as reset (full / 0% used)
-      // rather than alarming red, until the next request refreshes the real numbers.
-      const expired = b.reset_at != null && b.reset_at <= Date.now() / 1000;
-      const remaining = expired ? b.limit : b.remaining;
-      const used = Math.max(0, b.limit - remaining);
-      const frac = Math.min(1, Math.max(0, used / b.limit));
-      const pct = Math.round(frac * 100);
-      const level = frac >= 0.9 ? "danger" : frac >= 0.75 ? "warn" : "ok";
-      const counts = `${remaining.toLocaleString()} / ${b.limit.toLocaleString()} left`;
-      const reset = escapeHtml(expired ? "window reset" : resetCountdown(b.reset_at));
-      return `
-        <div class="rate-row">
-          <div class="rate-head">
-            <span class="rate-name">${label}</span>
-            <span class="rate-counts">${escapeHtml(counts)}</span>
-          </div>
-          <div class="rate-bar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="${label} usage">
-            <div class="rate-fill rate-fill--${level}" style="width: ${pct}%"></div>
-          </div>
-          <div class="rate-foot">
-            <span class="rate-used">${pct}% used</span>
-            <span class="rate-reset">${reset}</span>
-          </div>
-        </div>`;
-    })
-    .join("");
-}
-
-function renderSyncStats(status) {
-  const lastEl = $("#last-synced");
-  if (lastEl) lastEl.textContent = fmtTimestamp(status.last_sync_at);
-  renderRateBuckets(status.rate_buckets || []);
-
-  if (status.last_status === "error" && status.last_error) {
-    setSyncStatus("error", "Error");
-    setSyncProgress(status.last_error, "error");
-  } else if (status.last_status === "success") {
-    // Green only confirms a sync that happened in this session. On launch we're showing
-    // cached local state, so the same "success" record renders neutral with its age.
-    const label = status.last_sync_at
-      ? `Synced ${relTime(status.last_sync_at)}`
-      : "Synced";
-    setSyncStatus(syncedThisSession ? "success" : "neutral", label);
-  } else {
-    setSyncStatus("pending", "Never synced");
-  }
-}
-
-/* The sync controls live in two places (the Notifications header and the Settings
- * summary). These helpers update every instance at once so both stay in lockstep. */
-
-function setSyncStatus(state, text) {
-  for (const dot of $$(".js-sync-dot")) {
-    for (const s of STATES) dot.classList.remove(`status-dot--${s}`);
-    dot.classList.add(`status-dot--${state}`);
-  }
-  for (const label of $$(".js-sync-label")) {
-    for (const s of STATES) label.classList.remove(`status-label--${s}`);
-    label.classList.add(`status-label--${state}`);
-    label.textContent = text;
-  }
-}
-
-function setSyncProgress(text, kind = "") {
-  for (const el of $$(".js-sync-progress")) {
-    el.className = `form-msg js-sync-progress${kind ? ` form-msg--${kind}` : ""}`;
-    el.textContent = text;
-  }
-}
-
-function setSyncBusy(busy) {
-  for (const btn of $$(".js-sync-btn")) btn.disabled = busy;
-  // The toolbar button turns the accent color while a sync is in flight (due state).
-  $("#sync-btn")?.classList.toggle("is-due", busy);
-}
-
-async function loadSyncStatus() {
-  setSyncStatus("pending", "Loading…");
-  try {
-    const status = await invoke("sync_status");
-    renderSyncStats(status);
-  } catch (err) {
-    setSyncStatus("error", "Error");
-    setSyncProgress(String(err), "error");
-  }
-}
-
-async function syncNow() {
-  setSyncBusy(true);
-  syncing = true;
-  clearTimeout(syncProgressTimer);
-  setSyncStatus("pending", "Syncing…");
-  setSyncProgress("Starting…");
-
-  try {
-    const result = await invoke("sync_now");
-    // Stop accepting progress updates before writing the final message, so a
-    // late-delivered sync:progress event can't overwrite it.
-    syncing = false;
-    syncedThisSession = true;
-    const removed = result.removed ?? 0;
-    const storedMsg = `Stored ${result.count} notification${result.count === 1 ? "" : "s"}`;
-    setSyncProgress(
-      removed > 0
-        ? `${storedMsg}, removed ${removed}.`
-        : `${storedMsg}.`,
-      "success",
-    );
-    // Transient: the durable record is the "Last synced" row, so clear the inline
-    // "Stored N" message shortly after it appears.
-    clearTimeout(syncProgressTimer);
-    syncProgressTimer = setTimeout(() => setSyncProgress(""), SYNC_PROGRESS_DISMISS_MS);
-    await loadSyncStatus();
-    await loadInbox();
-    // A successful sync proves the Keychain is now readable, so refresh the account
-    // section to clear any stale "failed to read token" error from an earlier cancel.
-    await loadAccount();
-  } catch (err) {
-    syncing = false;
-    setSyncStatus("error", "Error");
-    setSyncProgress(String(err), "error");
-  } finally {
-    syncing = false;
-    setSyncBusy(false);
-    // Restart the countdown so the next automatic poll is measured from the most
-    // recent sync, whether it was triggered manually or by the poll loop.
-    resetPollCountdown();
-  }
-}
-
-/* ------------------------------ Poll countdown ---------------------------- */
-
-/** Write the current fraction (0–1) into the refresh button's clock sweep. */
-function setPollProgress(frac) {
-  $("#sync-btn")?.style.setProperty("--poll-progress", String(frac));
-}
-
-function resetPollCountdown() {
-  pollElapsed = 0;
-  setPollProgress(0);
-}
-
-/** One-second tick: advance the sweep and fire an automatic sync when due. */
-function pollTick() {
-  // Hold the countdown while signed out or while a sync is already running.
-  if (!isAuthenticated() || syncing) return;
-  pollElapsed += 1;
-  const interval = Math.max(pollIntervalSeconds, minPollIntervalS);
-  setPollProgress(Math.min(pollElapsed / interval, 1));
-  if (pollElapsed >= interval) syncNow();
-}
-
-/** Begin (or restart) the automatic poll loop. Safe to call repeatedly. */
-function startPolling() {
-  stopPolling();
-  resetPollCountdown();
-  pollTimer = setInterval(pollTick, POLL_TICK_MS);
-}
-
-function stopPolling() {
-  if (pollTimer) {
-    clearInterval(pollTimer);
-    pollTimer = null;
-  }
-  resetPollCountdown();
-}
-
-/** Live progress from the backend during a sync. */
-function registerSyncEvents() {
-  listen("sync:progress", (event) => {
-    // Ignore stale events delivered after the sync has settled.
-    if (!syncing) return;
-    const { page, fetched } = event.payload ?? {};
-    setSyncProgress(`Fetching page ${page}… (${fetched} so far)`);
-  });
-  // Subject states (Open/Closed/Merged pills) resolve in the background after a sync;
-  // reload the inbox once they land so the pills appear without another sync, and refresh
-  // the sync stats so the rate-limit count reflects the extra resolution calls.
-  listen("subjects:resolved", () => {
-    loadInbox();
-    loadSyncStatus();
-  });
-}
+/* Notifications status header, sync flow, and poll countdown live in `js/sync.js`
+ * (loadSyncStatus / syncNow / setSyncProgress / startPolling / etc.). */
 
 /* ------------------------------ Inbox view -------------------------------- */
 
@@ -798,17 +538,14 @@ function visibleNotifications() {
 function reportMutation(result, verb) {
   const failed = result.failed ?? [];
   if (failed.length) {
-    // Cancel any pending "clear" timer from an earlier success so it can't wipe this
-    // error message out from under the user.
-    clearTimeout(syncProgressTimer);
+    // setSyncProgress cancels any pending "clear" timer from an earlier success so it
+    // can't wipe this error message out from under the user.
     setSyncProgress(
       `${result.ok} ${verb}, ${failed.length} failed: ${failed[0].error}`,
       "error",
     );
   } else if (result.ok > 0) {
-    setSyncProgress(`${result.ok} ${verb}.`, "success");
-    clearTimeout(syncProgressTimer);
-    syncProgressTimer = setTimeout(() => setSyncProgress(""), SYNC_PROGRESS_DISMISS_MS);
+    flashSyncProgress(`${result.ok} ${verb}.`, "success");
   }
 }
 
@@ -816,7 +553,6 @@ function reportMutation(result, verb) {
  *  reconcile from SQLite. */
 async function markDone(threadIds) {
   if (!isAuthenticated()) {
-    clearTimeout(syncProgressTimer);
     setSyncProgress("Connect a GitHub token to mark notifications as done.", "error");
     return;
   }
@@ -851,8 +587,8 @@ async function markDone(threadIds) {
     const result = await invoke("mark_threads_done", { threadIds: ids });
     reportMutation(result, "marked done");
   } catch (err) {
-    // Cancel any pending "clear" timer so it can't wipe this error out moments later.
-    clearTimeout(syncProgressTimer);
+    // setSyncProgress cancels any pending "clear" timer so it can't wipe this error out
+    // moments later.
     setSyncProgress(String(err), "error");
   }
   await loadSyncStatus();
@@ -998,13 +734,13 @@ let settingsApplySeq = 0;
  *  Used at init with the fallback, then by `loadSettings()` with the backend's value.
  *  Guards against a missing/non-numeric value so the clamp can never become NaN. */
 function applyPollMin(seconds) {
-  minPollIntervalS = Number.isInteger(seconds)
+  poll.minIntervalS = Number.isInteger(seconds)
     ? seconds
     : FALLBACK_MIN_POLL_INTERVAL_S;
   const input = $("#poll-interval");
-  if (input) input.min = String(minPollIntervalS);
+  if (input) input.min = String(poll.minIntervalS);
   const label = $("#poll-min-label");
-  if (label) label.textContent = String(minPollIntervalS);
+  if (label) label.textContent = String(poll.minIntervalS);
 }
 
 async function loadSettings() {
@@ -1013,7 +749,7 @@ async function loadSettings() {
     // The backend owns the floor; mirror it onto the input + local validation.
     applyPollMin(s.min_poll_interval_s);
     $("#poll-interval").value = s.poll_interval_s;
-    pollIntervalSeconds = s.poll_interval_s;
+    poll.intervalSeconds = s.poll_interval_s;
     const themeInput = $(`input[name="theme"][value="${s.theme}"]`);
     if (themeInput) themeInput.checked = true;
     paintThemePref(s.theme);
@@ -1047,8 +783,8 @@ async function applySettings() {
 
   // Guard against NaN / out-of-range input before invoking the backend (NaN would
   // serialize to null over IPC and surface a confusing error).
-  if (!Number.isInteger(pollIntervalS) || pollIntervalS < minPollIntervalS) {
-    setSettingsError(`Min ${minPollIntervalS}s`);
+  if (!Number.isInteger(pollIntervalS) || pollIntervalS < poll.minIntervalS) {
+    setSettingsError(`Min ${poll.minIntervalS}s`);
     return;
   }
   clearSettingsError();
@@ -1061,8 +797,8 @@ async function applySettings() {
     flash($("#settings-flash"), "Saved");
     // Adopt the new cadence immediately and restart the countdown so the change is
     // reflected without waiting out the previous interval.
-    if (s.poll_interval_s !== pollIntervalSeconds) {
-      pollIntervalSeconds = s.poll_interval_s;
+    if (s.poll_interval_s !== poll.intervalSeconds) {
+      poll.intervalSeconds = s.poll_interval_s;
       if (isAuthenticated()) startPolling();
     }
   } catch (err) {
@@ -1175,6 +911,9 @@ window.addEventListener("DOMContentLoaded", () => {
   });
 
   registerSyncEvents();
+  // Sync reloads the inbox after a sync (and after background subject resolution) via this
+  // hook, so the inbox view can stay in main.js without sync importing it (avoids a cycle).
+  configureSync({ onInboxStale: loadInbox });
   // Wire account auth transitions to the poll/sync lifecycle. account.js doesn't import the
   // sync machinery directly (avoids a circular dependency); it fires these hooks instead.
   configureAccount({
@@ -1190,7 +929,7 @@ window.addEventListener("DOMContentLoaded", () => {
     onSignedOut: () => {
       // A new session must re-prove a successful sync before the status pill goes green
       // again, so a stale persisted "success" doesn't show as green after re-signing in.
-      syncedThisSession = false;
+      session.syncedThisSession = false;
       // Signed out → stop polling so we never hit the API without a token.
       stopPolling();
     },
