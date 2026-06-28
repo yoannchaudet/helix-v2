@@ -1,0 +1,102 @@
+import { test, expect } from "@playwright/test";
+import { openApp, emptyFixtures } from "./tauri-mock.js";
+
+/* Inbox flows against mocked data: rendering, the smart filters + repo refinement, and the
+ * three mark-done paths (per-row, bulk-confirm, context menu). */
+
+test("renders the inbox grouped by repo with sidebar counts", async ({ page }) => {
+  await openApp(page);
+
+  await expect(page.locator("#inbox .repo-section")).toHaveCount(2);
+  await expect(page.locator("#inbox .n-row")).toHaveCount(3);
+  await expect(page.locator("#view-title")).toHaveText("All");
+
+  // Smart-filter counts reflect the fixture (all=3, mention=1, review=1, assign=1, cleanup=1).
+  await expect(page.locator('.source-count[data-count="all"]')).toHaveText("3");
+  await expect(page.locator('.source-count[data-count="mention"]')).toHaveText("1");
+  await expect(page.locator('.source-count[data-count="review_requested"]')).toHaveText("1");
+  await expect(page.locator('.source-count[data-count="cleanup"]')).toHaveText("1");
+  // A reason with no matches renders no count badge.
+  await expect(page.locator('.source-count[data-count="team_mention"]')).toHaveText("");
+
+  // Most-recent-first ordering: acme/widgets (11:00) sorts above octo/hello (10:00).
+  await expect(page.locator(".repo-name").first()).toHaveText("acme/widgets");
+});
+
+test("selecting a smart filter narrows the list and updates the title", async ({ page }) => {
+  await openApp(page);
+
+  await page.locator('.source[data-filter="mention"]').click();
+
+  await expect(page.locator("#view-title")).toHaveText("Mentions");
+  await expect(page.locator("#inbox .n-row")).toHaveCount(1);
+  await expect(page.locator(".n-title")).toContainText("Crash on launch");
+  await expect(page.locator('.source[data-filter="mention"]')).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
+});
+
+test("refining by repository shows only that repo, with a breadcrumb", async ({ page }) => {
+  await openApp(page);
+
+  await page.locator('.repo-source[data-repo="2"]').click();
+
+  await expect(page.locator("#inbox .repo-section")).toHaveCount(1);
+  await expect(page.locator("#inbox .n-row")).toHaveCount(1);
+  await expect(page.locator("#view-title .crumb-repo")).toHaveText("acme/widgets");
+});
+
+test("marking a single row done removes it and decrements the count", async ({ page }) => {
+  await openApp(page);
+
+  // The per-row done button is revealed (and made clickable) on row hover.
+  await page.locator('.n-row[data-thread-id="t2"]').hover();
+  await page.locator('.n-row[data-thread-id="t2"] .n-done').click();
+
+  await expect(page.locator('.n-row[data-thread-id="t2"]')).toHaveCount(0);
+  await expect(page.locator("#inbox .n-row")).toHaveCount(2);
+  await expect(page.locator('.source-count[data-count="all"]')).toHaveText("2");
+});
+
+test("bulk mark-all confirms, then clears the whole view", async ({ page }) => {
+  await openApp(page);
+
+  await page.locator("#mark-all-done-btn").click();
+  // The destructive action is gated behind an in-app confirm popover.
+  const confirm = page.getByRole("menuitem", { name: /Confirm: mark 3 as done/ });
+  await expect(confirm).toBeVisible();
+  await confirm.click();
+
+  await expect(page.locator("#inbox .n-row")).toHaveCount(0);
+  await expect(page.locator(".inbox-empty")).toContainText("You're all caught up.");
+});
+
+test("the bulk confirm popover can be dismissed without marking anything", async ({ page }) => {
+  await openApp(page);
+
+  await page.locator("#mark-all-done-btn").click();
+  await page.getByRole("menuitem", { name: "Cancel" }).click();
+
+  await expect(page.locator(".context-menu")).toHaveCount(0);
+  await expect(page.locator("#inbox .n-row")).toHaveCount(3);
+});
+
+test("right-click offers Copy URL + Mark as done; Mark as done removes the row", async ({
+  page,
+}) => {
+  await openApp(page);
+
+  await page.locator('.n-row[data-thread-id="t1"] .n-open').click({ button: "right" });
+  await expect(page.getByRole("menuitem", { name: "Copy URL" })).toBeVisible();
+  await page.getByRole("menuitem", { name: "Mark as done" }).click();
+
+  await expect(page.locator('.n-row[data-thread-id="t1"]')).toHaveCount(0);
+});
+
+test("an empty inbox shows the all-caught-up state", async ({ page }) => {
+  await openApp(page, emptyFixtures());
+
+  await expect(page.locator(".inbox-empty")).toContainText("You're all caught up.");
+  await expect(page.locator("#inbox .n-row")).toHaveCount(0);
+});
