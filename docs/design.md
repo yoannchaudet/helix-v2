@@ -1,6 +1,8 @@
 # Helix — Technical Design 🧬
 
-> Status: **Draft (v1)**. This document describes the first technical design for Helix.
+> Status: **Implemented (v1 / MVP)** — a living document kept in sync with the shipped
+> app. It describes Helix's technical design; see [§9](#9-status--deferred-work) for what
+> is done versus deferred.
 > Engineering principles that govern *how* we build live in [`../AGENT.md`](../AGENT.md).
 
 ## 1. Overview
@@ -56,6 +58,26 @@ reconciles with GitHub over the network.
   `subjects:resolved` when background subject resolution updates rows; the UI currently
   reacts to `sync:progress` (live progress) and `subjects:resolved` (re-render), and reads
   sync status via `sync_status`.
+
+### Current architecture (as built)
+
+The shape above still holds; a few specifics have settled since the original draft:
+
+- **Frontend is decomposed into ES modules** under `src/js/` (`api`, `dom`, `format`,
+  `inbox-model`, `inbox-view`, `inbox`, `account`, `sync`, `settings`, `storage`,
+  `updates`, `menu`, `shortcuts`, `sidebar-resize`, `state`, `constants`, `ui`).
+  `src/main.js` is a thin orchestrator that wires each module's `init()` on
+  `DOMContentLoaded`. To avoid circular imports, a module that must call into another
+  exposes a `configureX({ onEvent })` hook set by `main.js` rather than importing it.
+- **Polling is frontend-driven:** `sync.js` runs a 1-second tick (`setInterval`) that
+  calls `sync_now` once the configured interval has elapsed; `main.js` starts/stops this
+  loop via `startPolling()` / `stopPolling()` on auth-state changes. There is no Rust-side
+  timer.
+- **CSS is token-driven:** colors plus shared non-color primitives (spacing, radii,
+  durations, control sizing, z-index) live as custom properties in `src/styles.css`, with
+  a light/dark theme resolved from the user's appearance choice.
+- **Token storage is build-mode based** (see [§8](#8-security)): release builds use the
+  macOS Keychain, debug builds store the PAT unencrypted in SQLite.
 
 ### Data flow (read path)
 1. UI calls `list_inbox` → core reads SQLite → returns grouped-by-repo data.
