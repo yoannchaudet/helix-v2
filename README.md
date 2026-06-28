@@ -82,9 +82,9 @@ in-app cheatsheet, also reachable from **Help → Keyboard Shortcuts**):
 Requires [Node.js](https://nodejs.org) and a [Rust](https://rustup.rs) toolchain.
 
 ```sh
-npm install        # install the Tauri CLI
-npm run tauri dev  # run the app in development
-npm run tauri build  # produce a release bundle
+npm install            # install the Tauri CLI
+npm run tauri -- dev   # run the app in development
+npm run tauri -- build # produce a release bundle
 ```
 
 Run the Rust tests (e.g. the SQLite bootstrap) with:
