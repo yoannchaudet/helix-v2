@@ -230,14 +230,10 @@ function renderFilterList() {
 /** Update sidebar filter/repo selection styling + the smart-filter counts. */
 function renderSidebar() {
   const all = inboxGroups.flatMap((g) => g.notifications);
-  const counts = {
-    all: all.length,
-    mention: all.filter(FILTERS.mention.match).length,
-    team_mention: all.filter(FILTERS.team_mention.match).length,
-    review_requested: all.filter(FILTERS.review_requested.match).length,
-    assign: all.filter(FILTERS.assign.match).length,
-    cleanup: all.filter(FILTERS.cleanup.match).length,
-  };
+  // Derive counts from FILTERS so adding/renaming a filter updates the sidebar in one place.
+  const counts = Object.fromEntries(
+    Object.entries(FILTERS).map(([id, { match }]) => [id, all.filter(match).length]),
+  );
   for (const el of $$(".source-count")) {
     const key = el.dataset.count;
     const value = counts[key] ?? 0;

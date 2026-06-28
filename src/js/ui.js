@@ -10,16 +10,16 @@ import { escapeHtml } from "./dom.js";
  *  Used for the subject/state badges and the private-repo lock badge. */
 export function pill(text, className, { title = "" } = {}) {
   const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
-  return `<span class="${className}"${titleAttr}>${escapeHtml(text)}</span>`;
+  return `<span class="${escapeHtml(className)}"${titleAttr}>${escapeHtml(text)}</span>`;
 }
 
 /** An icon-only button with the a11y essentials baked in: an explicit `type`, an
  *  `aria-label` (icons have no text), and a `title` tooltip defaulting to that label.
- *  `attrs` is a pre-built attribute string for extras (ids, data-*). */
+ *  `attrs` is a pre-built (trusted) attribute string for extras (ids, data-*). */
 export function iconButton({ icon, label, className = "icon-btn", title, attrs = "" }) {
   const tooltip = title ?? label;
   return (
-    `<button type="button" class="${className}" title="${escapeHtml(tooltip)}"` +
+    `<button type="button" class="${escapeHtml(className)}" title="${escapeHtml(tooltip)}"` +
     ` aria-label="${escapeHtml(label)}"${attrs ? ` ${attrs}` : ""}>${icon}</button>`
   );
 }
@@ -46,10 +46,10 @@ export function sourceButton({
   const lockSuffix = lock ? " 🔒" : "";
   const countHtml =
     count !== "" || countKey
-      ? `<span class="source-count"${countKey ? ` data-count="${countKey}"` : ""}>${escapeHtml(count)}</span>`
+      ? `<span class="source-count"${countKey ? ` data-count="${escapeHtml(countKey)}"` : ""}>${escapeHtml(count)}</span>`
       : "";
   return `<li>
-      <button type="button" class="${cls}"${attrs ? ` ${attrs}` : ""}${current}>
+      <button type="button" class="${escapeHtml(cls)}"${attrs ? ` ${attrs}` : ""}${current}>
         <span class="source-icon" aria-hidden="true">${icon}</span>
         <span class="source-label"${titleAttr}>${escapeHtml(label)}${lockSuffix}</span>
         ${countHtml}
