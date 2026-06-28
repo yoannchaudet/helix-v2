@@ -8,7 +8,7 @@
    import. */
 
 import { invoke } from "./api.js";
-import { $, escapeHtml } from "./dom.js";
+import { $, html, rawHtml } from "./dom.js";
 
 /** True once the user is authenticated; drives the signed-out empty state and gates the
  *  poll/sync flows (read via `isAuthenticated`). */
@@ -39,7 +39,7 @@ export function configureAccount({ onAuthenticated: onIn, onSignedOut: onOut } =
  *  release. Rendered inside the Account group so it sits next to the credential UI. */
 function unencryptedStorageWarning() {
   if (!unencryptedStorage) return "";
-  return `
+  return html`
     <div class="callout callout--warn" role="note">
       <strong>Dev build:</strong> your GitHub token is stored
       <strong>unencrypted</strong> in this app's local database (SQLite), not the macOS
@@ -55,22 +55,21 @@ function renderSignedIn(login, name, justSignedIn = false) {
   // Treat a missing or placeholder login as "no avatar": fetching
   // github.com/(unknown).png would 404 and the fallback letter would be "(".
   const hasLogin = Boolean(login) && login !== "(unknown)";
-  const safeLogin = escapeHtml(login);
   const hasName = Boolean(name);
-  const primary = hasName ? escapeHtml(name) : hasLogin ? `@${safeLogin}` : "Signed in";
+  const primary = hasName ? name : hasLogin ? `@${login}` : "Signed in";
   const secondary =
-    hasName && hasLogin ? `<span class="account-login">@${safeLogin}</span>` : "";
+    hasName && hasLogin ? html`<span class="account-login">@${login}</span>` : "";
   const avatar = hasLogin
-    ? `<img class="avatar" id="account-avatar" alt=""
+    ? html`<img class="avatar" id="account-avatar" alt=""
         src="https://github.com/${encodeURIComponent(login)}.png?size=96" />`
-    : `<span class="avatar avatar--fallback" aria-hidden="true">?</span>`;
-  $("#account-body").innerHTML = `
-    ${unencryptedStorageWarning()}
+    : html`<span class="avatar avatar--fallback" aria-hidden="true">?</span>`;
+  $("#account-body").innerHTML = html`
+    ${rawHtml(unencryptedStorageWarning())}
     <div class="srow srow--account">
-      ${avatar}
+      ${rawHtml(avatar)}
       <div class="account-meta">
         <span class="account-name">${primary}</span>
-        ${secondary}
+        ${rawHtml(secondary)}
       </div>
       <button type="button" class="btn" id="sign-out">Sign out</button>
     </div>`;
@@ -93,8 +92,11 @@ function renderSignedOut(message) {
   authenticated = false;
   // Signed out → let main stop polling (and reset the per-session sync flag).
   onSignedOut();
-  $("#account-body").innerHTML = `
-    ${unencryptedStorageWarning()}
+  const storageNote = unencryptedStorage
+    ? html`Stored <strong>unencrypted</strong> in this app's local database (dev build).`
+    : "Stored in your macOS Keychain.";
+  $("#account-body").innerHTML = html`
+    ${rawHtml(unencryptedStorageWarning())}
     <form id="signin-form" class="form">
       <div class="field">
         <label for="pat">GitHub Personal Access Token</label>
@@ -102,17 +104,13 @@ function renderSignedOut(message) {
           placeholder="ghp_… or github_pat_…" />
         <p class="hint">
           Needs the <code>notifications</code> scope (add <code>repo</code> for private
-          repositories). ${
-            unencryptedStorage
-              ? "Stored <strong>unencrypted</strong> in this app's local database (dev build)."
-              : "Stored in your macOS Keychain."
-          }
+          repositories). ${rawHtml(storageNote)}
         </p>
       </div>
       <div class="form-actions">
         <button type="submit" class="btn btn--primary" id="signin-btn">Connect</button>
         <span class="form-msg ${message ? "form-msg--error" : ""}" id="signin-msg">
-          ${message ? escapeHtml(message) : ""}
+          ${message ?? ""}
         </span>
       </div>
     </form>`;
@@ -166,6 +164,6 @@ export async function loadAccount() {
     }
   } catch (err) {
     body.classList.add("slist--error");
-    body.innerHTML = `<div class="srow"><span class="srow-error">${escapeHtml(err)}</span></div>`;
+    body.innerHTML = html`<div class="srow"><span class="srow-error">${err}</span></div>`;
   }
 }

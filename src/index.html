@@ -2,29 +2,10 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <script src="/theme-bootstrap.js"></script>
     <link rel="stylesheet" href="styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Helix</title>
-    <script>
-      // Resolve the saved theme before first paint to avoid a flash of the wrong
-      // theme. The pref is mirrored to localStorage by main.js; SQLite remains the
-      // source of truth and re-confirms it once the app boots.
-      (function () {
-        try {
-          var pref = localStorage.getItem("helix-theme");
-          // Fall back to "system" for missing/corrupted/unknown values so the first
-          // paint still follows the OS rather than silently defaulting to light.
-          if (pref !== "light" && pref !== "dark" && pref !== "system") {
-            pref = "system";
-          }
-          var dark =
-            pref === "dark" ||
-            (pref === "system" &&
-              window.matchMedia("(prefers-color-scheme: dark)").matches);
-          document.documentElement.dataset.theme = dark ? "dark" : "light";
-        } catch (e) {}
-      })();
-    </script>
     <script type="module" src="/main.js" defer></script>
   </head>
 

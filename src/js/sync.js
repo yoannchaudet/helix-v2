@@ -1,6 +1,6 @@
 import { invoke, listen } from "./api.js";
 import { POLL_TICK_MS, SYNC_PROGRESS_DISMISS_MS, STATES } from "./constants.js";
-import { $, $$, escapeHtml } from "./dom.js";
+import { $, $$, html } from "./dom.js";
 import { relTime, fmtTimestamp } from "./format.js";
 import { poll, session } from "./state.js";
 import { isAuthenticated, loadAccount } from "./account.js";
@@ -64,20 +64,19 @@ function renderRateBuckets(buckets) {
   if (!host) return;
 
   if (!buckets.length) {
-    host.innerHTML =
-      '<div class="srow"><span class="srow-value srow-muted">No requests yet.</span></div>';
+    host.innerHTML = html`<div class="srow"><span class="srow-value srow-muted">No requests yet.</span></div>`;
     return;
   }
 
   host.innerHTML = buckets
     .map((b) => {
-      const label = escapeHtml(rateBucketLabel(b.resource));
+      const label = rateBucketLabel(b.resource);
       const hasNums = b.limit != null && b.remaining != null && b.limit > 0;
 
       // Without limit/remaining we genuinely don't know usage — render an inert,
       // unlabelled track rather than a misleading "0% used" progressbar.
       if (!hasNums) {
-        return `
+        return html`
         <div class="rate-row">
           <div class="rate-head">
             <span class="rate-name">${label}</span>
@@ -86,7 +85,7 @@ function renderRateBuckets(buckets) {
           <div class="rate-bar rate-bar--unknown"></div>
           <div class="rate-foot">
             <span class="rate-used">usage unknown</span>
-            <span class="rate-reset">${escapeHtml(resetCountdown(b.reset_at))}</span>
+            <span class="rate-reset">${resetCountdown(b.reset_at)}</span>
           </div>
         </div>`;
       }
@@ -101,12 +100,12 @@ function renderRateBuckets(buckets) {
       const pct = Math.round(frac * 100);
       const level = frac >= 0.9 ? "danger" : frac >= 0.75 ? "warn" : "ok";
       const counts = `${remaining.toLocaleString()} / ${b.limit.toLocaleString()} left`;
-      const reset = escapeHtml(expired ? "window reset" : resetCountdown(b.reset_at));
-      return `
+      const reset = expired ? "window reset" : resetCountdown(b.reset_at);
+      return html`
         <div class="rate-row">
           <div class="rate-head">
             <span class="rate-name">${label}</span>
-            <span class="rate-counts">${escapeHtml(counts)}</span>
+            <span class="rate-counts">${counts}</span>
           </div>
           <div class="rate-bar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="${label} usage">
             <div class="rate-fill rate-fill--${level}" style="width: ${pct}%"></div>

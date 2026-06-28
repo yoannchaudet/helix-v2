@@ -1,4 +1,4 @@
-import { escapeHtml } from "./dom.js";
+import { html, rawHtml } from "./dom.js";
 import { relTime } from "./format.js";
 import { pill, iconButton } from "./ui.js";
 
@@ -44,18 +44,13 @@ const DONE_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="
 
 export function notificationRow(n) {
   const number =
-    n.subject_number != null
-      ? `<span class="n-number">#${escapeHtml(n.subject_number)}</span> `
-      : "";
+    n.subject_number != null ? html`<span class="n-number">#${n.subject_number}</span> ` : "";
   const badge = stateBadge(n.subject_state);
-  const stateLine = badge ? `<div class="n-state">${badge}</div>` : "";
-  const reason = escapeHtml(n.reason.replace(/_/g, " "));
+  const stateLine = badge ? html`<div class="n-state">${rawHtml(badge)}</div>` : "";
   // Only rows with a resolved web URL are openable (clickable + hover affordance).
   const url = n.subject_html_url || "";
   const cls = `n-row${url ? " n-row--openable" : ""}`;
-  const openAttrs = url
-    ? ` data-url="${escapeHtml(url)}" role="link" tabindex="0"`
-    : "";
+  const openAttrs = url ? html` data-url="${url}" role="link" tabindex="0"` : "";
   // Contextual accessible name so each row's button isn't an indistinct "Mark as done".
   const doneBtn = iconButton({
     icon: DONE_ICON,
@@ -63,17 +58,17 @@ export function notificationRow(n) {
     title: "Mark as done",
     label: `Mark "${n.subject_title}" as done`,
   });
-  return `
-    <li class="${cls}" data-thread-id="${escapeHtml(n.thread_id)}">
-      <div class="n-open"${openAttrs}>
-        <span class="n-badge-slot">${subjectBadge(n.subject_type)}</span>
+  return html`
+    <li class="${cls}" data-thread-id="${n.thread_id}">
+      <div class="n-open"${rawHtml(openAttrs)}>
+        <span class="n-badge-slot">${rawHtml(subjectBadge(n.subject_type))}</span>
         <div class="n-main">
-          <div class="n-title">${number}${escapeHtml(n.subject_title)}</div>
-          ${stateLine}
-          <div class="n-meta"><span class="n-reason">${reason}</span> · ${escapeHtml(relTime(n.updated_at))}</div>
+          <div class="n-title">${rawHtml(number)}${n.subject_title}</div>
+          ${rawHtml(stateLine)}
+          <div class="n-meta"><span class="n-reason">${n.reason.replace(/_/g, " ")}</span> · ${relTime(n.updated_at)}</div>
         </div>
       </div>
-      ${doneBtn}
+      ${rawHtml(doneBtn)}
     </li>`;
 }
 
@@ -90,16 +85,16 @@ export function repoHeader(group) {
     className: "repo-done",
     title: "Mark this repo's notifications as done",
     label: `Mark ${group.full_name} notifications as done`,
-    attrs: `data-done-repo="${group.repo_id}"`,
+    attrs: html`data-done-repo="${group.repo_id}"`,
   });
   // The repo name is an <h2> so screen-reader users can navigate the inbox by heading; it
   // also names the group region (see `repoSection`).
-  return `
+  return html`
     <div class="repo-header">
-      <h2 class="repo-name" id="repo-h-${group.repo_id}">${escapeHtml(group.full_name)}</h2>
-      ${privacy}
-      ${counts}
-      ${clear}
+      <h2 class="repo-name" id="repo-h-${group.repo_id}">${group.full_name}</h2>
+      ${rawHtml(privacy)}
+      ${rawHtml(counts)}
+      ${rawHtml(clear)}
     </div>`;
 }
 
@@ -107,7 +102,7 @@ export function repoSection(group) {
   const rows = group.notifications.map(notificationRow).join("");
   // `role=group` + `aria-labelledby` ties the list to its repo heading for assistive tech
   // without creating a landmark per repo (which would be noisy with many repos).
-  return `<section class="repo-section" role="group" aria-labelledby="repo-h-${group.repo_id}">${repoHeader(
-    group,
-  )}<ul class="n-list">${rows}</ul></section>`;
+  return html`<section class="repo-section" role="group" aria-labelledby="repo-h-${group.repo_id}">${rawHtml(
+    repoHeader(group),
+  )}<ul class="n-list">${rawHtml(rows)}</ul></section>`;
 }

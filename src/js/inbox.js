@@ -1,5 +1,5 @@
 import { invoke } from "./api.js";
-import { $, $$, escapeHtml, toast, announce, copyText } from "./dom.js";
+import { $, $$, html, rawHtml, toast, announce, copyText } from "./dom.js";
 import {
   FILTERS,
   EMPTY_SUBTITLES,
@@ -38,16 +38,16 @@ function filteredGroups() {
 
 /** Current toolbar breadcrumb: the filter label, plus the repo when refined. */
 function activeTitleHtml() {
-  const label = escapeHtml((FILTERS[activeFilter] ?? FILTERS.all).label);
+  const label = (FILTERS[activeFilter] ?? FILTERS.all).label;
   if (activeRepo != null) {
     const group = inboxGroups.find((g) => g.repo_id === activeRepo);
     if (group) {
-      return `${label}<span class="crumb-sep" aria-hidden="true">›</span><span class="crumb-repo">${escapeHtml(
-        group.full_name,
-      )}</span>`;
+      return html`${label}${rawHtml(
+        html`<span class="crumb-sep" aria-hidden="true">›</span><span class="crumb-repo">${group.full_name}</span>`,
+      )}`;
     }
   }
-  return label;
+  return html`${label}`;
 }
 
 /** Plain-text accessible name for the breadcrumb (the visual `›` separator is
@@ -63,7 +63,7 @@ function activeTitleLabel() {
 
 function emptyInbox() {
   if (!isAuthenticated()) {
-    return `<div class="inbox-empty">
+    return html`<div class="inbox-empty">
         <p>Connect your GitHub account to start receiving notifications.</p>
         <button type="button" class="btn js-goto-settings">Open Settings</button>
       </div>`;
@@ -72,10 +72,10 @@ function emptyInbox() {
   // filter has no matches. Reaching this is a small win, so show the muted helix mark with a
   // filter-specific subtitle (the toolbar already exposes sync status + refresh).
   const sub = EMPTY_SUBTITLES[activeFilter] ?? EMPTY_SUBTITLES.all;
-  return `<div class="inbox-empty">
+  return html`<div class="inbox-empty">
       <img class="inbox-empty-art" src="/assets/helix-muted.svg" alt="" width="116" height="116" />
       <p class="inbox-empty-title">You're all caught up.</p>
-      <p class="inbox-empty-sub">${escapeHtml(sub)}</p>
+      <p class="inbox-empty-sub">${sub}</p>
     </div>`;
 }
 
@@ -220,7 +220,7 @@ function renderFilterList() {
       sourceButton({
         icon: FILTER_ICONS[id] ?? "",
         label,
-        attrs: `data-filter="${id}"`,
+        attrs: html`data-filter="${id}"`,
         active: id === activeFilter,
         countKey: id,
       }),
@@ -254,7 +254,7 @@ function renderSidebar() {
     (x) => x.group.full_name,
   );
   if (!visibleRepos.length) {
-    repoList.innerHTML = `<li class="source-empty">No repositories yet.</li>`;
+    repoList.innerHTML = html`<li class="source-empty">No repositories yet.</li>`;
   } else {
     repoList.innerHTML = visibleRepos
       .map(({ group: g, matches }) =>
@@ -264,7 +264,7 @@ function renderSidebar() {
           labelTitle: g.full_name,
           lock: g.private,
           className: "repo-source",
-          attrs: `data-repo="${g.repo_id}"`,
+          attrs: html`data-repo="${g.repo_id}"`,
           // Total notifications matching the active filter in this repo (read state untracked).
           count: matches.length ? String(matches.length) : "",
         }),
@@ -332,7 +332,7 @@ export async function loadInbox() {
     renderSidebar();
     renderInbox();
   } catch (err) {
-    $("#inbox").innerHTML = `<pre class="error-detail">${escapeHtml(err)}</pre>`;
+    $("#inbox").innerHTML = html`<pre class="error-detail">${err}</pre>`;
   }
 }
 
