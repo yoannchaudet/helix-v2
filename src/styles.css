@@ -1647,3 +1647,100 @@ input[type="text"]:focus {
   margin: 4px 6px;
   background: var(--hairline);
 }
+
+/* --------------------------- Shortcuts overlay --------------------------- */
+
+/* A centered modal cheatsheet, opened by `?` or the macOS "Keyboard Shortcuts" menu item.
+ * Auto-themed via the same tokens as the rest of the app. */
+.shortcuts-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60; /* above the context menu (50) */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.32);
+  backdrop-filter: saturate(120%) blur(2px);
+  -webkit-backdrop-filter: saturate(120%) blur(2px);
+  animation: flash-in 0.12s ease;
+}
+
+.shortcuts-panel {
+  width: min(540px, 100%);
+  max-height: 100%;
+  overflow: auto;
+  padding: 18px 20px 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+}
+
+.shortcuts-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.shortcuts-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.shortcuts-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px 28px;
+}
+
+.shortcuts-group-title {
+  margin: 0 0 6px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.shortcuts-list {
+  margin: 0;
+}
+
+.shortcuts-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 3px 0;
+}
+
+.shortcuts-keys {
+  flex: none;
+  display: flex;
+  gap: 4px;
+  margin: 0;
+}
+
+.shortcuts-desc {
+  margin: 0;
+  font-size: 0.84rem;
+  color: var(--text);
+  text-align: right;
+}
+
+.shortcuts-overlay kbd {
+  min-width: 18px;
+  padding: 1px 5px;
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  text-align: center;
+  color: var(--text);
+  background: var(--field-bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  box-shadow: 0 1px 0 var(--border);
+}

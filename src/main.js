@@ -15,6 +15,7 @@ import {
 } from "./js/sync.js";
 import { initSettings, loadSettings } from "./js/settings.js";
 import { initInbox, loadInbox } from "./js/inbox.js";
+import { initShortcuts } from "./js/shortcuts.js";
 
 /* main.js is the thin orchestrator: it wires each domain module's init on DOMContentLoaded
  * and connects the cross-domain lifecycle hooks. Everything else lives in `js/`:
@@ -40,6 +41,7 @@ window.addEventListener("DOMContentLoaded", () => {
 
   initSidebarResize();
   initInbox();
+  initShortcuts();
 
   registerSyncEvents();
   // Sync reloads the inbox after a sync (and after background subject resolution) via this
