@@ -577,7 +577,18 @@ function confirmRepoDone(btn) {
   confirmDone(ids, btn);
 }
 
-/** Right-click a notification row → copy its URL (if resolved) and/or mark done. */
+/** Web URL for a row's repository. Every notification belongs to a repo, so this works even
+ *  for subjects with no resolvable link (e.g. Copilot agent sessions). github.com is the
+ *  app's only host (see `API_BASE` in github.rs); `full_name` is `owner/repo`. */
+function repoUrlForRow(row) {
+  const labelled = row.closest(".repo-section")?.getAttribute("aria-labelledby");
+  const repoId = labelled ? Number(labelled.slice("repo-h-".length)) : NaN;
+  const group = inboxGroups.find((g) => g.repo_id === repoId);
+  if (!group) return null;
+  return `https://github.com/${group.full_name.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+/** Right-click a notification row → copy its URL, open its repository, or mark it done. */
 function onInboxContextMenu(e) {
   const row = inboxRowFromEvent(e);
   if (!row) return;
@@ -585,6 +596,7 @@ function onInboxContextMenu(e) {
   const threadId = row.dataset.threadId;
   if (!threadId) return;
   const url = row.querySelector(".n-open")?.dataset.url;
+  const repoUrl = repoUrlForRow(row);
   // A keyboard-triggered context menu (Menu key / Shift+F10) reports 0,0; anchor the
   // menu to the row instead so it doesn't appear detached in the corner.
   let { clientX: x, clientY: y } = e;
@@ -599,6 +611,13 @@ function onInboxContextMenu(e) {
       disabled: !url,
       action: () => copyNotificationUrl(url),
     },
+    {
+      // Always available — useful for subjects with no link of their own.
+      label: "Open repository",
+      disabled: !repoUrl,
+      action: () => openNotification(repoUrl),
+    },
+    { separator: true },
     {
       label: "Mark as done",
       danger: true,

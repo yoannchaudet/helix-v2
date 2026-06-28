@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { openApp, emptyFixtures } from "./tauri-mock.js";
+import { openApp, emptyFixtures, defaultFixtures } from "./tauri-mock.js";
 
 /* Inbox flows against mocked data: rendering, the smart filters + repo refinement, and the
  * three mark-done paths (per-row, bulk-confirm, context menu). */
@@ -92,6 +92,58 @@ test("right-click offers Copy URL + Mark as done; Mark as done removes the row",
   await page.getByRole("menuitem", { name: "Mark as done" }).click();
 
   await expect(page.locator('.n-row[data-thread-id="t1"]')).toHaveCount(0);
+});
+
+test("right-click can open the row's repository in the browser", async ({ page }) => {
+  await openApp(page);
+
+  // t1 lives in octo/hello.
+  await page.locator('.n-row[data-thread-id="t1"] .n-open').click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Open repository" }).click();
+
+  const opened = await page.evaluate(() =>
+    window.__TAURI_CALLS__.filter((c) => c.cmd === "open_url").map((c) => c.args.url),
+  );
+  expect(opened).toContain("https://github.com/octo/hello");
+});
+
+test("Open repository works for a subject with no link of its own (agent session)", async ({
+  page,
+}) => {
+  // A Copilot agent-session notification: no subject_html_url, so "Copy URL" is unavailable,
+  // but the repository link still is.
+  const fx = defaultFixtures();
+  fx.inbox = [
+    {
+      repo_id: 9,
+      full_name: "octo/agent",
+      private: false,
+      notifications: [
+        {
+          thread_id: "a1",
+          subject_type: "AgentSessionThread",
+          subject_title: "Configuring dependabot",
+          subject_number: null,
+          subject_state: null,
+          subject_html_url: null,
+          reason: "agent_session_finished",
+          updated_at: "2026-06-27T22:29:48Z",
+        },
+      ],
+    },
+  ];
+  await openApp(page, fx);
+
+  await page.locator('.n-row[data-thread-id="a1"]').click({ button: "right" });
+  await expect(page.getByRole("menuitem", { name: "Copy URL" })).toBeDisabled();
+  const openRepo = page.getByRole("menuitem", { name: "Open repository" });
+  await expect(openRepo).toBeEnabled();
+  await openRepo.click();
+
+  const opened = await page.evaluate(() =>
+    window.__TAURI_CALLS__.filter((c) => c.cmd === "open_url").map((c) => c.args.url),
+  );
+  expect(opened).toContain("https://github.com/octo/agent");
 });
 
 test("an empty inbox shows the all-caught-up state", async ({ page }) => {
