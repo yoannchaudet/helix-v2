@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     branches:
-      - "**"
+      - main
   pull_request:
     branches:
       - main
@@ -12,9 +12,10 @@ on:
 permissions:
   contents: read
 
-# Cancel superseded runs for the same branch. Using `head_ref || ref_name` collapses a
-# branch push and its pull_request event into one group, so we don't run the same commit
-# twice and rapid re-pushes cancel earlier runs — saving slow/expensive macOS minutes.
+# Cancel superseded runs on the same ref. With CI triggered by pull_request (PR branches)
+# and push to main only, this means a rapid re-push to a PR branch cancels its earlier
+# in-flight run — saving slow/expensive macOS minutes — without ever double-running a
+# commit (feature-branch pushes no longer trigger a duplicate run alongside the PR).
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
