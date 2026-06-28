@@ -1,0 +1,60 @@
+# Dependabot version updates. See:
+# https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference
+#
+# A 3-day `cooldown` delays version-update PRs until a release has been public for 3 days,
+# so a freshly published (potentially compromised) version isn't proposed the instant it
+# lands — a guard against supply-chain attacks. Note: cooldown applies to *version* updates
+# only; security updates for known vulnerabilities are still raised promptly.
+#
+# `groups` bundle all minor + patch bumps for an ecosystem into a single weekly PR to cut
+# review noise. Major bumps are intentionally left ungrouped so each breaking change still
+# gets its own PR to review.
+version: 2
+updates:
+  # GitHub Actions used by the workflows in .github/workflows/.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 3
+    open-pull-requests-limit: 5
+    groups:
+      actions-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Node/npm dependencies (root package.json + package-lock.json).
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 3
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Rust crates for the Tauri backend (src-tauri/Cargo.toml + Cargo.lock).
+  - package-ecosystem: "cargo"
+    directory: "/src-tauri"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 3
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
