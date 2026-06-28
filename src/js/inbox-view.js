@@ -1,5 +1,6 @@
 import { escapeHtml } from "./dom.js";
 import { relTime } from "./format.js";
+import { pill, iconButton } from "./ui.js";
 
 /* Pure HTML templating for the inbox: given a notification (or repo group), return the
  * markup string. No DOM access, no module state — so these are unit-testable and the
@@ -19,7 +20,7 @@ const SUBJECT_BADGES = {
 
 export function subjectBadge(type) {
   const [label, cls] = SUBJECT_BADGES[type] ?? [type, "badge--other"];
-  return `<span class="badge ${cls}">${escapeHtml(label)}</span>`;
+  return pill(label, `badge ${cls}`);
 }
 
 /** Map a resolved subject state to a display pill. `subject_state` is only ever
@@ -35,7 +36,7 @@ export function stateBadge(state) {
   const entry = map[state];
   if (!entry) return "";
   const [label, cls] = entry;
-  return `<span class="state ${cls}">${label}</span>`;
+  return pill(label, `state ${cls}`);
 }
 
 /** Checkmark glyph for the "mark as done" affordances (row / toolbar / repo header). */
@@ -56,7 +57,12 @@ export function notificationRow(n) {
     ? ` data-url="${escapeHtml(url)}" role="link" tabindex="0"`
     : "";
   // Contextual accessible name so each row's button isn't an indistinct "Mark as done".
-  const doneLabel = escapeHtml(`Mark "${n.subject_title}" as done`);
+  const doneBtn = iconButton({
+    icon: DONE_ICON,
+    className: "n-done",
+    title: "Mark as done",
+    label: `Mark "${n.subject_title}" as done`,
+  });
   return `
     <li class="${cls}" data-thread-id="${escapeHtml(n.thread_id)}">
       <div class="n-open"${openAttrs}>
@@ -67,19 +73,25 @@ export function notificationRow(n) {
           <div class="n-meta"><span class="n-reason">${reason}</span> · ${escapeHtml(relTime(n.updated_at))}</div>
         </div>
       </div>
-      <button type="button" class="n-done" title="Mark as done" aria-label="${doneLabel}">${DONE_ICON}</button>
+      ${doneBtn}
     </li>`;
 }
 
 export function repoHeader(group) {
   const privacy = group.private
-    ? `<span class="badge badge--lock" title="Private repository">private</span>`
+    ? pill("private", "badge badge--lock", { title: "Private repository" })
     : "";
   // Read state isn't tracked; show how many notifications are shown for this repo (i.e.
   // matching the active filter — `group.notifications` is already filtered upstream).
   const counts = `<span class="repo-counts">${group.notifications.length}</span>`;
   // A natural sub-filter: clear just this repo's (filtered) notifications.
-  const clear = `<button type="button" class="repo-done" data-done-repo="${group.repo_id}" title="Mark this repo's notifications as done" aria-label="Mark ${escapeHtml(group.full_name)} notifications as done">${DONE_ICON}</button>`;
+  const clear = iconButton({
+    icon: DONE_ICON,
+    className: "repo-done",
+    title: "Mark this repo's notifications as done",
+    label: `Mark ${group.full_name} notifications as done`,
+    attrs: `data-done-repo="${group.repo_id}"`,
+  });
   // The repo name is an <h2> so screen-reader users can navigate the inbox by heading; it
   // also names the group region (see `repoSection`).
   return `
