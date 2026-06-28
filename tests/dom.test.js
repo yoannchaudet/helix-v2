@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { escapeHtml, html, rawHtml } from "../src/js/dom.js";
 
-// Only the pure `escapeHtml` is unit-tested here; the rest of dom.js (flash/toast/announce/
+// Only the pure HTML helpers are unit-tested here; the rest of dom.js (flash/toast/announce/
 // copyText) touches the DOM/clipboard and is exercised manually in the app.
 
 test("escapeHtml escapes all five HTML-sensitive characters", () => {
