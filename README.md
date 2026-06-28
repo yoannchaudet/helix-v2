@@ -83,6 +83,19 @@ dependencies):
 npm test
 ```
 
+Run the browser-based UI tests (Playwright). These load the real `index.html` +
+ES modules in headless Chromium with a mocked `window.__TAURI__` (see
+`tests/e2e/`), covering the inbox, mark-done, settings, and account flows:
+
+```sh
+npx playwright install chromium   # one-time browser download
+npm run test:e2e
+```
+
+> The UI tests run in Chromium, **not** the macOS WKWebView the app actually
+> ships on, so engine-specific behavior (the focusout/click race, clipboard)
+> still has to be smoke-tested by hand on a real build.
+
 ### Token storage (macOS)
 
 Where Helix keeps your GitHub PAT depends on the build:
