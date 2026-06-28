@@ -1,7 +1,9 @@
 /* Light theme (default). The palette below is split into solid tokens and `*-rgb`
    channel triplets; the triplets feed the many `rgba(var(--x-rgb), a)` tints used
    throughout, so a single dark-mode override of each channel re-themes every tint.
-   The dark theme lives in the `:root[data-theme="dark"]` block further down. */
+   Shared non-color primitives below keep spacing, radii, motion, control sizing,
+   and stacking consistent across component recipes. The dark theme lives in the
+   `:root[data-theme="dark"]` block further down. */
 :root {
   color-scheme: light;
 
@@ -62,7 +64,67 @@
   --toast-text: #ffffff;
   --toast-shadow: 0 6px 20px rgba(0, 0, 0, 0.22);
 
-  --radius: 12px;
+  /* Shared primitives. */
+  --space-1: 1px;
+  --space-2: 2px;
+  --space-3: 3px;
+  --space-4: 4px;
+  --space-5: 5px;
+  --space-6: 6px;
+  --space-7: 7px;
+  --space-8: 8px;
+  --space-9: 9px;
+  --space-10: 10px;
+  --space-11: 11px;
+  --space-12: 12px;
+  --space-14: 14px;
+  --space-16: 16px;
+  --space-18: 18px;
+  --space-20: 20px;
+  --space-22: 22px;
+  --space-24: 24px;
+  --space-26: 26px;
+  --space-28: 28px;
+  --space-30: 30px;
+  --space-32: 32px;
+  --space-36: 36px;
+  --space-40: 40px;
+
+  --radius-sm: 3px;
+  --radius-md: 4px;
+  --radius-lg: 6px;
+  --radius-xl: 7px;
+  --radius-2xl: 8px;
+  --radius-3xl: 10px;
+  --radius-4xl: 12px;
+  --radius-5xl: 14px;
+  --radius-pill: 999px;
+
+  --duration-quick: 0.1s;
+  --duration-fast: 0.12s;
+  --duration-base: 0.15s;
+  --duration-medium: 0.16s;
+  --duration-slow: 0.18s;
+  --duration-larger: 0.2s;
+  --duration-pop: 0.22s;
+  --duration-quiet: 0.3s;
+  --duration-reduced: 0.01ms;
+
+  --control-icon-sm: 22px;
+  --control-icon-md: 26px;
+  --control-icon-lg: 28px;
+  --control-resizer-width: 8px;
+  --control-switch-track: 40px;
+  --control-switch-height: 22px;
+  --control-switch-knob: 16px;
+  --control-status-dot: 9px;
+  --control-kbd-min: 18px;
+
+  --z-popover: 50;
+  --z-overlay: 60;
+  --z-toast: 80;
+
+  --radius: var(--radius-4xl);
   --shadow: 0 1px 2px rgba(var(--text-rgb), 0.06),
     0 8px 24px rgba(var(--text-rgb), 0.06);
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto,
@@ -205,9 +267,9 @@ code,
   position: absolute;
   top: 0;
   left: var(--sidebar-w);
-  width: 8px;
+  width: var(--control-resizer-width);
   height: 100%;
-  margin-left: -4px;
+  margin-left: calc(var(--control-resizer-width) / -2);
   z-index: 5;
   cursor: col-resize;
 }
@@ -216,11 +278,11 @@ code,
   content: "";
   position: absolute;
   top: 0;
-  left: 4px;
+  left: calc(var(--control-resizer-width) / 2);
   width: 1px;
   height: 100%;
   background: transparent;
-  transition: background 0.12s ease;
+  transition: background var(--duration-fast) ease;
 }
 
 .sidebar-resizer:hover::after,
@@ -234,8 +296,9 @@ code,
 
 .sidebar-resizer:focus-visible::after {
   background: var(--accent);
-  width: 2px;
-  left: 3px;
+  width: var(--space-2);
+  /* Keep the indicator centered in the hit area regardless of the resizer width. */
+  left: calc((var(--control-resizer-width) - var(--space-2)) / 2);
 }
 
 /* ================================ Sidebar ================================= */
@@ -247,7 +310,7 @@ code,
      when private-api vibrancy is unavailable. */
   background: var(--sidebar-bg);
   border-right: 1px solid var(--hairline);
-  padding: 0 10px 10px;
+  padding: 0 var(--space-10) var(--space-10);
 }
 
 /* Reserve the traffic-light region (the overlay title bar runs full-height). */
@@ -258,8 +321,8 @@ code,
 
 /* Native macOS source-list header: subtle, uppercase, muted. */
 .sidebar-title {
-  margin: 0 0 8px;
-  padding: 0 12px;
+  margin: 0 0 var(--space-8);
+  padding: 0 var(--space-12);
   font-size: 13px;
   font-weight: 700;
   text-transform: uppercase;
@@ -281,8 +344,8 @@ code,
 }
 
 .source-group-label {
-  margin: 16px 0 4px;
-  padding: 0 10px;
+  margin: var(--space-16) 0 var(--space-4);
+  padding: 0 var(--space-10);
   font-size: 0.72rem;
   font-weight: 600;
   letter-spacing: 0.04em;
@@ -293,7 +356,7 @@ code,
 .source {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: var(--space-9);
   width: 100%;
   appearance: none;
   border: 0;
@@ -302,10 +365,10 @@ code,
   font: inherit;
   font-size: 0.86rem;
   text-align: left;
-  padding: 6px 10px;
-  border-radius: 7px;
+  padding: var(--space-6) var(--space-10);
+  border-radius: var(--radius-xl);
   cursor: pointer;
-  transition: background 0.12s ease;
+  transition: background var(--duration-fast) ease;
 }
 
 .source:hover {
@@ -478,14 +541,15 @@ code,
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: var(--control-icon-lg);
+  height: var(--control-icon-lg);
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--muted);
-  border-radius: 7px;
+  border-radius: var(--radius-xl);
   cursor: pointer;
-  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease,
+    border-color var(--duration-fast) ease;
 }
 
 .icon-btn:hover {
@@ -551,15 +615,15 @@ code,
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 4px;
+  gap: var(--space-4);
   color: var(--muted);
   font-size: 0.92rem;
-  padding: 24px;
+  padding: var(--space-24);
   text-align: center;
 }
 
 .inbox-empty .btn {
-  margin-top: 12px;
+  margin-top: var(--space-12);
 }
 
 /* Normalize paragraph margins so spacing is controlled by the container's `gap`
@@ -571,7 +635,7 @@ code,
 .inbox-empty-art {
   width: 116px;
   height: 116px;
-  margin-bottom: 12px;
+  margin-bottom: var(--space-12);
   opacity: 0.85;
   user-select: none;
   -webkit-user-drag: none;
@@ -597,8 +661,8 @@ code,
   z-index: 1;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 16px;
+  gap: var(--space-8);
+  padding: var(--space-6) var(--space-16);
   background: var(--repo-header-bg);
   backdrop-filter: saturate(180%) blur(14px);
   -webkit-backdrop-filter: saturate(180%) blur(14px);
@@ -635,7 +699,7 @@ code,
   justify-content: center;
   padding: 0;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-lg);
   background: transparent;
   color: var(--muted);
   cursor: pointer;
@@ -643,18 +707,19 @@ code,
   /* Inert while hidden so a click on the reserved (transparent) slot never marks a row
      done — it's only revealed + clickable on hover or keyboard focus. */
   pointer-events: none;
-  transition: opacity 0.12s ease, color 0.12s ease, background 0.12s ease;
+  transition: opacity var(--duration-fast) ease, color var(--duration-fast) ease,
+    background var(--duration-fast) ease;
 }
 
 .n-done {
-  width: 26px;
-  height: 26px;
-  margin-right: 10px;
+  width: var(--control-icon-md);
+  height: var(--control-icon-md);
+  margin-right: var(--space-10);
 }
 
 .repo-done {
-  width: 22px;
-  height: 22px;
+  width: var(--control-icon-sm);
+  height: var(--control-icon-sm);
 }
 
 .n-row:hover .n-done,
@@ -695,16 +760,16 @@ code,
 .n-open {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-10);
   flex: 1;
   min-width: 0;
-  padding: 7px 16px;
+  padding: var(--space-7) var(--space-16);
 }
 
 /* Rows with a resolved web URL are clickable; give them a clear, on-brand hover
    highlight (matching the context-menu / active-source treatment). */
 .n-row--openable {
-  transition: background 0.12s ease;
+  transition: background var(--duration-fast) ease;
 }
 
 .n-row--openable:hover {
@@ -777,13 +842,13 @@ code,
   max-width: 760px;
   width: 100%;
   margin: 0 auto;
-  padding: 24px;
+  padding: var(--space-24);
 }
 
 /* Color-coded state: green success / yellow pending / red error */
 .status-dot {
-  width: 9px;
-  height: 9px;
+  width: var(--control-status-dot);
+  height: var(--control-status-dot);
   border-radius: 50%;
   flex: none;
 }
@@ -829,10 +894,10 @@ code,
 .loader {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-12);
   color: var(--muted);
   font-size: 0.92rem;
-  padding: 24px 16px;
+  padding: var(--space-24) var(--space-16);
 }
 
 /* The inbox's initial loading state mirrors the empty state: centered in the pane rather
@@ -858,8 +923,8 @@ code {
   font-size: 0.88em;
   color: var(--accent-strong);
   background: rgba(var(--accent-rgb), 0.1);
-  padding: 1px 6px;
-  border-radius: 6px;
+  padding: var(--space-1) var(--space-6);
+  border-radius: var(--radius-lg);
 }
 
 .tables {
@@ -868,7 +933,7 @@ code {
   padding: 0;
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: var(--space-6);
 }
 
 .tables li code {
@@ -885,10 +950,10 @@ code {
 
 .error-detail {
   margin: 0;
-  padding: 12px;
+  padding: var(--space-12);
   background: rgba(var(--error-rgb), 0.06);
   border: 1px solid rgba(var(--error-rgb), 0.25);
-  border-radius: 8px;
+  border-radius: var(--radius-2xl);
   color: var(--danger-text);
   font-family: var(--mono);
   font-size: 0.82rem;
@@ -1007,9 +1072,9 @@ code {
 }
 
 .rate-bar {
-  margin: 7px 0 5px;
-  height: 6px;
-  border-radius: 3px;
+  margin: var(--space-7) 0 var(--space-5);
+  height: var(--space-6);
+  border-radius: var(--radius-sm);
   background: var(--hairline);
   overflow: hidden;
 }
@@ -1021,8 +1086,8 @@ code {
 
 .rate-fill {
   height: 100%;
-  border-radius: 3px;
-  transition: width 0.3s ease;
+  border-radius: var(--radius-sm);
+  transition: width var(--duration-quiet) ease;
 }
 
 .rate-fill--ok {
@@ -1134,15 +1199,15 @@ code {
   color: var(--text);
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-  border-radius: 4px;
+  border-radius: var(--radius-md);
 }
 
 /* Small button variant for inline row controls (e.g. Sync now). */
 .btn--sm {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 5px 11px;
+  gap: var(--space-6);
+  padding: var(--space-5) var(--space-11);
   font-size: 0.85rem;
 }
 
@@ -1155,9 +1220,9 @@ code {
  * via `display: none` so it never reserves layout space (no permanent gap in the row). */
 /* Inline warning callout (e.g. the dev-build "token stored unencrypted" notice). */
 .callout {
-  margin: 16px 16px 10px;
-  padding: 9px 12px;
-  border-radius: 8px;
+  margin: var(--space-16) var(--space-16) var(--space-10);
+  padding: var(--space-9) var(--space-12);
+  border-radius: var(--radius-2xl);
   font-size: 0.82rem;
   line-height: 1.4;
 }
@@ -1176,7 +1241,7 @@ code {
 
 .srow-flash--show {
   display: inline-block;
-  animation: flash-in 0.22s ease;
+  animation: flash-in var(--duration-pop) ease;
 }
 
 .srow-flash--error {
@@ -1188,19 +1253,19 @@ code {
 .toast {
   position: fixed;
   left: 50%;
-  bottom: 22px;
-  transform: translateX(-50%) translateY(6px);
-  z-index: 80;
+  bottom: var(--space-22);
+  transform: translateX(-50%) translateY(var(--space-6));
+  z-index: var(--z-toast);
   max-width: 80vw;
-  padding: 7px 14px;
-  border-radius: 8px;
+  padding: var(--space-7) var(--space-14);
+  border-radius: var(--radius-2xl);
   background: var(--toast-bg);
   color: var(--toast-text);
   font-size: 0.85rem;
   box-shadow: var(--toast-shadow);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.16s ease, transform 0.16s ease;
+  transition: opacity var(--duration-medium) ease, transform var(--duration-medium) ease;
 }
 
 .toast--show {
@@ -1218,8 +1283,8 @@ code {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 10px 16px;
+  gap: var(--space-14);
+  padding: var(--space-10) var(--space-16);
   border-bottom: 1px solid var(--hairline);
   background: rgba(var(--accent-rgb), 0.08);
 }
@@ -1233,7 +1298,7 @@ code {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-6);
 }
 
 .update-banner-text {
@@ -1245,12 +1310,12 @@ code {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-8);
 }
 
 .update-bar {
-  height: 6px;
-  border-radius: 3px;
+  height: var(--space-6);
+  border-radius: var(--radius-sm);
   background: var(--hairline);
   overflow: hidden;
 }
@@ -1263,22 +1328,22 @@ code {
   display: block;
   height: 100%;
   width: 0;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: var(--accent);
-  transition: width 0.2s ease;
+  transition: width var(--duration-larger) ease;
 }
 
 /* Forms */
 .form {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: var(--space-18);
 }
 
 .field {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-6);
 }
 
 .field label {
@@ -1297,15 +1362,15 @@ input[type="number"],
 input[type="password"],
 input[type="text"] {
   width: 100%;
-  padding: 10px 12px;
+  padding: var(--space-10) var(--space-12);
   font-size: 0.95rem;
   font-family: inherit;
   color: var(--text);
   background: var(--field-bg);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-2xl);
   outline: none;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  transition: border-color var(--duration-base) ease, box-shadow var(--duration-base) ease;
 }
 
 input[type="number"]:focus,
@@ -1318,7 +1383,7 @@ input[type="text"]:focus {
 .form-actions {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: var(--space-14);
 }
 
 .btn {
@@ -1329,10 +1394,11 @@ input[type="text"]:focus {
   font: inherit;
   font-size: 0.9rem;
   font-weight: 600;
-  padding: 9px 16px;
-  border-radius: 8px;
+  padding: var(--space-9) var(--space-16);
+  border-radius: var(--radius-2xl);
   cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+  transition: background var(--duration-base) ease, border-color var(--duration-base) ease,
+    opacity var(--duration-base) ease;
 }
 
 .btn:hover {
@@ -1373,7 +1439,7 @@ input[type="text"]:focus {
 .switch {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-10);
   cursor: pointer;
   font-size: 0.92rem;
   font-weight: 500;
@@ -1388,25 +1454,25 @@ input[type="text"]:focus {
 
 .switch-track {
   position: relative;
-  width: 40px;
-  height: 22px;
-  border-radius: 999px;
+  width: var(--control-switch-track);
+  height: var(--control-switch-height);
+  border-radius: var(--radius-pill);
   background: var(--track);
-  transition: background 0.18s ease;
+  transition: background var(--duration-slow) ease;
   flex: none;
 }
 
 .switch-track::after {
   content: "";
   position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 16px;
-  height: 16px;
+  top: var(--space-3);
+  left: var(--space-3);
+  width: var(--control-switch-knob);
+  height: var(--control-switch-knob);
   border-radius: 50%;
   background: var(--knob);
   box-shadow: var(--knob-shadow);
-  transition: transform 0.18s ease;
+  transition: transform var(--duration-slow) ease;
 }
 
 .switch input:checked + .switch-track {
@@ -1414,7 +1480,9 @@ input[type="text"]:focus {
 }
 
 .switch input:checked + .switch-track::after {
-  transform: translateX(18px);
+  transform: translateX(
+    calc(var(--control-switch-track) - var(--control-switch-knob) - (2 * var(--space-3)))
+  );
 }
 
 .switch input:focus-visible + .switch-track {
@@ -1426,11 +1494,11 @@ input[type="text"]:focus {
    the accessible/keyboard-operable control (arrow keys move between options). */
 .seg {
   display: inline-flex;
-  padding: 2px;
-  gap: 2px;
+  padding: var(--space-2);
+  gap: var(--space-2);
   background: var(--hover);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-2xl);
 }
 
 .seg-opt {
@@ -1448,13 +1516,13 @@ input[type="text"]:focus {
 .seg-opt > span {
   display: inline-flex;
   align-items: center;
-  padding: 4px 12px;
-  border-radius: 6px;
+  padding: var(--space-4) var(--space-12);
+  border-radius: var(--radius-lg);
   font-size: 0.85rem;
   font-weight: 500;
   color: var(--muted);
   cursor: pointer;
-  transition: background 0.12s ease, color 0.12s ease;
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
 }
 
 .seg-opt input:checked + span {
@@ -1474,8 +1542,8 @@ input[type="text"]:focus {
   flex: none;
   font-size: 0.68rem;
   font-weight: 600;
-  padding: 1px 6px;
-  border-radius: 999px;
+  padding: var(--space-1) var(--space-6);
+  border-radius: var(--radius-pill);
   white-space: nowrap;
   border: 1px solid transparent;
 }
@@ -1515,8 +1583,8 @@ input[type="text"]:focus {
   display: inline-block;
   font-size: 0.68rem;
   font-weight: 600;
-  padding: 1px 6px;
-  border-radius: 6px;
+  padding: var(--space-1) var(--space-6);
+  border-radius: var(--radius-lg);
   white-space: nowrap;
 }
 
@@ -1572,10 +1640,10 @@ input[type="text"]:focus {
   *,
   *::before,
   *::after {
-    animation-duration: 0.01ms !important;
+    animation-duration: var(--duration-reduced) !important;
     animation-delay: 0s !important;
     animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
+    transition-duration: var(--duration-reduced) !important;
     transition-delay: 0s !important;
     scroll-behavior: auto !important;
   }
@@ -1594,33 +1662,33 @@ input[type="text"]:focus {
  * Positioned in the viewport by JS (clamped on-screen). */
 .context-menu {
   position: fixed;
-  z-index: 50;
+  z-index: var(--z-popover);
   min-width: 184px;
-  padding: 5px;
+  padding: var(--space-5);
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-3xl);
   box-shadow: var(--shadow);
   display: flex;
   flex-direction: column;
-  gap: 1px;
-  animation: flash-in 0.1s ease;
+  gap: var(--space-1);
+  animation: flash-in var(--duration-quick) ease;
 }
 
 .context-menu-item {
   display: flex;
   align-items: center;
   width: 100%;
-  padding: 6px 10px;
+  padding: var(--space-6) var(--space-10);
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-lg);
   background: transparent;
   color: var(--text);
   font-family: inherit;
   font-size: 0.84rem;
   text-align: left;
   cursor: pointer;
-  transition: background 0.1s ease, color 0.1s ease;
+  transition: background var(--duration-quick) ease, color var(--duration-quick) ease;
 }
 
 .context-menu-item:hover:not(:disabled),
@@ -1644,7 +1712,7 @@ input[type="text"]:focus {
 
 .context-menu-sep {
   height: 1px;
-  margin: 4px 6px;
+  margin: var(--space-4) var(--space-6);
   background: var(--hairline);
 }
 
@@ -1655,25 +1723,25 @@ input[type="text"]:focus {
 .shortcuts-overlay {
   position: fixed;
   inset: 0;
-  z-index: 60; /* above the context menu (50) */
+  z-index: var(--z-overlay);
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
+  padding: var(--space-24);
   background: rgba(0, 0, 0, 0.32);
   backdrop-filter: saturate(120%) blur(2px);
   -webkit-backdrop-filter: saturate(120%) blur(2px);
-  animation: flash-in 0.12s ease;
+  animation: flash-in var(--duration-fast) ease;
 }
 
 .shortcuts-panel {
   width: min(540px, 100%);
   max-height: 100%;
   overflow: auto;
-  padding: 18px 20px 20px;
+  padding: var(--space-18) var(--space-20) var(--space-20);
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: var(--radius-5xl);
   box-shadow: var(--shadow);
 }
 
@@ -1681,7 +1749,7 @@ input[type="text"]:focus {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 14px;
+  margin-bottom: var(--space-14);
 }
 
 .shortcuts-title {
@@ -1694,7 +1762,7 @@ input[type="text"]:focus {
 .shortcuts-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 16px 28px;
+  gap: var(--space-16) var(--space-28);
 }
 
 .shortcuts-group-title {
@@ -1714,14 +1782,14 @@ input[type="text"]:focus {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 12px;
-  padding: 3px 0;
+  gap: var(--space-12);
+  padding: var(--space-3) 0;
 }
 
 .shortcuts-keys {
   flex: none;
   display: flex;
-  gap: 4px;
+  gap: var(--space-4);
   margin: 0;
 }
 
@@ -1733,14 +1801,16 @@ input[type="text"]:focus {
 }
 
 .shortcuts-overlay kbd {
-  min-width: 18px;
-  padding: 1px 5px;
+  min-width: var(--control-kbd-min);
+  padding: var(--space-1) var(--space-5);
   font-family: var(--mono);
   font-size: 0.74rem;
   text-align: center;
   color: var(--text);
   background: var(--field-bg);
   border: 1px solid var(--border);
+  /* Intentionally off the shared radius scale: the kbd chip keeps its bespoke 5px
+     curve (between --radius-md and --radius-lg) so the cheatsheet keys look unchanged. */
   border-radius: 5px;
   box-shadow: 0 1px 0 var(--border);
 }
