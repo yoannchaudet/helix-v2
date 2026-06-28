@@ -297,7 +297,8 @@ code,
 .sidebar-resizer:focus-visible::after {
   background: var(--accent);
   width: var(--space-2);
-  left: var(--space-3);
+  /* Keep the indicator centered in the hit area regardless of the resizer width. */
+  left: calc((var(--control-resizer-width) - var(--space-2)) / 2);
 }
 
 /* ================================ Sidebar ================================= */
@@ -1808,6 +1809,8 @@ input[type="text"]:focus {
   color: var(--text);
   background: var(--field-bg);
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  /* Intentionally off the shared radius scale: the kbd chip keeps its bespoke 5px
+     curve (between --radius-md and --radius-lg) so the cheatsheet keys look unchanged. */
+  border-radius: 5px;
   box-shadow: 0 1px 0 var(--border);
 }
