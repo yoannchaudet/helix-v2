@@ -207,13 +207,18 @@ async fn resolve_pending_subjects(app: tauri::AppHandle, token: String) {
             match res {
                 Ok(result) => {
                     rate.observe(result.rate.clone());
-                    if let Ok(conn) = state.db.0.lock() {
-                        match sync::store_resolved_subject(&conn, &thread_id, &result.subject) {
-                            Ok(()) => changed += 1,
-                            Err(e) => eprintln!(
-                                "helix: storing resolved subject for {thread_id} failed: {e}"
-                            ),
+                    match state.db.0.lock() {
+                        Ok(conn) => {
+                            match sync::store_resolved_subject(&conn, &thread_id, &result.subject) {
+                                Ok(()) => changed += 1,
+                                Err(e) => eprintln!(
+                                    "helix: storing resolved subject for {thread_id} failed: {e}"
+                                ),
+                            }
                         }
+                        Err(e) => eprintln!(
+                            "helix: storing resolved subject for {thread_id} failed: database lock poisoned: {e}"
+                        ),
                     }
                 }
                 Err(err) => {

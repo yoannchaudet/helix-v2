@@ -95,6 +95,10 @@ pub async fn fetch_user(token: &str) -> Result<GitHubUser, GitHubError> {
     if status == reqwest::StatusCode::UNAUTHORIZED {
         return Err(GitHubError::Unauthorized);
     }
+    if status == reqwest::StatusCode::FORBIDDEN {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(GitHubError::Forbidden(body.trim().to_string()));
+    }
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
         return Err(GitHubError::Status {
@@ -257,6 +261,13 @@ pub async fn resolve_subject(
             rate,
         });
     }
+    if status == reqwest::StatusCode::FORBIDDEN {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(ResolveError {
+            rate,
+            error: GitHubError::Forbidden(body.trim().to_string()),
+        });
+    }
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
         // A failed (non-404) request still consumed quota — carry its rate snapshot so the
@@ -334,6 +345,13 @@ pub async fn mark_thread_done(
         return Err(MutationError {
             rate,
             error: GitHubError::Unauthorized,
+        });
+    }
+    if status == reqwest::StatusCode::FORBIDDEN {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(MutationError {
+            rate,
+            error: GitHubError::Forbidden(body.trim().to_string()),
         });
     }
     let body = resp.text().await.unwrap_or_default();
