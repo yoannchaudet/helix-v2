@@ -104,6 +104,12 @@ const MIGRATIONS: &[&str] = &[
         done_at     TEXT NOT NULL
     );
     "#,
+    // v5 — GitHub's requested poll-cadence floor, captured per successful sync so the
+    // frontend can honor it on top of the user's interval. Holds the max of `X-Poll-Interval`
+    // and any `Retry-After` seen on the recorded response. NULL means GitHub asked for nothing.
+    r#"
+    ALTER TABLE sync_state ADD COLUMN github_poll_interval_s INTEGER;
+    "#,
 ];
 
 /// Open the database at `db_path`, apply any pending migrations, and return the

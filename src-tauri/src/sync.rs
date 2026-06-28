@@ -195,9 +195,14 @@ pub fn record_success(conn: &Connection, rate: &RateLimit) -> rusqlite::Result<(
            last_status    = 'success',
            last_error     = NULL,
            rate_remaining = ?1,
-           rate_reset_at  = ?2
+           rate_reset_at  = ?2,
+           github_poll_interval_s = ?3
          WHERE id = 1",
-        params![rate.remaining, rate.reset.map(|r| r.to_string())],
+        params![
+            rate.remaining,
+            rate.reset.map(|r| r.to_string()),
+            rate.poll_floor()
+        ],
     )?;
     upsert_rate(conn, rate)?;
     Ok(())
@@ -320,6 +325,9 @@ pub struct SyncStatus {
     pub last_error: Option<String>,
     pub rate_remaining: Option<i64>,
     pub rate_reset_at: Option<String>,
+    /// GitHub's requested poll-cadence floor in seconds (`X-Poll-Interval` / `Retry-After`),
+    /// which the frontend honors on top of the user's interval. `None` when unrequested.
+    pub github_poll_interval_s: Option<i64>,
     pub notification_count: i64,
     /// Per-bucket rate-limit snapshots (one entry per API bucket Helix has touched).
     pub rate_buckets: Vec<RateBucket>,
@@ -344,7 +352,8 @@ pub fn read_rate_buckets(conn: &Connection) -> rusqlite::Result<Vec<RateBucket>>
 /// Read the current sync status (from `sync_state` + a count of stored notifications).
 pub fn read_status(conn: &Connection) -> rusqlite::Result<SyncStatus> {
     let row = conn.query_row(
-        "SELECT last_sync_at, last_status, last_error, rate_remaining, rate_reset_at
+        "SELECT last_sync_at, last_status, last_error, rate_remaining, rate_reset_at,
+                github_poll_interval_s
          FROM sync_state WHERE id = 1",
         [],
         |r| {
@@ -354,6 +363,7 @@ pub fn read_status(conn: &Connection) -> rusqlite::Result<SyncStatus> {
                 r.get::<_, Option<String>>(2)?,
                 r.get::<_, Option<i64>>(3)?,
                 r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<i64>>(5)?,
             ))
         },
     )?;
@@ -367,6 +377,7 @@ pub fn read_status(conn: &Connection) -> rusqlite::Result<SyncStatus> {
         last_error: row.2,
         rate_remaining: row.3,
         rate_reset_at: row.4,
+        github_poll_interval_s: row.5,
         notification_count,
         rate_buckets,
     })
@@ -1076,11 +1087,14 @@ mod tests {
             remaining: Some(4999),
             reset: Some(1700000000),
             poll_interval: Some(60),
+            retry_after: None,
         };
         record_success(&conn, &rate).unwrap();
         let s = read_status(&conn).unwrap();
         assert_eq!(s.last_status.as_deref(), Some("success"));
         assert_eq!(s.rate_remaining, Some(4999));
+        // GitHub's requested poll floor (X-Poll-Interval here) is persisted + surfaced.
+        assert_eq!(s.github_poll_interval_s, Some(60));
         assert!(s.last_sync_at.is_some());
         assert_eq!(s.last_error, None);
         // The snapshot is also folded into the per-bucket table.
@@ -1107,6 +1121,7 @@ mod tests {
             remaining: Some(4900),
             reset: Some(1700000000),
             poll_interval: None,
+            retry_after: None,
         });
         tracker.observe(RateLimit {
             resource: Some("core".to_string()),
@@ -1114,6 +1129,7 @@ mod tests {
             remaining: Some(4990),
             reset: Some(1700000000),
             poll_interval: None,
+            retry_after: None,
         });
         tracker.observe(RateLimit {
             resource: Some("search".to_string()),
@@ -1121,6 +1137,7 @@ mod tests {
             remaining: Some(29),
             reset: Some(1700000500),
             poll_interval: None,
+            retry_after: None,
         });
         tracker.persist(&conn).unwrap();
 
@@ -1143,6 +1160,7 @@ mod tests {
                 remaining: Some(1),
                 reset: Some(1),
                 poll_interval: None,
+                retry_after: None,
             },
         )
         .unwrap();
@@ -1161,6 +1179,7 @@ mod tests {
             remaining: Some(0),
             reset: Some(1000),
             poll_interval: None,
+            retry_after: None,
         });
         tracker.observe(RateLimit {
             resource: Some("core".to_string()),
@@ -1168,6 +1187,7 @@ mod tests {
             remaining: Some(4999),
             reset: Some(4600),
             poll_interval: None,
+            retry_after: None,
         });
         assert_eq!(tracker.lowest_remaining(), Some(4999));
     }
@@ -1182,6 +1202,7 @@ mod tests {
             remaining: Some(1500),
             reset: Some(1000),
             poll_interval: None,
+            retry_after: None,
         });
         assert!(!tracker.below_reserve(0.25));
 
@@ -1192,6 +1213,7 @@ mod tests {
             remaining: Some(1250),
             reset: Some(1000),
             poll_interval: None,
+            retry_after: None,
         });
         assert!(tracker.below_reserve(0.25));
 
@@ -1203,6 +1225,7 @@ mod tests {
             remaining: Some(1),
             reset: None,
             poll_interval: None,
+            retry_after: None,
         });
         assert!(!unknown.below_reserve(0.25));
     }

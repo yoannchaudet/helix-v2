@@ -16,6 +16,9 @@ let syncProgressTimer;
 let pollTimer = null;
 /** Seconds elapsed since the last sync; reset to 0 after every sync. */
 let pollElapsed = 0;
+/** GitHub's requested poll-cadence floor (X-Poll-Interval / Retry-After) from the last
+ *  sync status, honored on top of the user's interval. 0 = GitHub requested nothing. */
+let githubPollFloorS = 0;
 
 /** Called when a sync (or background subject resolution) makes the inbox stale; wired by
  *  main.js to reload the inbox. Kept as a hook so the inbox view can stay in main.js
@@ -126,6 +129,8 @@ function renderSyncStats(status) {
   const lastEl = $("#last-synced");
   if (lastEl) lastEl.textContent = fmtTimestamp(status.last_sync_at);
   renderRateBuckets(status.rate_buckets || []);
+  // Adopt GitHub's requested poll floor so the next automatic poll honors its cadence.
+  githubPollFloorS = Number(status.github_poll_interval_s) || 0;
 
   if (status.last_status === "error" && status.last_error) {
     setSyncStatus("error", "Error");
@@ -246,7 +251,9 @@ function pollTick() {
   // Hold the countdown while signed out or while a sync is already running.
   if (!isAuthenticated() || syncing) return;
   pollElapsed += 1;
-  const interval = Math.max(poll.intervalSeconds, poll.minIntervalS);
+  // Honor GitHub's requested cadence (X-Poll-Interval / Retry-After) on top of the user's
+  // interval and the app's hard minimum.
+  const interval = Math.max(poll.intervalSeconds, poll.minIntervalS, githubPollFloorS);
   setPollProgress(Math.min(pollElapsed / interval, 1));
   if (pollElapsed >= interval) syncNow();
 }

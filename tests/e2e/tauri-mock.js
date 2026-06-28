@@ -99,6 +99,7 @@ export function defaultFixtures() {
       last_sync_at: "2026-06-27T11:30:00Z",
       last_status: "success",
       last_error: null,
+      github_poll_interval_s: 60,
       rate_buckets: [
         { resource: "core", limit: 5000, remaining: 4800, reset_at: 4102444800 },
       ],

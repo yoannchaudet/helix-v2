@@ -27,8 +27,10 @@ When we call the GitHub API:
   <https://docs.github.com/en/rest/activity/notifications.md>). Always target the
   current API version.
 - **Always handle errors** — no silent failures. Surface actionable messages to the UI.
-- **Honor rate limits** — read `X-RateLimit-Remaining` / `X-RateLimit-Reset` (and
-  `Retry-After`) headers and back off accordingly.
+- **Honor rate limits** — read the `X-RateLimit-*` headers (shown as per-bucket usage in
+  Settings) and honor GitHub's requested poll cadence: the automatic poll interval is floored
+  by `X-Poll-Interval` (and any `Retry-After`), on top of the user's setting. A full
+  pause-until-reset backoff after a rejection is not implemented yet (see `docs/design.md`).
 - **Always paginate** — follow `Link` headers; never assume a single page.
 - **Polling is configurable** — any polling interval lives in app settings, never
   hard-coded.
