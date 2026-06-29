@@ -105,6 +105,24 @@ test("notificationRow shows the subject number only when present", () => {
   );
 });
 
+test("notificationRow shows the subject author only when present, and escapes it", () => {
+  const withAuthor = notificationRow({ ...baseNotification, subject_author: "octocat" });
+  assert.ok(withAuthor.includes('<span class="n-author"'));
+  assert.ok(withAuthor.includes(">octocat</span>"));
+
+  assert.ok(
+    !notificationRow({ ...baseNotification, subject_author: null }).includes("n-author"),
+  );
+  assert.ok(!notificationRow(baseNotification).includes("n-author"));
+
+  const evil = notificationRow({
+    ...baseNotification,
+    subject_author: '<img src=x onerror=alert(1)>',
+  });
+  assert.ok(!evil.includes("<img src=x"), "raw HTML author must not appear unescaped");
+  assert.ok(evil.includes("&lt;img src=x onerror=alert(1)&gt;"));
+});
+
 test("notificationRow gives the done button a per-row accessible name", () => {
   const row = notificationRow(baseNotification);
   assert.ok(row.includes('aria-label="Mark &quot;Fix the bug&quot; as done"'));

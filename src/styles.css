@@ -875,6 +875,21 @@ code,
   margin-top: 4px;
 }
 
+/* Subject author (issue/PR), right-aligned at the end of the openable area. `margin-left:
+   auto` pushes it to the right edge; the padding keeps it clear of the hover-revealed
+   bookmark/done buttons that sit just outside `.n-open`. */
+.n-author {
+  flex: none;
+  margin-left: auto;
+  padding-left: var(--space-10);
+  max-width: 30%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
 /* ================================ Settings ================================ */
 .settings-scroll {
   flex: 1;

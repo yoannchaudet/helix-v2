@@ -138,6 +138,12 @@ const MIGRATIONS: &[&str] = &[
         bookmarked_at    TEXT NOT NULL
     );
     "#,
+    // v8 — carry the resolved subject author in the bookmarks snapshot too, so the
+    // Bookmarks filter can show the issue/PR author even after the thread leaves the inbox.
+    // Mirrors `notifications.subject_author`; refreshed from notifications on each sync.
+    r#"
+    ALTER TABLE bookmarks ADD COLUMN subject_author TEXT;
+    "#,
 ];
 
 /// Open the database at `db_path`, apply any pending migrations, and return the

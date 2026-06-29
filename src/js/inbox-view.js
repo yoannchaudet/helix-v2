@@ -54,6 +54,9 @@ export function notificationRow(n) {
   // Only rows with a resolved web URL are openable (clickable + hover affordance).
   const url = n.subject_html_url || "";
   const isNew = n.is_new ? " n-row--new" : "";
+  const author = n.subject_author
+    ? html`<span class="n-author" title="Author: ${n.subject_author}">${n.subject_author}</span>`
+    : "";
   const bookmarked = !!n.bookmarked;
   const done = !!n.is_done;
   const cls = `n-row${url ? " n-row--openable" : ""}${isNew}${bookmarked ? " n-row--bookmarked" : ""}${done ? " n-row--done" : ""}`;
@@ -85,6 +88,7 @@ export function notificationRow(n) {
           ${rawHtml(stateLine)}
           <div class="n-meta"><span class="n-reason">${n.reason.replace(/_/g, " ")}</span> · ${relTime(n.updated_at)}</div>
         </div>
+        ${rawHtml(author)}
       </div>
       ${rawHtml(bookmarkBtn)}
       ${rawHtml(doneBtn)}
