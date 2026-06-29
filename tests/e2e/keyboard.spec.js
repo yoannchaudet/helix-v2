@@ -31,6 +31,16 @@ test("d marks the active row done", async ({ page }) => {
   await expect(page.locator("#inbox .n-row")).toHaveCount(2);
 });
 
+test("b bookmarks the active row", async ({ page }) => {
+  await openApp(page);
+
+  await page.keyboard.press("j"); // focus t3
+  await page.keyboard.press("b");
+
+  await expect(page.locator('.n-row[data-thread-id="t3"]')).toHaveClass(/n-row--bookmarked/);
+  await expect(page.locator('.source-count[data-count="bookmarked"]')).toHaveText("1");
+});
+
 test("c copies the active row's URL", async ({ page }) => {
   await openApp(page);
 
@@ -56,6 +66,8 @@ test("number keys switch the smart filter", async ({ page }) => {
   await page.keyboard.press("2"); // 1=all, 2=mention
   await expect(page.locator("#view-title")).toHaveText("Mentions");
   await expect(page.locator("#inbox .n-row")).toHaveCount(1);
+  // Keyboard-driven switch shows the selection ring on the first row.
+  await expect(page.locator("#inbox .n-row:first-child .n-open")).toHaveClass(/kbd-focus/);
 
   await page.keyboard.press("1");
   await expect(page.locator("#view-title")).toHaveText("All");

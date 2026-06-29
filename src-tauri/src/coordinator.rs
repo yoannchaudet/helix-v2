@@ -62,7 +62,10 @@ pub struct SyncResult {
 /// `sync:error`. The network fetch runs without holding the DB lock; storage happens in a
 /// single transaction afterwards.
 #[tauri::command]
-pub async fn sync_now(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<SyncResult, String> {
+pub async fn sync_now(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<SyncResult, String> {
     // `read_token` locks the DB itself only for the dev path; the release path reads the
     // Keychain without holding the lock.
     let token = auth::read_token(&state.db)?
@@ -99,6 +102,7 @@ pub async fn sync_now(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
         let conn: &mut rusqlite::Connection = &mut guard;
         let stored =
             sync::store_notifications(conn, &outcome.threads).map_err(|e| e.to_string())?;
+        sync::refresh_bookmark_snapshots(conn).map_err(|e| e.to_string())?;
         sync::record_success(conn, &outcome.rate).map_err(|e| e.to_string())?;
         Ok(stored)
     })();
@@ -237,7 +241,9 @@ async fn resolve_pending_subjects(app: tauri::AppHandle, token: String) {
     }
 
     // Persist the post-resolution quota so Settings shows the true per-bucket usage.
-    best_effort(&state.db.0, "persisting rate limits", |conn| rate.persist(conn));
+    best_effort(&state.db.0, "persisting rate limits", |conn| {
+        rate.persist(conn)
+    });
 
     if changed > 0 {
         let _ = app.emit("subjects:resolved", serde_json::json!({ "count": changed }));
@@ -256,6 +262,28 @@ pub fn sync_status(state: State<'_, AppState>) -> Result<SyncStatus, String> {
 pub fn list_inbox(state: State<'_, AppState>) -> Result<Vec<sync::RepoGroup>, String> {
     let conn = state.db.0.lock().map_err(|e| e.to_string())?;
     sync::list_by_repo(&conn).map_err(|e| e.to_string())
+}
+
+/// Read all bookmarks grouped by repository (local-only; survives done/removal).
+#[tauri::command]
+pub fn list_bookmarks(state: State<'_, AppState>) -> Result<Vec<sync::RepoGroup>, String> {
+    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+    sync::list_bookmarks(&conn).map_err(|e| e.to_string())
+}
+
+/// Bookmark or un-bookmark a thread (local-only).
+#[tauri::command]
+pub fn set_bookmark(
+    thread_id: String,
+    bookmarked: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+    if bookmarked {
+        sync::add_bookmark(&conn, &thread_id).map_err(|e| e.to_string())
+    } else {
+        sync::remove_bookmark(&conn, &thread_id).map_err(|e| e.to_string())
+    }
 }
 
 /// A single thread that failed to mutate, surfaced to the UI so partial failures are
@@ -341,9 +369,8 @@ where
             let token = token.clone();
             let id = id.clone();
             let task_id = id.clone();
-            let handle = tauri::async_runtime::spawn(async move {
-                call(client, token, task_id).await
-            });
+            let handle =
+                tauri::async_runtime::spawn(async move { call(client, token, task_id).await });
             handles.push((id, handle));
         }
         for (id, handle) in handles {

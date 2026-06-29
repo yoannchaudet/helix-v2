@@ -174,7 +174,29 @@ CREATE TABLE done_tombstones (
   updated_at  TEXT,                       -- thread updated_at at mark-done time
   done_at     TEXT NOT NULL               -- re-surface watermark (see reconciliation)
 );
+
+CREATE TABLE bookmarks (                  -- local-only; snapshot survives done/removal
+  thread_id        TEXT PRIMARY KEY,
+  repo_id          INTEGER,
+  repo_full_name   TEXT NOT NULL,
+  repo_private     INTEGER NOT NULL DEFAULT 0,
+  subject_type     TEXT NOT NULL,
+  subject_title    TEXT NOT NULL,
+  subject_number   INTEGER,
+  subject_state    TEXT,
+  subject_html_url TEXT,
+  thread_url       TEXT,
+  reason           TEXT,
+  updated_at       TEXT,
+  bookmarked_at    TEXT NOT NULL
+);
 ```
+
+> **Bookmarks** are a local, never-synced overlay: bookmarking snapshots the thread's
+> notification data so a "Bookmarks" filter shows it even after it's marked done or drops off
+> GitHub's list. Snapshots refresh from the inbox on each sync while the thread is present.
+> Done-ness is derived on read (absent from `notifications` → done), so a done bookmark simply
+> hides its mark-as-done button (its absence implies the thread is already done).
 
 > Read state is intentionally **not** modeled: the original `unread` / `last_read_at`
 > columns were dropped once Helix switched to showing every notification until it is marked

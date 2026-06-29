@@ -35,6 +35,8 @@ test("selecting a smart filter narrows the list and updates the title", async ({
     "aria-current",
     "true",
   );
+  // A mouse click switches filter without moving focus, so no ring is painted.
+  await expect(page.locator("#inbox .n-row:first-child .n-open")).not.toBeFocused();
 });
 
 test("refining by repository shows only that repo, with a breadcrumb", async ({ page }) => {
@@ -151,4 +153,69 @@ test("an empty inbox shows the all-caught-up state", async ({ page }) => {
 
   await expect(page.locator(".inbox-empty")).toContainText("You're all caught up.");
   await expect(page.locator("#inbox .n-row")).toHaveCount(0);
+});
+
+test("bookmarking a row marks it, fills the Bookmarks filter, and is removable", async ({
+  page,
+}) => {
+  await openApp(page);
+
+  await expect(page.locator('.source-count[data-count="bookmarked"]')).toHaveText("");
+
+  await page.locator('.n-row[data-thread-id="t2"]').hover();
+  await page.locator('.n-row[data-thread-id="t2"] .n-bookmark').click();
+
+  // The row gains the bookmarked state, the sidebar count goes to 1.
+  await expect(page.locator('.n-row[data-thread-id="t2"]')).toHaveClass(/n-row--bookmarked/);
+  await expect(page.locator('.source-count[data-count="bookmarked"]')).toHaveText("1");
+
+  // The Bookmarks filter shows just that row.
+  await page.locator('.source[data-filter="bookmarked"]').click();
+  await expect(page.locator("#view-title")).toHaveText("Bookmarks");
+  await expect(page.locator("#inbox .n-row")).toHaveCount(1);
+
+  // Un-bookmark empties the filter.
+  await page.locator('.n-row[data-thread-id="t2"] .n-bookmark').click();
+  await expect(page.locator("#inbox .n-row")).toHaveCount(0);
+  await expect(page.locator('.source-count[data-count="bookmarked"]')).toHaveText("");
+});
+
+test("a bookmark survives marking the thread done", async ({ page }) => {
+  await openApp(page);
+
+  await page.locator('.n-row[data-thread-id="t2"]').hover();
+  await page.locator('.n-row[data-thread-id="t2"] .n-bookmark').click();
+  await page.locator('.n-row[data-thread-id="t2"]').hover();
+  await page.locator('.n-row[data-thread-id="t2"] .n-done').click();
+
+  // Gone from the inbox, but the bookmark snapshot keeps it in the Bookmarks filter.
+  await expect(page.locator('.n-row[data-thread-id="t2"]')).toHaveCount(0);
+  await page.locator('.source[data-filter="bookmarked"]').click();
+  await expect(page.locator("#inbox .n-row")).toHaveCount(1);
+  await expect(page.locator('.source-count[data-count="bookmarked"]')).toHaveText("1");
+  // A done bookmark has no mark-as-done button, just an inert spacer keeping alignment.
+  await expect(page.locator('.n-row[data-thread-id="t2"] .n-done-spacer')).toHaveCount(1);
+  await expect(page.locator('.n-row[data-thread-id="t2"] button.n-done')).toHaveCount(0);
+});
+
+test("marking done in the Bookmarks filter keeps focus on the same row", async ({ page }) => {
+  await openApp(page);
+
+  // Bookmark a row and view the Bookmarks filter.
+  await page.locator('.n-row[data-thread-id="t2"]').hover();
+  await page.locator('.n-row[data-thread-id="t2"] .n-bookmark').click();
+  await page.keyboard.press("7"); // Bookmarks filter (keyboard → focuses first row)
+  await expect(page.locator('.n-row[data-thread-id="t2"] .n-open')).toBeFocused();
+
+  // Mark it done with `d`: the row stays (now done) and focus doesn't hop away.
+  await page.keyboard.press("d");
+  await expect(page.locator("#inbox .n-row")).toHaveCount(1);
+  await expect(page.locator('.n-row[data-thread-id="t2"] .n-open')).toBeFocused();
+  // And the now-done row no longer offers a mark-as-done button.
+  await expect(page.locator('.n-row[data-thread-id="t2"] button.n-done')).toHaveCount(0);
+
+  // Pressing `d` again on the done row is a no-op (it stays, still done).
+  await page.keyboard.press("d");
+  await expect(page.locator("#inbox .n-row")).toHaveCount(1);
+  await expect(page.locator('.n-row[data-thread-id="t2"]')).toHaveAttribute("data-done", "true");
 });

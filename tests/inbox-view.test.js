@@ -32,6 +32,27 @@ test("notificationRow adds n-row--new only when is_new is set", () => {
   assert.ok(!notificationRow(baseNotification).includes("n-row--new"));
 });
 
+test("notificationRow shows a filled bookmark + pressed state when bookmarked", () => {
+  const on = notificationRow({ ...baseNotification, bookmarked: true });
+  assert.ok(on.includes("n-row--bookmarked"));
+  assert.ok(on.includes("n-bookmark is-on"));
+  assert.ok(on.includes('aria-pressed="true"'));
+  const off = notificationRow(baseNotification);
+  assert.ok(!off.includes("n-row--bookmarked"));
+  assert.ok(off.includes('aria-pressed="false"'));
+});
+
+test("notificationRow hides the mark-as-done button (keeps a spacer) for done rows", () => {
+  const done = notificationRow({ ...baseNotification, is_done: true });
+  assert.ok(done.includes("n-done-spacer"));
+  assert.ok(!done.includes("Mark as done"));
+  assert.ok(done.includes('data-done="true"'));
+  const active = notificationRow(baseNotification);
+  assert.ok(active.includes("Mark as done"));
+  assert.ok(!active.includes("n-done-spacer"));
+  assert.ok(!active.includes("data-done"));
+});
+
 test("subjectBadge maps a known type to its label + class", () => {
   assert.equal(subjectBadge("PullRequest"), '<span class="badge badge--pr">PR</span>');
   assert.equal(subjectBadge("Issue"), '<span class="badge badge--issue">Issue</span>');

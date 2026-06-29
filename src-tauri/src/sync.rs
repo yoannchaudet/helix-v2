@@ -337,9 +337,8 @@ pub struct SyncStatus {
 
 /// Read every recorded rate-limit bucket, ordered by resource name for stable display.
 pub fn read_rate_buckets(conn: &Connection) -> rusqlite::Result<Vec<RateBucket>> {
-    let mut stmt = conn.prepare(
-        "SELECT resource, lim, remaining, reset_at FROM rate_limits ORDER BY resource",
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT resource, lim, remaining, reset_at FROM rate_limits ORDER BY resource")?;
     let rows = stmt.query_map([], |r| {
         Ok(RateBucket {
             resource: r.get(0)?,
@@ -467,6 +466,13 @@ pub fn store_resolved_subject(
             subject.html_url,
         ],
     )?;
+    // Keep a bookmark's snapshot current too, so a bookmarked thread marked done before the
+    // next sync still carries the resolved number/state/url in the Bookmarks filter.
+    conn.execute(
+        "UPDATE bookmarks SET subject_number = ?2, subject_state = ?3, subject_html_url = ?4
+         WHERE thread_id = ?1",
+        params![thread_id, subject.number, subject.state, subject.html_url],
+    )?;
     Ok(())
 }
 
@@ -523,6 +529,119 @@ pub fn mark_done_local(conn: &mut Connection, thread_ids: &[String]) -> rusqlite
     Ok(removed)
 }
 
+/* -------------------------------- Bookmarks ------------------------------- */
+
+/// Add a bookmark for a thread, snapshotting its current notification data so the bookmark
+/// survives the inbox lifecycle (reconciliation / mark-done). Re-bookmarking refreshes the
+/// snapshot (and keeps the original `bookmarked_at`). No-op if the thread isn't in the inbox
+/// (nothing to snapshot); callers only offer the toggle on rows that exist.
+pub fn add_bookmark(conn: &Connection, thread_id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO bookmarks (
+             thread_id, repo_id, repo_full_name, repo_private, subject_type, subject_title,
+             subject_number, subject_state, subject_html_url, thread_url, reason, updated_at,
+             bookmarked_at)
+         SELECT n.thread_id, n.repo_id, r.full_name, r.private, n.subject_type, n.subject_title,
+                n.subject_number, n.subject_state, n.subject_html_url, n.thread_url,
+                COALESCE(n.reason, ''), n.updated_at,
+                strftime('%Y-%m-%dT%H:%M:%SZ','now')
+         FROM notifications n JOIN repos r ON r.id = n.repo_id
+         WHERE n.thread_id = ?1
+         ON CONFLICT(thread_id) DO UPDATE SET
+           repo_id = excluded.repo_id, repo_full_name = excluded.repo_full_name,
+           repo_private = excluded.repo_private, subject_type = excluded.subject_type,
+           subject_title = excluded.subject_title, subject_number = excluded.subject_number,
+           subject_state = excluded.subject_state, subject_html_url = excluded.subject_html_url,
+           thread_url = excluded.thread_url, reason = excluded.reason,
+           updated_at = excluded.updated_at",
+        params![thread_id],
+    )?;
+    Ok(())
+}
+
+/// Remove a bookmark.
+pub fn remove_bookmark(conn: &Connection, thread_id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM bookmarks WHERE thread_id = ?1",
+        params![thread_id],
+    )?;
+    Ok(())
+}
+
+/// Read all bookmarks grouped by repository (repos A–Z, newest first within each repo),
+/// independent of the inbox. Uses the stored snapshot so done/removed threads still appear.
+/// Mirrors `list_by_repo`'s shape; every notification carries `bookmarked: true`.
+pub fn list_bookmarks(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
+    let mut stmt = conn.prepare(
+        "SELECT b.repo_id, b.repo_full_name, b.repo_private,
+                b.thread_id, b.subject_type, b.subject_title, NULL,
+                COALESCE(b.reason, ''), b.updated_at, b.thread_url,
+                b.subject_number, b.subject_state, b.subject_html_url,
+                CASE WHEN n.thread_id IS NULL THEN 1 ELSE 0 END AS is_done
+         FROM bookmarks b
+         LEFT JOIN notifications n ON n.thread_id = b.thread_id
+         ORDER BY b.repo_full_name ASC, b.updated_at DESC, b.thread_id ASC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, Option<i64>>(0)?.unwrap_or(0),
+            r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)? != 0,
+            NotificationView {
+                thread_id: r.get(3)?,
+                subject_type: r.get(4)?,
+                subject_title: r.get(5)?,
+                subject_url: r.get(6)?,
+                reason: r.get(7)?,
+                updated_at: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
+                thread_url: r.get(9)?,
+                subject_number: r.get(10)?,
+                subject_state: r.get(11)?,
+                subject_html_url: r.get(12)?,
+                resolved_at: None,
+                is_new: false,
+                bookmarked: true,
+                is_done: r.get::<_, i64>(13)? != 0,
+            },
+        ))
+    })?;
+    let mut groups: Vec<RepoGroup> = Vec::new();
+    for row in rows {
+        let (repo_id, full_name, private, view) = row?;
+        if groups.last().map(|g| g.repo_id) != Some(repo_id) {
+            groups.push(RepoGroup {
+                repo_id,
+                full_name,
+                private,
+                total: 0,
+                notifications: Vec::new(),
+            });
+        }
+        let group = groups.last_mut().expect("group just ensured");
+        group.total += 1;
+        group.notifications.push(view);
+    }
+    Ok(groups)
+}
+
+/// Refresh bookmark snapshots from currently-present notifications, so a bookmarked thread's
+/// title/state stay current while it's in the inbox. Threads no longer present keep their
+/// last snapshot. Called after each sync.
+pub fn refresh_bookmark_snapshots(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE bookmarks SET
+           repo_id = n.repo_id, repo_full_name = r.full_name, repo_private = r.private,
+           subject_type = n.subject_type, subject_title = n.subject_title,
+           subject_number = n.subject_number, subject_state = n.subject_state,
+           subject_html_url = n.subject_html_url, thread_url = n.thread_url,
+           reason = COALESCE(n.reason, ''), updated_at = n.updated_at
+         FROM notifications n JOIN repos r ON r.id = n.repo_id
+         WHERE bookmarks.thread_id = n.thread_id",
+        [],
+    )?;
+    Ok(())
+}
+
 /* --------------------------------- Inbox ---------------------------------- */
 
 /// A single notification as shown in the by-repo inbox.
@@ -544,6 +663,11 @@ pub struct NotificationView {
     /// `subject_state` still reflects the latest thread activity (the cleanup filter only
     /// trusts a fresh resolution; see the frontend `isCleanupCandidate`).
     pub resolved_at: Option<String>,
+    /// True when this thread is bookmarked (kept regardless of done/inbox state).
+    pub bookmarked: bool,
+    /// True when the thread is no longer in the live inbox (marked done / dropped). Only ever
+    /// true in the bookmarks view; the inbox itself never shows done rows.
+    pub is_done: bool,
     /// True when the row was inserted or its `updated_at` changed in the latest sync;
     /// cleared on the next sync. Drives the "new since last sync" highlight.
     pub is_new: bool,
@@ -571,9 +695,11 @@ pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
                 COALESCE(n.reason, '') AS reason,
                 n.updated_at, n.thread_url,
                 n.subject_number, n.subject_state, n.subject_html_url, n.resolved_at,
-                n.is_new
+                n.is_new,
+                CASE WHEN b.thread_id IS NULL THEN 0 ELSE 1 END AS bookmarked
          FROM notifications n
          JOIN repos r ON r.id = n.repo_id
+         LEFT JOIN bookmarks b ON b.thread_id = n.thread_id
          ORDER BY r.full_name ASC, n.updated_at DESC, n.thread_id ASC",
     )?;
 
@@ -595,6 +721,8 @@ pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
                 subject_html_url: r.get(12)?,
                 resolved_at: r.get(13)?,
                 is_new: r.get::<_, i64>(14)? != 0,
+                bookmarked: r.get::<_, i64>(15)? != 0,
+                is_done: false,
             },
         ))
     })?;
@@ -719,6 +847,70 @@ mod tests {
     }
 
     #[test]
+    fn bookmarks_survive_mark_done_and_flag_inbox_rows() {
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/a", "One")]).unwrap();
+        add_bookmark(&conn, "1").unwrap();
+
+        // The inbox row reflects the bookmark.
+        let v = &list_by_repo(&conn).unwrap()[0].notifications[0];
+        assert!(v.bookmarked);
+
+        // The bookmark snapshot is queryable independently and starts active (not done).
+        let bm = list_bookmarks(&conn).unwrap();
+        assert_eq!(bm.len(), 1);
+        assert_eq!(bm[0].notifications[0].subject_title, "One");
+        assert!(!bm[0].notifications[0].is_done);
+
+        // Mark done removes it from the inbox but the bookmark snapshot persists, now done.
+        mark_done_local(&mut conn, &["1".to_string()]).unwrap();
+        assert_eq!(count(&conn).unwrap(), 0);
+        let bm = list_bookmarks(&conn).unwrap();
+        assert_eq!(bm.len(), 1);
+        assert!(
+            bm[0].notifications[0].is_done,
+            "done bookmark should be flagged done"
+        );
+
+        // Removing the bookmark clears the snapshot.
+        remove_bookmark(&conn, "1").unwrap();
+        assert!(list_bookmarks(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn refresh_bookmark_snapshots_tracks_latest_inbox_data() {
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/a", "Old title")]).unwrap();
+        add_bookmark(&conn, "1").unwrap();
+
+        // Re-sync with a new title; refresh updates the bookmark snapshot.
+        let mut renamed = thread("1", 100, "octo/a", "New title");
+        renamed.updated_at = "2099-01-01T00:00:00Z".to_string();
+        store_notifications(&mut conn, &[renamed]).unwrap();
+        refresh_bookmark_snapshots(&conn).unwrap();
+        assert_eq!(
+            list_bookmarks(&conn).unwrap()[0].notifications[0].subject_title,
+            "New title"
+        );
+
+        // Resolution fills the snapshot's state/number/url too.
+        store_resolved_subject(
+            &conn,
+            "1",
+            &ResolvedSubject {
+                number: Some(7),
+                state: Some("merged".to_string()),
+                html_url: Some("https://example.test/7".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let bm = &list_bookmarks(&conn).unwrap()[0].notifications[0];
+        assert_eq!(bm.subject_number, Some(7));
+        assert_eq!(bm.subject_state.as_deref(), Some("merged"));
+    }
+
+    #[test]
     fn groups_notifications_by_repo() {
         let mut conn = mem_conn();
         let threads = vec![
@@ -770,18 +962,10 @@ mod tests {
     #[test]
     fn upsert_is_idempotent_and_updates_mutable_fields() {
         let mut conn = mem_conn();
-        store_notifications(
-            &mut conn,
-            &[thread("1", 100, "octo/repo-a", "Old title")],
-        )
-        .unwrap();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "Old title")]).unwrap();
 
         // Re-store the same thread id with a changed title.
-        store_notifications(
-            &mut conn,
-            &[thread("1", 100, "octo/repo-a", "New title")],
-        )
-        .unwrap();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "New title")]).unwrap();
 
         assert_eq!(count(&conn).unwrap(), 1); // no duplicate row
         let title: String = conn
@@ -807,11 +991,7 @@ mod tests {
         .unwrap();
 
         // A subsequent sync must not clobber the resolved columns.
-        store_notifications(
-            &mut conn,
-            &[thread("1", 100, "octo/repo-a", "Title v2")],
-        )
-        .unwrap();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "Title v2")]).unwrap();
         let (state, resolved): (Option<String>, Option<String>) = conn
             .query_row(
                 "SELECT subject_state, resolved_at FROM notifications WHERE thread_id = '1'",
@@ -839,8 +1019,7 @@ mod tests {
 
         // A later full sync only returns thread 1 (2 and 3 were cleared on github.com).
         let outcome =
-            store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")])
-                .unwrap();
+            store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
         assert_eq!(outcome.stored, 1);
         assert_eq!(outcome.removed, 2);
         assert_eq!(count(&conn).unwrap(), 1);
@@ -905,8 +1084,7 @@ mod tests {
 
         // Next sync drops thread 2 but keeps thread 1 — its resolved column must persist.
         let outcome =
-            store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")])
-                .unwrap();
+            store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
         assert_eq!(outcome.removed, 1);
         let state: Option<String> = conn
             .query_row(
@@ -954,8 +1132,15 @@ mod tests {
         // Stale fetch still lists thread 1 (same updated_at as when it was marked done).
         let outcome =
             store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
-        assert_eq!(count(&conn).unwrap(), 0, "tombstone must suppress re-insert");
-        assert_eq!(outcome.stored, 0, "a suppressed thread isn't counted as stored");
+        assert_eq!(
+            count(&conn).unwrap(),
+            0,
+            "tombstone must suppress re-insert"
+        );
+        assert_eq!(
+            outcome.stored, 0,
+            "a suppressed thread isn't counted as stored"
+        );
     }
 
     #[test]
@@ -972,7 +1157,11 @@ mod tests {
         newer.updated_at = "2099-01-01T00:00:00Z".to_string();
         store_notifications(&mut conn, &[newer]).unwrap();
 
-        assert_eq!(count(&conn).unwrap(), 1, "new activity must re-surface the thread");
+        assert_eq!(
+            count(&conn).unwrap(),
+            1,
+            "new activity must re-surface the thread"
+        );
         let tombstones: i64 = conn
             .query_row("SELECT COUNT(*) FROM done_tombstones", [], |r| r.get(0))
             .unwrap();
@@ -999,7 +1188,10 @@ mod tests {
         let tombstones: i64 = conn
             .query_row("SELECT COUNT(*) FROM done_tombstones", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(tombstones, 0, "tombstone retired after the thread left the fetch");
+        assert_eq!(
+            tombstones, 0,
+            "tombstone retired after the thread left the fetch"
+        );
     }
 
     #[test]
@@ -1020,12 +1212,19 @@ mod tests {
 
         let outcome =
             store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
-        assert_eq!(count(&conn).unwrap(), 0, "an old tombstone must still suppress");
+        assert_eq!(
+            count(&conn).unwrap(),
+            0,
+            "an old tombstone must still suppress"
+        );
         assert_eq!(outcome.stored, 0);
         let tombstones: i64 = conn
             .query_row("SELECT COUNT(*) FROM done_tombstones", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(tombstones, 1, "tombstone is kept while the thread is still listed");
+        assert_eq!(
+            tombstones, 1,
+            "tombstone is kept while the thread is still listed"
+        );
     }
 
     #[test]
@@ -1097,13 +1296,21 @@ mod tests {
         let mut before = thread("1", 100, "octo/repo-a", "One");
         before.updated_at = "2026-02-01T00:00:00Z".to_string();
         store_notifications(&mut conn, &[before]).unwrap();
-        assert_eq!(count(&conn).unwrap(), 0, "NULL-updated_at tombstone suppresses before done_at");
+        assert_eq!(
+            count(&conn).unwrap(),
+            0,
+            "NULL-updated_at tombstone suppresses before done_at"
+        );
 
         // Activity after done_at → genuine re-surface.
         let mut after = thread("1", 100, "octo/repo-a", "One");
         after.updated_at = "2026-04-01T00:00:00Z".to_string();
         store_notifications(&mut conn, &[after]).unwrap();
-        assert_eq!(count(&conn).unwrap(), 1, "activity after done_at resurfaces");
+        assert_eq!(
+            count(&conn).unwrap(),
+            1,
+            "activity after done_at resurfaces"
+        );
     }
 
     #[test]
@@ -1308,7 +1515,10 @@ mod tests {
         .unwrap();
         let pending = subjects_needing_resolution(&conn).unwrap();
         let ids: Vec<&str> = pending.iter().map(|p| p.thread_id.as_str()).collect();
-        assert!(ids.contains(&"2"), "a Release with a subject_url should resolve");
+        assert!(
+            ids.contains(&"2"),
+            "a Release with a subject_url should resolve"
+        );
 
         // A subject with no subject_url (e.g. a CheckSuite) is skipped — nothing to resolve.
         conn.execute(
@@ -1318,7 +1528,10 @@ mod tests {
         .unwrap();
         let pending = subjects_needing_resolution(&conn).unwrap();
         let ids: Vec<&str> = pending.iter().map(|p| p.thread_id.as_str()).collect();
-        assert!(!ids.contains(&"2"), "a subject without a subject_url is not resolved");
+        assert!(
+            !ids.contains(&"2"),
+            "a subject without a subject_url is not resolved"
+        );
     }
 
     #[test]
