@@ -729,6 +729,16 @@ code,
   margin-right: var(--space-10);
 }
 
+/* Inert placeholder occupying the mark-as-done slot on done rows, so the bookmark icon stays
+   aligned. Never interactive or visible — it only reserves layout space. */
+.n-done-spacer {
+  flex: none;
+  width: var(--control-icon-md);
+  height: var(--control-icon-md);
+  margin-right: var(--space-10);
+  pointer-events: none;
+}
+
 .n-row:hover .n-done,
 .n-row:hover .n-bookmark,
 .repo-header:hover .repo-done,
