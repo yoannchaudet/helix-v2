@@ -211,4 +211,11 @@ test("marking done in the Bookmarks filter keeps focus on the same row", async (
   await page.keyboard.press("d");
   await expect(page.locator("#inbox .n-row")).toHaveCount(1);
   await expect(page.locator('.n-row[data-thread-id="t2"] .n-open')).toBeFocused();
+  // And the now-done row no longer offers a mark-as-done button.
+  await expect(page.locator('.n-row[data-thread-id="t2"] button.n-done')).toHaveCount(0);
+
+  // Pressing `d` again on the done row is a no-op (it stays, still done).
+  await page.keyboard.press("d");
+  await expect(page.locator("#inbox .n-row")).toHaveCount(1);
+  await expect(page.locator('.n-row[data-thread-id="t2"]')).toHaveAttribute("data-done", "true");
 });

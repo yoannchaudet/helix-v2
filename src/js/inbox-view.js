@@ -76,7 +76,7 @@ export function notificationRow(n) {
     attrs: html`aria-pressed="${bookmarked ? "true" : "false"}"`,
   });
   return html`
-    <li class="${cls}" data-thread-id="${n.thread_id}">
+    <li class="${cls}" data-thread-id="${n.thread_id}"${rawHtml(done ? " data-done=\"true\"" : "")}>
       <div class="n-open"${rawHtml(openAttrs)}>
         <span class="n-badge-slot">${rawHtml(subjectBadge(n.subject_type))}</span>
         <div class="n-main">

@@ -46,9 +46,11 @@ test("notificationRow hides the mark-as-done button (keeps a spacer) for done ro
   const done = notificationRow({ ...baseNotification, is_done: true });
   assert.ok(done.includes("n-done--spacer"));
   assert.ok(!done.includes("Mark as done"));
+  assert.ok(done.includes('data-done="true"'));
   const active = notificationRow(baseNotification);
   assert.ok(active.includes("Mark as done"));
   assert.ok(!active.includes("n-done--spacer"));
+  assert.ok(!active.includes("data-done"));
 });
 
 test("subjectBadge maps a known type to its label + class", () => {

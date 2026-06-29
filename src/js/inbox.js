@@ -578,7 +578,8 @@ function moveActiveRow(delta) {
 
 function markActiveRowDone() {
   const row = activeRow();
-  if (row?.dataset.threadId) markDone([row.dataset.threadId]);
+  // A done row (only in Bookmarks) can't be marked done again — its button is already gone.
+  if (row?.dataset.threadId && row.dataset.done !== "true") markDone([row.dataset.threadId]);
 }
 
 function copyActiveRowUrl() {
@@ -647,11 +648,12 @@ function onCommandKeydown(e) {
 }
 
 
-/** Confirm + mark all of one repo's (filtered) notifications done, from its header icon. */
+/** Confirm + mark all of one repo's (filtered) notifications done, from its header icon.
+ *  Skips already-done rows (only present in the Bookmarks filter). */
 function confirmRepoDone(btn) {
   const repoId = Number(btn.dataset.doneRepo);
   const group = filteredGroups().find((g) => g.repo_id === repoId);
-  const ids = group ? group.notifications.map((n) => n.thread_id) : [];
+  const ids = group ? group.notifications.filter((n) => !n.is_done).map((n) => n.thread_id) : [];
   confirmDone(ids, btn);
 }
 
@@ -683,7 +685,8 @@ function onInboxContextMenu(e) {
     x = r.left + 12;
     y = r.bottom - 8;
   }
-  openContextMenu(x, y, [
+  const isOn = row.querySelector(".n-bookmark")?.classList.contains("is-on");
+  const items = [
     {
       label: "Copy URL",
       disabled: !url,
@@ -697,17 +700,19 @@ function onInboxContextMenu(e) {
     },
     { separator: true },
     {
-      label: row.querySelector(".n-bookmark")?.classList.contains("is-on")
-        ? "Remove bookmark"
-        : "Bookmark",
-      action: () => toggleBookmark(threadId, !row.querySelector(".n-bookmark")?.classList.contains("is-on")),
+      label: isOn ? "Remove bookmark" : "Bookmark",
+      action: () => toggleBookmark(threadId, !isOn),
     },
-    {
+  ];
+  // A done row (only in Bookmarks) is already done, so don't offer to mark it done again.
+  if (row.dataset.done !== "true") {
+    items.push({
       label: "Mark as done",
       danger: true,
       action: () => markDone([threadId]),
-    },
-  ]);
+    });
+  }
+  openContextMenu(x, y, items);
 }
 
 /** In-app confirm popover for a destructive bulk mark-done, anchored under `anchorEl`.
@@ -758,7 +763,10 @@ export function initInbox() {
       return;
     }
     const btn = e.currentTarget;
-    confirmDone(visibleNotifications().map((n) => n.thread_id), btn);
+    confirmDone(
+      visibleNotifications().filter((n) => !n.is_done).map((n) => n.thread_id),
+      btn,
+    );
     // Reflect the expanded state for assistive tech (closeMenu resets it). Only when the
     // popover actually opened (confirmDone no-ops on an empty set).
     if (isMenuOpen()) btn.setAttribute("aria-expanded", "true");
