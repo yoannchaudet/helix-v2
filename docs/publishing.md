@@ -97,17 +97,26 @@ The release workflow declares `environment: release`, so it can read these; CI b
 
 ## Cutting a release
 
-1. **Bump the version** to the new `X.Y.Z` in three files:
+1. **Bump the version** with the helper script (from the repo root):
+   ```sh
+   pwsh ./scripts/bump-version.ps1            # patch bump (default), e.g. 0.2.0 -> 0.2.1
+   pwsh ./scripts/bump-version.ps1 -Type minor  # 0.2.0 -> 0.3.0
+   pwsh ./scripts/bump-version.ps1 -Type major  # 0.2.0 -> 1.0.0
+   ```
+   It refuses to run on a dirty tree, syncs `main`, creates a `bump-v<X.Y.Z>` branch, edits
+   the three version-tracking files, commits, pushes, and opens a PR. Review and merge that
+   PR, then continue from step 2.
+
+   The three files it edits (do it by hand if you prefer):
    - [`src-tauri/tauri.conf.json`](../src-tauri/tauri.conf.json) → `"version"` — the
      **authoritative** app version (drives the bundle name and the updater version).
    - [`src-tauri/Cargo.toml`](../src-tauri/Cargo.toml) → `version` — keep it in sync.
-   - [`src-tauri/Cargo.lock`](../src-tauri/Cargo.lock) — it records the `helix` package
-     version, so refresh it by running `cargo build` **from `src-tauri/`** (a build rewrites
-     the `helix` version in the lockfile without touching dependency versions) and commit
-     the change.
+   - [`src-tauri/Cargo.lock`](../src-tauri/Cargo.lock) — the `helix` package `version` line
+     (the script edits it directly; a `cargo build` **from `src-tauri/`** also refreshes it
+     without touching dependency versions).
 
    The git tag must equal this version with a leading `v` (config `0.2.0` → tag `v0.2.0`).
-2. Commit and merge to `main`.
+2. Merge the bump PR to `main`.
 3. **Tag and push** — this is what kicks off the release (replace `0.2.0`):
    ```sh
    git checkout main && git pull
