@@ -538,9 +538,20 @@ function activeRow() {
 }
 
 /** A row's primary focus target: its openable link, else its (revealed-on-focus) done
- *  button — so every row, openable or not, has a keyboard anchor. */
+ *  button — so every row, openable or not, has a keyboard anchor. Marks the target with
+ *  `kbd-focus` so the selection ring shows for programmatic/keyboard focus (mouse clicks use
+ *  `:focus-visible`, which stays clean); the ring is cleared on the next mouse interaction. */
 function focusRow(row) {
-  (row.querySelector(".n-open[tabindex]") || row.querySelector(".n-done"))?.focus();
+  const target = row.querySelector(".n-open[tabindex]") || row.querySelector(".n-done");
+  if (!target) return;
+  clearKbdFocus();
+  target.classList.add("kbd-focus");
+  target.focus();
+}
+
+/** Strip the keyboard-selection ring marker from all rows. */
+function clearKbdFocus() {
+  for (const el of $$("#inbox .kbd-focus")) el.classList.remove("kbd-focus");
 }
 
 /** Move the keyboard cursor by `delta` rows (clamped). From outside the list, enter at the
@@ -727,6 +738,9 @@ export function initInbox() {
   $("#inbox").addEventListener("click", onInboxClick);
   $("#inbox").addEventListener("keydown", onInboxKeydown);
   $("#inbox").addEventListener("contextmenu", onInboxContextMenu);
+  // A mouse interaction clears the keyboard-selection ring so it doesn't linger for pointer
+  // users (keyboard navigation re-applies it via focusRow).
+  $("#inbox").addEventListener("mousedown", clearKbdFocus);
   // Power-user triage shortcuts (j/k/d/e/c/r/1–6) — global so filter/sync keys work from
   // anywhere on the notifications pane, not just when a row has focus.
   document.addEventListener("keydown", onCommandKeydown);
