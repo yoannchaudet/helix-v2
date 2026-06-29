@@ -66,6 +66,8 @@ test("number keys switch the smart filter", async ({ page }) => {
   await page.keyboard.press("2"); // 1=all, 2=mention
   await expect(page.locator("#view-title")).toHaveText("Mentions");
   await expect(page.locator("#inbox .n-row")).toHaveCount(1);
+  // Keyboard-driven switch shows the selection ring on the first row.
+  await expect(page.locator("#inbox .n-row:first-child .n-open")).toHaveClass(/kbd-focus/);
 
   await page.keyboard.press("1");
   await expect(page.locator("#view-title")).toHaveText("All");

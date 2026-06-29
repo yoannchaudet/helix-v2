@@ -304,7 +304,7 @@ function renderSidebar() {
 
 /** Choose the notification-type filter. Drops a repo refinement that no longer has
  *  any matching notifications under the new filter (per the agreed UX). */
-function selectFilter(filterId) {
+function selectFilter(filterId, kbd = false) {
   activeFilter = filterId;
   if (activeRepo != null) {
     const group = currentGroups().find((g) => g.repo_id === activeRepo);
@@ -313,26 +313,26 @@ function selectFilter(filterId) {
   showSettings(false);
   renderSidebar();
   renderInbox();
-  focusFirstRow();
+  focusFirstRow(kbd);
   announceView();
 }
 
 /** Toggle the repository refinement: select it, or clear it if already active. */
-function selectRepo(repoId) {
+function selectRepo(repoId, kbd = false) {
   activeRepo = activeRepo === repoId ? null : repoId;
   showSettings(false);
   renderSidebar();
   renderInbox();
-  focusFirstRow();
+  focusFirstRow(kbd);
   announceView();
 }
 
 /** Move keyboard focus to the first notification row, so a freshly chosen filter/repo has a
  *  clear selection (and single-key commands like b/d/c act on a real row, not whatever last
  *  held focus). No-op when the view is empty. */
-function focusFirstRow() {
+function focusFirstRow(kbd = true) {
   const first = $("#inbox").querySelector(".n-row");
-  if (first) focusRow(first);
+  if (first) focusRow(first, kbd);
 }
 
 /** Announce the current view (its spelled-out label + how many notifications it shows) to
@@ -541,11 +541,11 @@ function activeRow() {
  *  button — so every row, openable or not, has a keyboard anchor. Marks the target with
  *  `kbd-focus` so the selection ring shows for programmatic/keyboard focus (mouse clicks use
  *  `:focus-visible`, which stays clean); the ring is cleared on the next mouse interaction. */
-function focusRow(row) {
+function focusRow(row, kbd = true) {
   const target = row.querySelector(".n-open[tabindex]") || row.querySelector(".n-done");
   if (!target) return;
   clearKbdFocus();
-  target.classList.add("kbd-focus");
+  if (kbd) target.classList.add("kbd-focus");
   target.focus();
 }
 
@@ -635,7 +635,7 @@ function onCommandKeydown(e) {
     const idx = Number(e.key) - 1;
     if (idx < ids.length) {
       e.preventDefault();
-      selectFilter(ids[idx]);
+      selectFilter(ids[idx], true);
     }
   }
 }

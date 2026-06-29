@@ -35,9 +35,9 @@ test("selecting a smart filter narrows the list and updates the title", async ({
     "aria-current",
     "true",
   );
-  // Choosing a filter focuses its first row with a visible keyboard ring (kbd-focus).
+  // A mouse click focuses the first row but shows no keyboard ring (kbd-focus).
   await expect(page.locator("#inbox .n-row:first-child .n-open")).toBeFocused();
-  await expect(page.locator("#inbox .n-row:first-child .n-open")).toHaveClass(/kbd-focus/);
+  await expect(page.locator("#inbox .n-row:first-child .n-open")).not.toHaveClass(/kbd-focus/);
 });
 
 test("refining by repository shows only that repo, with a breadcrumb", async ({ page }) => {
