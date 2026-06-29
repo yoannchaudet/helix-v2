@@ -104,8 +104,9 @@ The release workflow declares `environment: release`, so it can read these; CI b
    pwsh ./scripts/bump-version.ps1 -Type major  # 0.2.0 -> 1.0.0
    ```
    It refuses to run on a dirty tree, syncs `main`, creates a `bump-v<X.Y.Z>` branch, edits
-   the three version-tracking files, commits, pushes, and opens a PR. Review and merge that
-   PR, then continue from step 2.
+   the three version-tracking files, commits, pushes, and opens a PR. Requires **PowerShell
+   7.3+** (it relies on native-command error propagation) and the GitHub CLI (`gh`). Review
+   and merge that PR, then continue from step 2.
 
    The three files it edits (do it by hand if you prefer):
    - [`src-tauri/tauri.conf.json`](../src-tauri/tauri.conf.json) → `"version"` — the

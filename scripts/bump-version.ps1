@@ -1,4 +1,5 @@
 #!/usr/bin/env pwsh
+#Requires -Version 7.3
 <#
 .SYNOPSIS
     Bump Helix's version to prepare a release, then open a pull request.
