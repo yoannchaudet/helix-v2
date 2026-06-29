@@ -55,15 +55,19 @@ export function notificationRow(n) {
   const url = n.subject_html_url || "";
   const isNew = n.is_new ? " n-row--new" : "";
   const bookmarked = !!n.bookmarked;
-  const cls = `n-row${url ? " n-row--openable" : ""}${isNew}${bookmarked ? " n-row--bookmarked" : ""}`;
+  const done = !!n.is_done;
+  const cls = `n-row${url ? " n-row--openable" : ""}${isNew}${bookmarked ? " n-row--bookmarked" : ""}${done ? " n-row--done" : ""}`;
   const openAttrs = url ? html` data-url="${url}" role="link" tabindex="0"` : "";
-  // Contextual accessible name so each row's button isn't an indistinct "Mark as done".
-  const doneBtn = iconButton({
-    icon: DONE_ICON,
-    className: "n-done",
-    title: "Mark as done",
-    label: `Mark "${n.subject_title}" as done`,
-  });
+  // A done thread (only ever shown in Bookmarks) gets a muted "Done" tag instead of the
+  // mark-as-done button, which would be a no-op.
+  const doneBtn = done
+    ? pill("Done", "n-done-tag")
+    : iconButton({
+        icon: DONE_ICON,
+        className: "n-done",
+        title: "Mark as done",
+        label: `Mark "${n.subject_title}" as done`,
+      });
   const bookmarkBtn = iconButton({
     icon: bookmarked ? BOOKMARK_ICON_FILLED : BOOKMARK_ICON,
     className: `n-bookmark${bookmarked ? " is-on" : ""}`,

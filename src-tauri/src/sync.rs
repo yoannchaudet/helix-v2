@@ -573,12 +573,14 @@ pub fn remove_bookmark(conn: &Connection, thread_id: &str) -> rusqlite::Result<(
 /// Mirrors `list_by_repo`'s shape; every notification carries `bookmarked: true`.
 pub fn list_bookmarks(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
     let mut stmt = conn.prepare(
-        "SELECT repo_id, repo_full_name, repo_private,
-                thread_id, subject_type, subject_title, NULL,
-                COALESCE(reason, ''), updated_at, thread_url,
-                subject_number, subject_state, subject_html_url
-         FROM bookmarks
-         ORDER BY repo_full_name ASC, updated_at DESC, thread_id ASC",
+        "SELECT b.repo_id, b.repo_full_name, b.repo_private,
+                b.thread_id, b.subject_type, b.subject_title, NULL,
+                COALESCE(b.reason, ''), b.updated_at, b.thread_url,
+                b.subject_number, b.subject_state, b.subject_html_url,
+                CASE WHEN n.thread_id IS NULL THEN 1 ELSE 0 END AS is_done
+         FROM bookmarks b
+         LEFT JOIN notifications n ON n.thread_id = b.thread_id
+         ORDER BY b.repo_full_name ASC, b.updated_at DESC, b.thread_id ASC",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok((
@@ -599,6 +601,7 @@ pub fn list_bookmarks(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
                 resolved_at: None,
                 is_new: false,
                 bookmarked: true,
+                is_done: r.get::<_, i64>(13)? != 0,
             },
         ))
     })?;
@@ -662,6 +665,9 @@ pub struct NotificationView {
     pub resolved_at: Option<String>,
     /// True when this thread is bookmarked (kept regardless of done/inbox state).
     pub bookmarked: bool,
+    /// True when the thread is no longer in the live inbox (marked done / dropped). Only ever
+    /// true in the bookmarks view; the inbox itself never shows done rows.
+    pub is_done: bool,
     /// True when the row was inserted or its `updated_at` changed in the latest sync;
     /// cleared on the next sync. Drives the "new since last sync" highlight.
     pub is_new: bool,
@@ -716,6 +722,7 @@ pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
                 resolved_at: r.get(13)?,
                 is_new: r.get::<_, i64>(14)? != 0,
                 bookmarked: r.get::<_, i64>(15)? != 0,
+                is_done: false,
             },
         ))
     })?;
@@ -849,15 +856,21 @@ mod tests {
         let v = &list_by_repo(&conn).unwrap()[0].notifications[0];
         assert!(v.bookmarked);
 
-        // The bookmark snapshot is queryable independently.
+        // The bookmark snapshot is queryable independently and starts active (not done).
         let bm = list_bookmarks(&conn).unwrap();
         assert_eq!(bm.len(), 1);
         assert_eq!(bm[0].notifications[0].subject_title, "One");
+        assert!(!bm[0].notifications[0].is_done);
 
-        // Mark done removes it from the inbox but the bookmark snapshot persists.
+        // Mark done removes it from the inbox but the bookmark snapshot persists, now done.
         mark_done_local(&mut conn, &["1".to_string()]).unwrap();
         assert_eq!(count(&conn).unwrap(), 0);
-        assert_eq!(list_bookmarks(&conn).unwrap().len(), 1);
+        let bm = list_bookmarks(&conn).unwrap();
+        assert_eq!(bm.len(), 1);
+        assert!(
+            bm[0].notifications[0].is_done,
+            "done bookmark should be flagged done"
+        );
 
         // Removing the bookmark clears the snapshot.
         remove_bookmark(&conn, "1").unwrap();

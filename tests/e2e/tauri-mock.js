@@ -54,7 +54,20 @@ export function installTauriMock(fixtures) {
     },
 
     list_inbox: () => JSON.parse(JSON.stringify(state.inbox)),
-    list_bookmarks: () => JSON.parse(JSON.stringify(state.bookmarks ?? [])),
+    list_bookmarks: () => {
+      // is_done is derived: a bookmark not present in the live inbox is done/removed.
+      const inboxIds = new Set(
+        state.inbox.flatMap((g) => g.notifications.map((n) => n.thread_id)),
+      );
+      const groups = (state.bookmarks ?? []).map((g) => ({
+        ...g,
+        notifications: g.notifications.map((n) => ({
+          ...n,
+          is_done: !inboxIds.has(n.thread_id),
+        })),
+      }));
+      return JSON.parse(JSON.stringify(groups));
+    },
     set_bookmark: ({ threadId, bookmarked }) => {
       state.bookmarks = state.bookmarks ?? [];
       let snapshot = null;

@@ -195,6 +195,8 @@ CREATE TABLE bookmarks (                  -- local-only; snapshot survives done/
 > **Bookmarks** are a local, never-synced overlay: bookmarking snapshots the thread's
 > notification data so a "Bookmarks" filter shows it even after it's marked done or drops off
 > GitHub's list. Snapshots refresh from the inbox on each sync while the thread is present.
+> Done-ness is derived on read (absent from `notifications` → done), so a bookmark's row shows
+> a muted "Done" tag instead of a mark-as-done button.
 
 > Read state is intentionally **not** modeled: the original `unread` / `last_read_at`
 > columns were dropped once Helix switched to showing every notification until it is marked
