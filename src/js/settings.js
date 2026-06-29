@@ -163,7 +163,7 @@ async function loadStartAtLogin() {
     el.checked = await invoke("get_start_at_login");
   } catch (err) {
     el.checked = false;
-    console.error(`failed to read start-at-login: ${err}`);
+    console.error(`failed to read start-at-login: ${String(err)}`);
   }
 }
 
@@ -171,6 +171,7 @@ async function loadStartAtLogin() {
  *  OS truth afterwards so the checkbox always reflects the real registration. */
 async function persistStartAtLogin(enabled) {
   const el = $("#start-at-login");
+  if (!el) return;
   el.disabled = true;
   try {
     await invoke("set_start_at_login", { enabled });
