@@ -125,8 +125,8 @@ pub fn store_notifications(
         tx.execute(
             "INSERT INTO notifications (
                  thread_id, repo_id, subject_type, subject_title, subject_url,
-                 reason, updated_at, thread_url, fetched_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                 reason, updated_at, thread_url, is_new, fetched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1,
                      strftime('%Y-%m-%dT%H:%M:%SZ','now'))
              ON CONFLICT(thread_id) DO UPDATE SET
                repo_id       = excluded.repo_id,
@@ -134,6 +134,8 @@ pub fn store_notifications(
                subject_title = excluded.subject_title,
                subject_url   = excluded.subject_url,
                reason        = excluded.reason,
+               is_new        = CASE WHEN excluded.updated_at <> notifications.updated_at
+                                    THEN 1 ELSE 0 END,
                updated_at    = excluded.updated_at,
                thread_url    = excluded.thread_url,
                fetched_at    = excluded.fetched_at",
@@ -542,6 +544,9 @@ pub struct NotificationView {
     /// `subject_state` still reflects the latest thread activity (the cleanup filter only
     /// trusts a fresh resolution; see the frontend `isCleanupCandidate`).
     pub resolved_at: Option<String>,
+    /// True when the row was inserted or its `updated_at` changed in the latest sync;
+    /// cleared on the next sync. Drives the "new since last sync" highlight.
+    pub is_new: bool,
 }
 
 /// Notifications for one repository.
@@ -565,7 +570,8 @@ pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
                 n.thread_id, n.subject_type, n.subject_title, n.subject_url,
                 COALESCE(n.reason, '') AS reason,
                 n.updated_at, n.thread_url,
-                n.subject_number, n.subject_state, n.subject_html_url, n.resolved_at
+                n.subject_number, n.subject_state, n.subject_html_url, n.resolved_at,
+                n.is_new
          FROM notifications n
          JOIN repos r ON r.id = n.repo_id
          ORDER BY r.full_name ASC, n.updated_at DESC, n.thread_id ASC",
@@ -588,6 +594,7 @@ pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
                 subject_state: r.get(11)?,
                 subject_html_url: r.get(12)?,
                 resolved_at: r.get(13)?,
+                is_new: r.get::<_, i64>(14)? != 0,
             },
         ))
     })?;
@@ -688,6 +695,27 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM repos", [], |r| r.get(0))
             .unwrap();
         assert_eq!(repos, 2);
+    }
+
+    #[test]
+    fn flags_new_and_changed_notifications() {
+        let mut conn = mem_conn();
+        // First sync: every thread is new.
+        store_notifications(&mut conn, &[thread("1", 100, "octo/a", "One")]).unwrap();
+        let v = &list_by_repo(&conn).unwrap()[0].notifications[0];
+        assert!(v.is_new, "inserted row should be flagged new");
+
+        // Re-sync with the same updated_at: the flag clears.
+        store_notifications(&mut conn, &[thread("1", 100, "octo/a", "One")]).unwrap();
+        let v = &list_by_repo(&conn).unwrap()[0].notifications[0];
+        assert!(!v.is_new, "unchanged row should clear the flag");
+
+        // A newer updated_at re-flags it.
+        let mut bumped = thread("1", 100, "octo/a", "One");
+        bumped.updated_at = "2099-01-01T00:00:00Z".to_string();
+        store_notifications(&mut conn, &[bumped]).unwrap();
+        let v = &list_by_repo(&conn).unwrap()[0].notifications[0];
+        assert!(v.is_new, "changed updated_at should re-flag the row");
     }
 
     #[test]

@@ -127,6 +127,7 @@ CREATE TABLE notifications (
   subject_merged_at   TEXT,
   subject_html_url    TEXT,
   resolved_at         TEXT,               -- when subject metadata was last resolved
+  is_new              INTEGER NOT NULL DEFAULT 0, -- new/changed in the last sync; clears next sync
   fetched_at          TEXT NOT NULL       -- when this row was last synced
 );
 
