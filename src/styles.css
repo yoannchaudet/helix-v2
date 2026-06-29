@@ -758,14 +758,6 @@ code,
   background: var(--surface-hover);
 }
 
-/* A done bookmark shows a muted, non-interactive "Done" tag where the action would be. */
-.n-done-tag {
-  margin-right: var(--space-10);
-  background: var(--track);
-  color: var(--muted);
-  font-size: 0.72rem;
-}
-
 .n-done:focus-visible,
 .n-bookmark:focus-visible,
 .repo-done:focus-visible {

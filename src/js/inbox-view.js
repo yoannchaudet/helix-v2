@@ -58,10 +58,10 @@ export function notificationRow(n) {
   const done = !!n.is_done;
   const cls = `n-row${url ? " n-row--openable" : ""}${isNew}${bookmarked ? " n-row--bookmarked" : ""}${done ? " n-row--done" : ""}`;
   const openAttrs = url ? html` data-url="${url}" role="link" tabindex="0"` : "";
-  // A done thread (only ever shown in Bookmarks) gets a muted "Done" tag instead of the
-  // mark-as-done button, which would be a no-op.
+  // A done thread (only ever shown in Bookmarks) has no mark-as-done button — its absence is
+  // signal enough that it's already done.
   const doneBtn = done
-    ? pill("Done", "n-done-tag")
+    ? ""
     : iconButton({
         icon: DONE_ICON,
         className: "n-done",

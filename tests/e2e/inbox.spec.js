@@ -191,7 +191,6 @@ test("a bookmark survives marking the thread done", async ({ page }) => {
   await page.locator('.source[data-filter="bookmarked"]').click();
   await expect(page.locator("#inbox .n-row")).toHaveCount(1);
   await expect(page.locator('.source-count[data-count="bookmarked"]')).toHaveText("1");
-  // A done bookmark shows a muted Done tag, not a mark-as-done button.
-  await expect(page.locator('.n-row[data-thread-id="t2"] .n-done-tag')).toHaveText("Done");
+  // A done bookmark has no mark-as-done button (its absence implies it's done).
   await expect(page.locator('.n-row[data-thread-id="t2"] .n-done')).toHaveCount(0);
 });

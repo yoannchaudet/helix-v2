@@ -42,10 +42,8 @@ test("notificationRow shows a filled bookmark + pressed state when bookmarked", 
   assert.ok(off.includes('aria-pressed="false"'));
 });
 
-test("notificationRow shows a Done tag instead of the done button for done rows", () => {
+test("notificationRow hides the mark-as-done button for done rows", () => {
   const done = notificationRow({ ...baseNotification, is_done: true });
-  assert.ok(done.includes("n-done-tag"));
-  assert.ok(done.includes(">Done<"));
   assert.ok(!done.includes('class="n-done"'));
   const active = notificationRow(baseNotification);
   assert.ok(active.includes('class="n-done"'));
