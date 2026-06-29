@@ -882,12 +882,30 @@ code,
   flex: none;
   margin-left: auto;
   padding-left: var(--space-10);
-  max-width: 30%;
+  max-width: 38%;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+/* The login text part can ellipsize; the bot badge stays fully visible. */
+.n-author-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Small robot icon appended to bot authors (e.g. dependabot, github-actions). Kept muted
+   and subtle so it reads as a quiet marker rather than a loud chip. */
+.n-bot-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
   color: var(--muted);
-  font-size: 0.76rem;
+  opacity: 0.8;
 }
 
 /* ================================ Settings ================================ */

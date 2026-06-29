@@ -7,6 +7,7 @@ import {
   notificationRow,
   repoHeader,
   repoSection,
+  authorTag,
 } from "../src/js/inbox-view.js";
 
 /* These render pure HTML strings, so they're unit-testable without a DOM. The most
@@ -121,6 +122,39 @@ test("notificationRow shows the subject author only when present, and escapes it
   });
   assert.ok(!evil.includes("<img src=x"), "raw HTML author must not appear unescaped");
   assert.ok(evil.includes("&lt;img src=x onerror=alert(1)&gt;"));
+});
+
+test("authorTag renders a person plainly (no bot icon)", () => {
+  const tag = authorTag("octocat");
+  assert.ok(tag.includes('class="n-author"'));
+  assert.ok(!tag.includes("n-author--bot"));
+  assert.ok(!tag.includes("n-bot-icon"));
+  assert.ok(tag.includes(">octocat</span>"));
+  assert.ok(tag.includes('title="Author: octocat"'));
+});
+
+test("authorTag flags a [bot] login, strips the suffix, and adds a robot icon", () => {
+  const tag = authorTag("dependabot[bot]");
+  assert.ok(tag.includes("n-author--bot"));
+  assert.ok(tag.includes('class="n-bot-icon"'));
+  assert.ok(tag.includes("<svg"));
+  // The visible name drops the [bot] suffix...
+  assert.ok(tag.includes(">dependabot</span>"));
+  // ...but the full login is preserved in the tooltip (escaped).
+  assert.ok(tag.includes('title="Bot: dependabot[bot]"'));
+});
+
+test("authorTag returns empty string for a missing author", () => {
+  assert.equal(authorTag(null), "");
+  assert.equal(authorTag(undefined), "");
+  assert.equal(authorTag(""), "");
+});
+
+test("authorTag escapes the login (including for bots)", () => {
+  const tag = authorTag('<x>[bot]');
+  assert.ok(!tag.includes("<x>"), "raw HTML must not appear unescaped");
+  assert.ok(tag.includes("&lt;x&gt;"));
+  assert.ok(tag.includes("n-bot-icon"));
 });
 
 test("notificationRow gives the done button a per-row accessible name", () => {

@@ -18,6 +18,23 @@ const SUBJECT_BADGES = {
   RepositoryInvitation: ["Invite", "badge--other"],
 };
 
+/** Small robot glyph marking a bot author. Trusted static markup (no interpolation). */
+const ROBOT_ICON = `<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true" focusable="false"><path d="M8 2.5v2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="8" cy="2" r="1" fill="currentColor"/><rect x="3" y="4.5" width="10" height="8" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.2"/><circle cx="6.2" cy="8.5" r="1" fill="currentColor"/><circle cx="9.8" cy="8.5" r="1" fill="currentColor"/></svg>`;
+
+/** Render the subject author (Issues/PRs only) for the right side of a row. GitHub App
+ *  bots come back with a `[bot]` suffix on their login (e.g. `dependabot[bot]`); detect
+ *  that, drop the suffix from the visible name, and append a small robot icon so bots are
+ *  visually distinct from people. Returns "" when there is no author. */
+export function authorTag(login) {
+  if (!login) return "";
+  const isBot = /\[bot\]$/i.test(login);
+  const display = isBot ? login.replace(/\[bot\]$/i, "") : login;
+  const badge = isBot ? `<span class="n-bot-icon" aria-hidden="true">${ROBOT_ICON}</span>` : "";
+  const cls = `n-author${isBot ? " n-author--bot" : ""}`;
+  const title = `${isBot ? "Bot" : "Author"}: ${login}`;
+  return html`<span class="${cls}" title="${title}"><span class="n-author-name">${display}</span>${rawHtml(badge)}</span>`;
+}
+
 export function subjectBadge(type) {
   const [label, cls] = SUBJECT_BADGES[type] ?? [type, "badge--other"];
   return pill(label, `badge ${cls}`);
@@ -55,7 +72,7 @@ export function notificationRow(n) {
   const url = n.subject_html_url || "";
   const isNew = n.is_new ? " n-row--new" : "";
   const author = n.subject_author
-    ? html`<span class="n-author" title="Author: ${n.subject_author}">${n.subject_author}</span>`
+    ? authorTag(n.subject_author)
     : "";
   const bookmarked = !!n.bookmarked;
   const done = !!n.is_done;
