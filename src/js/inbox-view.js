@@ -32,7 +32,7 @@ export function authorTag(login) {
   const badge = isBot ? `<span class="n-bot-icon" aria-hidden="true">${ROBOT_ICON}</span>` : "";
   const cls = `n-author${isBot ? " n-author--bot" : ""}`;
   const title = `${isBot ? "Bot" : "Author"}: ${login}`;
-  return html`<span class="${cls}" title="${title}"><span class="n-author-name">${display}</span>${rawHtml(badge)}</span>`;
+  return html`<span class="${cls}" title="${title}">${rawHtml(badge)}<span class="n-author-name">${display}</span></span>`;
 }
 
 export function subjectBadge(type) {
