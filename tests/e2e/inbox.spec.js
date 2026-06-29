@@ -197,3 +197,18 @@ test("a bookmark survives marking the thread done", async ({ page }) => {
   await expect(page.locator('.n-row[data-thread-id="t2"] .n-done--spacer')).toHaveCount(1);
   await expect(page.locator('.n-row[data-thread-id="t2"] button.n-done')).toHaveCount(0);
 });
+
+test("marking done in the Bookmarks filter keeps focus on the same row", async ({ page }) => {
+  await openApp(page);
+
+  // Bookmark a row and view the Bookmarks filter.
+  await page.locator('.n-row[data-thread-id="t2"]').hover();
+  await page.locator('.n-row[data-thread-id="t2"] .n-bookmark').click();
+  await page.keyboard.press("7"); // Bookmarks filter (keyboard → focuses first row)
+  await expect(page.locator('.n-row[data-thread-id="t2"] .n-open')).toBeFocused();
+
+  // Mark it done with `d`: the row stays (now done) and focus doesn't hop away.
+  await page.keyboard.press("d");
+  await expect(page.locator("#inbox .n-row")).toHaveCount(1);
+  await expect(page.locator('.n-row[data-thread-id="t2"] .n-open')).toBeFocused();
+});

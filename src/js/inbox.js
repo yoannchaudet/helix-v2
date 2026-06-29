@@ -410,7 +410,10 @@ async function markDone(threadIds) {
   if (!ids.length) return;
   // Where should focus go once these rows vanish? Compute against the current view before
   // we mutate it, so keyboard users aren't dropped to <body> when their row is removed.
-  const focusTarget = focusTargetAfterRemoval(ids);
+  // Exception: in the Bookmarks filter the row doesn't vanish (it stays as a now-done
+  // snapshot), so retargeting focus would be a jarring hop — keep the user on the same row.
+  const focusTarget =
+    activeFilter === "bookmarked" ? null : focusTargetAfterRemoval(ids);
   // Optimistic: drop the rows locally so they disappear immediately.
   const idSet = new Set(ids);
   inboxGroups = inboxGroups
