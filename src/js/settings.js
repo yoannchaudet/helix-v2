@@ -151,6 +151,37 @@ export async function loadSettings() {
   } catch (err) {
     setSettingsError(String(err));
   }
+  await loadStartAtLogin();
+}
+
+/** Reflect the OS-level launch-at-login registration in the toggle. Errors leave it
+ *  unchecked (the registration is the source of truth). */
+async function loadStartAtLogin() {
+  const el = $("#start-at-login");
+  if (!el) return;
+  try {
+    el.checked = await invoke("get_start_at_login");
+  } catch (err) {
+    el.checked = false;
+    console.error(`failed to read start-at-login: ${String(err)}`);
+  }
+}
+
+/** Persist the toggle; disabled in-flight so quick on/off can't race, and re-reads the
+ *  OS truth afterwards so the checkbox always reflects the real registration. */
+async function persistStartAtLogin(enabled) {
+  const el = $("#start-at-login");
+  if (!el) return;
+  el.disabled = true;
+  try {
+    await invoke("set_start_at_login", { enabled });
+    flash($("#startup-flash"), "Saved");
+  } catch (err) {
+    flash($("#startup-flash"), String(err), "error");
+  } finally {
+    el.disabled = false;
+    await loadStartAtLogin();
+  }
 }
 
 /** Persist a validation/save error in the polling-interval row (stays until corrected). */
@@ -263,6 +294,12 @@ export function initSettings() {
   for (const input of $$('input[name="theme"]')) {
     input.addEventListener("change", () => persistTheme(input.value));
   }
+
+  // Launch-at-login: persist immediately on toggle (the OS registration is the source of
+  // truth, so loadSettings re-reads it on load).
+  $("#start-at-login")?.addEventListener("change", (e) => {
+    persistStartAtLogin(e.target.checked);
+  });
 
   // Settings pane: opened from the sidebar or via the ⌘, shortcut; closed via the back
   // button (and toggled by ⌘, again).
