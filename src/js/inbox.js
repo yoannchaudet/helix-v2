@@ -331,6 +331,9 @@ function selectRepo(repoId, kbd = false) {
  *  clear selection (and single-key commands like b/d/c act on a real row, not whatever last
  *  held focus). No-op when the view is empty. */
 function focusFirstRow(kbd = true) {
+  // Only steal focus for keyboard-driven switches; a mouse selection leaves focus alone so
+  // no ring is painted.
+  if (!kbd) return;
   const first = $("#inbox").querySelector(".n-row");
   if (first) focusRow(first, kbd);
 }
