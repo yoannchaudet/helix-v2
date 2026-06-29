@@ -211,6 +211,27 @@ fn show_main_window(window: tauri::WebviewWindow) {
     let _ = window.set_focus();
 }
 
+/// Whether the app is registered to start at login.
+#[tauri::command]
+fn get_start_at_login(app: tauri::AppHandle) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
+/// Enable/disable launching the app at login (default off). The LaunchAgent points at the
+/// currently running binary, so a dev build registers the dev binary and a release build
+/// the installed app.
+#[tauri::command]
+fn set_start_at_login(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let mgr = app.autolaunch();
+    if enabled {
+        mgr.enable().map_err(|e| e.to_string())
+    } else {
+        mgr.disable().map_err(|e| e.to_string())
+    }
+}
+
 /// Reveal a path in Finder, selecting it in its containing folder (macOS `open -R`).
 /// Args are passed directly to `open` (no shell), so the path needs no escaping.
 #[cfg(target_os = "macos")]
@@ -459,6 +480,13 @@ pub fn run() {
     // macOS-only (see Cargo.toml); we drive it from Rust (see `check_for_update` /
     // `install_update`) and relaunch with the core `AppHandle::restart`.
     let builder = tauri::Builder::default();
+    // Launch-at-login: a LaunchAgent toggled from Settings (default off; see
+    // get_start_at_login / set_start_at_login). Registering with no args means nothing is
+    // enabled until the user opts in.
+    let builder = builder.plugin(tauri_plugin_autostart::init(
+        tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+        None,
+    ));
     #[cfg(all(not(debug_assertions), target_os = "macos"))]
     let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
 
@@ -555,6 +583,8 @@ pub fn run() {
             coordinator::list_inbox,
             coordinator::mark_threads_done,
             show_main_window,
+            get_start_at_login,
+            set_start_at_login,
             reveal_in_finder,
             open_url,
             updater_enabled,
