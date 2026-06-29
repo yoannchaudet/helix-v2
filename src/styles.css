@@ -818,6 +818,7 @@ code,
 .n-open:focus {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
+  border-radius: var(--radius-lg);
 }
 
 /* Fixed-width, centered slot for the type pill so every title starts at the same x. */
