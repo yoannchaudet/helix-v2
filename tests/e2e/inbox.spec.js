@@ -35,6 +35,8 @@ test("selecting a smart filter narrows the list and updates the title", async ({
     "aria-current",
     "true",
   );
+  // Choosing a filter focuses its first row, so single-key commands act on a real selection.
+  await expect(page.locator("#inbox .n-row:first-child .n-open")).toBeFocused();
 });
 
 test("refining by repository shows only that repo, with a breadcrumb", async ({ page }) => {

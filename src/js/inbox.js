@@ -313,6 +313,7 @@ function selectFilter(filterId) {
   showSettings(false);
   renderSidebar();
   renderInbox();
+  focusFirstRow();
   announceView();
 }
 
@@ -322,7 +323,16 @@ function selectRepo(repoId) {
   showSettings(false);
   renderSidebar();
   renderInbox();
+  focusFirstRow();
   announceView();
+}
+
+/** Move keyboard focus to the first notification row, so a freshly chosen filter/repo has a
+ *  clear selection (and single-key commands like b/d/c act on a real row, not whatever last
+ *  held focus). No-op when the view is empty. */
+function focusFirstRow() {
+  const first = $("#inbox").querySelector(".n-row");
+  if (first) focusRow(first);
 }
 
 /** Announce the current view (its spelled-out label + how many notifications it shows) to
