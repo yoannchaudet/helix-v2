@@ -31,6 +31,16 @@ test("d marks the active row done", async ({ page }) => {
   await expect(page.locator("#inbox .n-row")).toHaveCount(2);
 });
 
+test("b bookmarks the active row", async ({ page }) => {
+  await openApp(page);
+
+  await page.keyboard.press("j"); // focus t3
+  await page.keyboard.press("b");
+
+  await expect(page.locator('.n-row[data-thread-id="t3"]')).toHaveClass(/n-row--bookmarked/);
+  await expect(page.locator('.source-count[data-count="bookmarked"]')).toHaveText("1");
+});
+
 test("c copies the active row's URL", async ({ page }) => {
   await openApp(page);
 

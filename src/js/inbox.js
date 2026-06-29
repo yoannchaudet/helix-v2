@@ -512,9 +512,9 @@ function onInboxKeydown(e) {
 
 /* ----------------------- Keyboard command model -------------------------- */
 
-/* Single-key triage shortcuts for power users (j/k navigate, d/e done, c copy, r sync,
- * 1–6 filter). These layer on TOP of the existing Tab + Enter a11y (they don't replace
- * it): j/k just move focus among the row anchors so the list is fast without Tabbing. */
+/* Single-key triage shortcuts for power users (j/k navigate, d/e done, c copy, b bookmark,
+ * r sync, 1–7 filter). These layer on TOP of the existing Tab + Enter a11y (they don't
+ * replace it): j/k just move focus among the row anchors so the list is fast without Tabbing. */
 
 /** All notification rows currently in the DOM, in visual order. */
 function inboxRows() {
@@ -559,6 +559,17 @@ function copyActiveRowUrl() {
   if (url) copyNotificationUrl(url);
 }
 
+/** Toggle the bookmark on the row under the keyboard cursor. */
+function bookmarkActiveRow() {
+  const btn = activeRow()?.querySelector(".n-bookmark");
+  if (btn) {
+    const row = btn.closest(".n-row");
+    if (row?.dataset.threadId) {
+      toggleBookmark(row.dataset.threadId, !btn.classList.contains("is-on"));
+    }
+  }
+}
+
 /** Global triage keydown: active only on the notifications pane, with no modifier held,
  *  not while typing, and not while a menu/overlay owns the keyboard. */
 function onCommandKeydown(e) {
@@ -587,6 +598,9 @@ function onCommandKeydown(e) {
       return;
     case "c":
       copyActiveRowUrl();
+      return;
+    case "b":
+      bookmarkActiveRow();
       return;
     case "r":
       e.preventDefault();
@@ -655,6 +669,12 @@ function onInboxContextMenu(e) {
       action: () => openNotification(repoUrl),
     },
     { separator: true },
+    {
+      label: row.querySelector(".n-bookmark")?.classList.contains("is-on")
+        ? "Remove bookmark"
+        : "Bookmark",
+      action: () => toggleBookmark(threadId, !row.querySelector(".n-bookmark")?.classList.contains("is-on")),
+    },
     {
       label: "Mark as done",
       danger: true,

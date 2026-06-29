@@ -21,13 +21,14 @@ const SHORTCUTS = [
     items: [
       { keys: ["d", "e"], desc: "Mark as done" },
       { keys: ["c"], desc: "Copy link" },
+      { keys: ["b"], desc: "Bookmark / unbookmark" },
       { keys: ["r"], desc: "Sync now" },
     ],
   },
   {
     group: "Filters",
     items: [
-      { keys: ["1"], desc: "Switch smart filter (1 = All … 6 = Cleanup)" },
+      { keys: ["1"], desc: "Switch smart filter (1 = All … 7 = Bookmarks)" },
     ],
   },
   {
