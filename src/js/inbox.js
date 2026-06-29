@@ -24,23 +24,31 @@ import { isShortcutsOpen } from "./shortcuts.js";
  * are fetched once into `inboxGroups` and re-rendered locally as either selection changes. */
 
 let inboxGroups = [];
+/** Bookmarked notifications (snapshot, independent of the inbox lifecycle), loaded
+ *  alongside the inbox. Powers the "Bookmarks" filter and its sidebar count. */
+let bookmarkGroups = [];
 /** Active notification-type filter (always set); one of the FILTERS keys. */
 let activeFilter = "all";
 /** Optional repository refinement: a repo_id, or null for "all repositories". */
 let activeRepo = null;
 
-/** Apply the active filter, then the optional repo refinement, to `inboxGroups`, ordering
- *  the repos most-recent-first. Thin wrapper binding the pure `filterGroups` to the current
- *  inbox state. */
+/** The dataset the active filter draws from: bookmarks come from their own snapshot (so
+ *  done/removed ones still show); every other filter draws from the live inbox. */
+function currentGroups() {
+  return activeFilter === "bookmarked" ? bookmarkGroups : inboxGroups;
+}
+
+/** Apply the active filter, then the optional repo refinement, to the active dataset,
+ *  ordering the repos most-recent-first. Thin wrapper binding the pure `filterGroups`. */
 function filteredGroups() {
-  return filterGroups(inboxGroups, activeFilter, activeRepo);
+  return filterGroups(currentGroups(), activeFilter, activeRepo);
 }
 
 /** Current toolbar breadcrumb: the filter label, plus the repo when refined. */
 function activeTitleHtml() {
   const label = (FILTERS[activeFilter] ?? FILTERS.all).label;
   if (activeRepo != null) {
-    const group = inboxGroups.find((g) => g.repo_id === activeRepo);
+    const group = currentGroups().find((g) => g.repo_id === activeRepo);
     if (group) {
       return html`${label}${rawHtml(
         html`<span class="crumb-sep" aria-hidden="true">›</span><span class="crumb-repo">${group.full_name}</span>`,
@@ -55,7 +63,7 @@ function activeTitleHtml() {
 function activeTitleLabel() {
   const label = (FILTERS[activeFilter] ?? FILTERS.all).label;
   if (activeRepo != null) {
-    const group = inboxGroups.find((g) => g.repo_id === activeRepo);
+    const group = currentGroups().find((g) => g.repo_id === activeRepo);
     if (group) return `${label}, repository ${group.full_name}`;
   }
   return label;
@@ -207,6 +215,7 @@ const FILTER_ICONS = {
   review_requested: `<svg viewBox="0 0 16 16" width="15" height="15"><circle cx="4" cy="4" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="4" cy="12" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="12" cy="8" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M5.6 4H9a2 2 0 012 2v.4M4 5.6v4.8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>`,
   assign: `<svg viewBox="0 0 16 16" width="15" height="15"><circle cx="8" cy="5.2" r="2.4" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M3.5 13a4.5 4.5 0 019 0" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>`,
   cleanup: `<svg viewBox="0 0 16 16" width="15" height="15"><path d="M9.5 2.5l4 4-5.5 5.5H4v-4z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M2.5 13.5h6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>`,
+  bookmarked: `<svg viewBox="0 0 16 16" width="15" height="15"><path d="M4 2.5h8v11l-4-3-4 3z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>`,
 };
 const REPO_ICON = `<svg viewBox="0 0 16 16" width="15" height="15"><path d="M3 2.5h7.5L13 5v8.5H3z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M5 6h4M5 8.5h6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>`;
 
@@ -235,16 +244,18 @@ function renderSidebar() {
   const counts = Object.fromEntries(
     Object.entries(FILTERS).map(([id, { match }]) => [id, all.filter(match).length]),
   );
+  // Bookmarks live in their own snapshot dataset (incl. done/removed), so count those.
+  counts.bookmarked = bookmarkGroups.flatMap((g) => g.notifications).length;
   for (const el of $$(".source-count")) {
     const key = el.dataset.count;
     const value = counts[key] ?? 0;
     el.textContent = value ? String(value) : "";
   }
 
-  // Repositories list — filtered to repos that have notifications matching the
-  // active type filter, with counts that reflect that filter.
+  // Repositories list — drawn from the active dataset, filtered to repos with matching
+  // notifications, with counts that reflect that filter.
   const repoList = $("#repo-list");
-  let visibleRepos = inboxGroups
+  let visibleRepos = currentGroups()
     .map((g) => ({ group: g, matches: repoMatches(g, activeFilter) }))
     .filter((x) => x.matches.length);
   // Same most-recent-first ordering as the main list, so the sidebar matches the view.
@@ -296,7 +307,7 @@ function renderSidebar() {
 function selectFilter(filterId) {
   activeFilter = filterId;
   if (activeRepo != null) {
-    const group = inboxGroups.find((g) => g.repo_id === activeRepo);
+    const group = currentGroups().find((g) => g.repo_id === activeRepo);
     if (!group || !repoMatches(group, activeFilter).length) activeRepo = null;
   }
   showSettings(false);
@@ -324,9 +335,14 @@ function announceView() {
 
 export async function loadInbox() {
   try {
-    inboxGroups = await invoke("list_inbox");
-    // Drop a repo refinement whose repository is no longer present after a sync.
-    if (activeRepo != null && !inboxGroups.some((g) => g.repo_id === activeRepo)) {
+    const [inbox, bookmarks] = await Promise.all([
+      invoke("list_inbox"),
+      invoke("list_bookmarks"),
+    ]);
+    inboxGroups = inbox;
+    bookmarkGroups = bookmarks;
+    // Drop a repo refinement whose repository is no longer present in the active dataset.
+    if (activeRepo != null && !currentGroups().some((g) => g.repo_id === activeRepo)) {
       activeRepo = null;
     }
     renderSidebar();
@@ -334,6 +350,18 @@ export async function loadInbox() {
   } catch (err) {
     $("#inbox").innerHTML = html`<pre class="error-detail">${err}</pre>`;
   }
+}
+
+/** Toggle a thread's bookmark, then reload so the inbox flag, the Bookmarks list, and the
+ *  sidebar count all reflect the change. */
+async function toggleBookmark(threadId, bookmark) {
+  try {
+    await invoke("set_bookmark", { threadId, bookmarked: bookmark });
+    announce(bookmark ? "Bookmarked." : "Bookmark removed.");
+  } catch (err) {
+    setSyncProgress(String(err), "error");
+  }
+  await loadInbox();
 }
 
 /* -------------------------------- Mark done ------------------------------- */
@@ -381,7 +409,7 @@ async function markDone(threadIds) {
   // If the refined repo just lost its last visible notification, clear the refinement so
   // renderInbox doesn't show the empty state while other repos still have notifications
   // (loadInbox would otherwise only fix this once the round-trip completes).
-  if (activeRepo != null && !inboxGroups.some((g) => g.repo_id === activeRepo)) {
+  if (activeRepo != null && !currentGroups().some((g) => g.repo_id === activeRepo)) {
     activeRepo = null;
   }
   renderSidebar();
@@ -441,6 +469,15 @@ function onInboxClick(e) {
   // Ignore the second click of a double-click so an instinctive double-click on a
   // desktop list row doesn't open two browser tabs.
   if (e.detail > 1) return;
+  // Per-row bookmark toggle — local-only, never opens the row.
+  const bookmarkBtn = e.target.closest?.(".n-bookmark");
+  if (bookmarkBtn) {
+    const row = bookmarkBtn.closest(".n-row");
+    if (row?.dataset.threadId) {
+      toggleBookmark(row.dataset.threadId, !bookmarkBtn.classList.contains("is-on"));
+    }
+    return;
+  }
   // Per-row "mark as done" — clear this thread instantly, without opening the row.
   const doneBtn = e.target.closest?.(".n-done");
   if (doneBtn) {
@@ -466,7 +503,7 @@ function onInboxKeydown(e) {
   if (e.key !== "Enter") return;
   // Let the per-row / per-repo action buttons handle their own activation; don't also
   // open the row underneath them.
-  if (e.target.closest?.(".n-done, .repo-done")) return;
+  if (e.target.closest?.(".n-done, .repo-done, .n-bookmark")) return;
   const open = e.target.closest?.(".n-open");
   if (!open?.dataset.url) return;
   e.preventDefault();
@@ -583,7 +620,7 @@ function confirmRepoDone(btn) {
 function repoUrlForRow(row) {
   const labelled = row.closest(".repo-section")?.getAttribute("aria-labelledby");
   const repoId = labelled ? Number(labelled.slice("repo-h-".length)) : NaN;
-  const group = inboxGroups.find((g) => g.repo_id === repoId);
+  const group = currentGroups().find((g) => g.repo_id === repoId);
   if (!group) return null;
   return `https://github.com/${group.full_name.split("/").map(encodeURIComponent).join("/")}`;
 }

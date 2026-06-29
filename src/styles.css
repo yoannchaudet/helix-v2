@@ -692,7 +692,8 @@ code,
    layout at opacity 0 so revealing it never reflows the row; focus-visible reveals it for
    keyboard users. */
 .n-done,
-.repo-done {
+.repo-done,
+.n-bookmark {
   flex: none;
   display: inline-flex;
   align-items: center;
@@ -722,12 +723,28 @@ code,
   height: var(--control-icon-sm);
 }
 
+.n-bookmark {
+  width: var(--control-icon-md);
+  height: var(--control-icon-md);
+  margin-right: var(--space-10);
+}
+
 .n-row:hover .n-done,
+.n-row:hover .n-bookmark,
 .repo-header:hover .repo-done,
 .n-done:focus-visible,
+.n-bookmark:focus-visible,
 .repo-done:focus-visible {
   opacity: 1;
   pointer-events: auto;
+}
+
+/* A bookmarked row keeps its (filled) bookmark visible even off-hover, so it's spottable
+   at a glance in any view. */
+.n-bookmark.is-on {
+  opacity: 1;
+  pointer-events: auto;
+  color: var(--accent-strong);
 }
 
 .n-done:hover,
@@ -736,7 +753,13 @@ code,
   background: var(--surface-hover);
 }
 
+.n-bookmark:hover {
+  color: var(--accent-strong);
+  background: var(--surface-hover);
+}
+
 .n-done:focus-visible,
+.n-bookmark:focus-visible,
 .repo-done:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;

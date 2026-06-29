@@ -152,3 +152,43 @@ test("an empty inbox shows the all-caught-up state", async ({ page }) => {
   await expect(page.locator(".inbox-empty")).toContainText("You're all caught up.");
   await expect(page.locator("#inbox .n-row")).toHaveCount(0);
 });
+
+test("bookmarking a row marks it, fills the Bookmarks filter, and is removable", async ({
+  page,
+}) => {
+  await openApp(page);
+
+  await expect(page.locator('.source-count[data-count="bookmarked"]')).toHaveText("");
+
+  await page.locator('.n-row[data-thread-id="t2"]').hover();
+  await page.locator('.n-row[data-thread-id="t2"] .n-bookmark').click();
+
+  // The row gains the bookmarked state, the sidebar count goes to 1.
+  await expect(page.locator('.n-row[data-thread-id="t2"]')).toHaveClass(/n-row--bookmarked/);
+  await expect(page.locator('.source-count[data-count="bookmarked"]')).toHaveText("1");
+
+  // The Bookmarks filter shows just that row.
+  await page.locator('.source[data-filter="bookmarked"]').click();
+  await expect(page.locator("#view-title")).toHaveText("Bookmarks");
+  await expect(page.locator("#inbox .n-row")).toHaveCount(1);
+
+  // Un-bookmark empties the filter.
+  await page.locator('.n-row[data-thread-id="t2"] .n-bookmark').click();
+  await expect(page.locator("#inbox .n-row")).toHaveCount(0);
+  await expect(page.locator('.source-count[data-count="bookmarked"]')).toHaveText("");
+});
+
+test("a bookmark survives marking the thread done", async ({ page }) => {
+  await openApp(page);
+
+  await page.locator('.n-row[data-thread-id="t2"]').hover();
+  await page.locator('.n-row[data-thread-id="t2"] .n-bookmark').click();
+  await page.locator('.n-row[data-thread-id="t2"]').hover();
+  await page.locator('.n-row[data-thread-id="t2"] .n-done').click();
+
+  // Gone from the inbox, but the bookmark snapshot keeps it in the Bookmarks filter.
+  await expect(page.locator('.n-row[data-thread-id="t2"]')).toHaveCount(0);
+  await page.locator('.source[data-filter="bookmarked"]').click();
+  await expect(page.locator("#inbox .n-row")).toHaveCount(1);
+  await expect(page.locator('.source-count[data-count="bookmarked"]')).toHaveText("1");
+});

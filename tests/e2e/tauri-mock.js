@@ -54,6 +54,38 @@ export function installTauriMock(fixtures) {
     },
 
     list_inbox: () => JSON.parse(JSON.stringify(state.inbox)),
+    list_bookmarks: () => JSON.parse(JSON.stringify(state.bookmarks ?? [])),
+    set_bookmark: ({ threadId, bookmarked }) => {
+      state.bookmarks = state.bookmarks ?? [];
+      let snapshot = null;
+      for (const g of state.inbox) {
+        for (const n of g.notifications) {
+          if (n.thread_id === threadId) {
+            n.bookmarked = bookmarked;
+            snapshot = { group: g, n };
+          }
+        }
+      }
+      if (bookmarked && snapshot) {
+        // Snapshot into a standalone dataset so it persists after the row is marked done.
+        let bg = state.bookmarks.find((g) => g.repo_id === snapshot.group.repo_id);
+        if (!bg) {
+          bg = { ...snapshot.group, notifications: [] };
+          state.bookmarks.push(bg);
+        }
+        if (!bg.notifications.some((x) => x.thread_id === threadId)) {
+          bg.notifications.push({ ...snapshot.n, bookmarked: true });
+        }
+      } else {
+        state.bookmarks = state.bookmarks
+          .map((g) => ({
+            ...g,
+            notifications: g.notifications.filter((x) => x.thread_id !== threadId),
+          }))
+          .filter((g) => g.notifications.length);
+      }
+      return null;
+    },
     sync_now: () => ({ count: countAll(), removed: 0 }),
     mark_threads_done: ({ threadIds }) => {
       const ids = new Set(threadIds);

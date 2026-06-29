@@ -467,6 +467,13 @@ pub fn store_resolved_subject(
             subject.html_url,
         ],
     )?;
+    // Keep a bookmark's snapshot current too, so a bookmarked thread marked done before the
+    // next sync still carries the resolved number/state/url in the Bookmarks filter.
+    conn.execute(
+        "UPDATE bookmarks SET subject_number = ?2, subject_state = ?3, subject_html_url = ?4
+         WHERE thread_id = ?1",
+        params![thread_id, subject.number, subject.state, subject.html_url],
+    )?;
     Ok(())
 }
 
@@ -523,6 +530,113 @@ pub fn mark_done_local(conn: &mut Connection, thread_ids: &[String]) -> rusqlite
     Ok(removed)
 }
 
+/* -------------------------------- Bookmarks ------------------------------- */
+
+/// Add a bookmark for a thread, snapshotting its current notification data so the bookmark
+/// survives the inbox lifecycle (reconciliation / mark-done). Re-bookmarking refreshes the
+/// snapshot (and keeps the original `bookmarked_at`). No-op if the thread isn't in the inbox
+/// (nothing to snapshot); callers only offer the toggle on rows that exist.
+pub fn add_bookmark(conn: &Connection, thread_id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO bookmarks (
+             thread_id, repo_id, repo_full_name, repo_private, subject_type, subject_title,
+             subject_number, subject_state, subject_html_url, thread_url, reason, updated_at,
+             bookmarked_at)
+         SELECT n.thread_id, n.repo_id, r.full_name, r.private, n.subject_type, n.subject_title,
+                n.subject_number, n.subject_state, n.subject_html_url, n.thread_url,
+                COALESCE(n.reason, ''), n.updated_at,
+                strftime('%Y-%m-%dT%H:%M:%SZ','now')
+         FROM notifications n JOIN repos r ON r.id = n.repo_id
+         WHERE n.thread_id = ?1
+         ON CONFLICT(thread_id) DO UPDATE SET
+           repo_id = excluded.repo_id, repo_full_name = excluded.repo_full_name,
+           repo_private = excluded.repo_private, subject_type = excluded.subject_type,
+           subject_title = excluded.subject_title, subject_number = excluded.subject_number,
+           subject_state = excluded.subject_state, subject_html_url = excluded.subject_html_url,
+           thread_url = excluded.thread_url, reason = excluded.reason,
+           updated_at = excluded.updated_at",
+        params![thread_id],
+    )?;
+    Ok(())
+}
+
+/// Remove a bookmark.
+pub fn remove_bookmark(conn: &Connection, thread_id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM bookmarks WHERE thread_id = ?1", params![thread_id])?;
+    Ok(())
+}
+
+/// Read all bookmarks grouped by repository (newest first), independent of the inbox. Uses
+/// the stored snapshot so done/removed threads still appear. Mirrors `list_by_repo`'s shape;
+/// every notification carries `bookmarked: true`.
+pub fn list_bookmarks(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
+    let mut stmt = conn.prepare(
+        "SELECT repo_id, repo_full_name, repo_private,
+                thread_id, subject_type, subject_title, NULL,
+                COALESCE(reason, ''), updated_at, thread_url,
+                subject_number, subject_state, subject_html_url
+         FROM bookmarks
+         ORDER BY repo_full_name ASC, updated_at DESC, thread_id ASC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, Option<i64>>(0)?.unwrap_or(0),
+            r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)? != 0,
+            NotificationView {
+                thread_id: r.get(3)?,
+                subject_type: r.get(4)?,
+                subject_title: r.get(5)?,
+                subject_url: r.get(6)?,
+                reason: r.get(7)?,
+                updated_at: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
+                thread_url: r.get(9)?,
+                subject_number: r.get(10)?,
+                subject_state: r.get(11)?,
+                subject_html_url: r.get(12)?,
+                resolved_at: None,
+                is_new: false,
+                bookmarked: true,
+            },
+        ))
+    })?;
+    let mut groups: Vec<RepoGroup> = Vec::new();
+    for row in rows {
+        let (repo_id, full_name, private, view) = row?;
+        if groups.last().map(|g| g.repo_id) != Some(repo_id) {
+            groups.push(RepoGroup {
+                repo_id,
+                full_name,
+                private,
+                total: 0,
+                notifications: Vec::new(),
+            });
+        }
+        let group = groups.last_mut().expect("group just ensured");
+        group.total += 1;
+        group.notifications.push(view);
+    }
+    Ok(groups)
+}
+
+/// Refresh bookmark snapshots from currently-present notifications, so a bookmarked thread's
+/// title/state stay current while it's in the inbox. Threads no longer present keep their
+/// last snapshot. Called after each sync.
+pub fn refresh_bookmark_snapshots(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE bookmarks SET
+           repo_id = n.repo_id, repo_full_name = r.full_name, repo_private = r.private,
+           subject_type = n.subject_type, subject_title = n.subject_title,
+           subject_number = n.subject_number, subject_state = n.subject_state,
+           subject_html_url = n.subject_html_url, thread_url = n.thread_url,
+           reason = COALESCE(n.reason, ''), updated_at = n.updated_at
+         FROM notifications n JOIN repos r ON r.id = n.repo_id
+         WHERE bookmarks.thread_id = n.thread_id",
+        [],
+    )?;
+    Ok(())
+}
+
 /* --------------------------------- Inbox ---------------------------------- */
 
 /// A single notification as shown in the by-repo inbox.
@@ -544,6 +658,8 @@ pub struct NotificationView {
     /// `subject_state` still reflects the latest thread activity (the cleanup filter only
     /// trusts a fresh resolution; see the frontend `isCleanupCandidate`).
     pub resolved_at: Option<String>,
+    /// True when this thread is bookmarked (kept regardless of done/inbox state).
+    pub bookmarked: bool,
     /// True when the row was inserted or its `updated_at` changed in the latest sync;
     /// cleared on the next sync. Drives the "new since last sync" highlight.
     pub is_new: bool,
@@ -571,9 +687,11 @@ pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
                 COALESCE(n.reason, '') AS reason,
                 n.updated_at, n.thread_url,
                 n.subject_number, n.subject_state, n.subject_html_url, n.resolved_at,
-                n.is_new
+                n.is_new,
+                CASE WHEN b.thread_id IS NULL THEN 0 ELSE 1 END AS bookmarked
          FROM notifications n
          JOIN repos r ON r.id = n.repo_id
+         LEFT JOIN bookmarks b ON b.thread_id = n.thread_id
          ORDER BY r.full_name ASC, n.updated_at DESC, n.thread_id ASC",
     )?;
 
@@ -595,6 +713,7 @@ pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
                 subject_html_url: r.get(12)?,
                 resolved_at: r.get(13)?,
                 is_new: r.get::<_, i64>(14)? != 0,
+                bookmarked: r.get::<_, i64>(15)? != 0,
             },
         ))
     })?;
@@ -719,8 +838,32 @@ mod tests {
     }
 
     #[test]
-    fn groups_notifications_by_repo() {
+    fn bookmarks_survive_mark_done_and_flag_inbox_rows() {
         let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/a", "One")]).unwrap();
+        add_bookmark(&conn, "1").unwrap();
+
+        // The inbox row reflects the bookmark.
+        let v = &list_by_repo(&conn).unwrap()[0].notifications[0];
+        assert!(v.bookmarked);
+
+        // The bookmark snapshot is queryable independently.
+        let bm = list_bookmarks(&conn).unwrap();
+        assert_eq!(bm.len(), 1);
+        assert_eq!(bm[0].notifications[0].subject_title, "One");
+
+        // Mark done removes it from the inbox but the bookmark snapshot persists.
+        mark_done_local(&mut conn, &["1".to_string()]).unwrap();
+        assert_eq!(count(&conn).unwrap(), 0);
+        assert_eq!(list_bookmarks(&conn).unwrap().len(), 1);
+
+        // Removing the bookmark clears the snapshot.
+        remove_bookmark(&conn, "1").unwrap();
+        assert!(list_bookmarks(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn groups_notifications_by_repo() {        let mut conn = mem_conn();
         let threads = vec![
             thread("1", 200, "octo/zeta", "Z one"),
             thread("2", 100, "octo/alpha", "A one"),

@@ -581,6 +581,8 @@ pub fn run() {
             coordinator::sync_now,
             coordinator::sync_status,
             coordinator::list_inbox,
+            coordinator::list_bookmarks,
+            coordinator::set_bookmark,
             coordinator::mark_threads_done,
             show_main_window,
             get_start_at_login,

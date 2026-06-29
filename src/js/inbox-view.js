@@ -42,6 +42,10 @@ export function stateBadge(state) {
 /** Checkmark glyph for the "mark as done" affordances (row / toolbar / repo header). */
 const DONE_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3.4 8.5l3 3 6.2-6.8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
+/** Bookmark glyph: hollow when not bookmarked, filled when bookmarked. */
+const BOOKMARK_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 2.5h8v11l-4-3-4 3z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>`;
+const BOOKMARK_ICON_FILLED = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 2.5h8v11l-4-3-4 3z" fill="currentColor" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>`;
+
 export function notificationRow(n) {
   const number =
     n.subject_number != null ? html`<span class="n-number">#${n.subject_number}</span> ` : "";
@@ -50,7 +54,8 @@ export function notificationRow(n) {
   // Only rows with a resolved web URL are openable (clickable + hover affordance).
   const url = n.subject_html_url || "";
   const isNew = n.is_new ? " n-row--new" : "";
-  const cls = `n-row${url ? " n-row--openable" : ""}${isNew}`;
+  const bookmarked = !!n.bookmarked;
+  const cls = `n-row${url ? " n-row--openable" : ""}${isNew}${bookmarked ? " n-row--bookmarked" : ""}`;
   const openAttrs = url ? html` data-url="${url}" role="link" tabindex="0"` : "";
   // Contextual accessible name so each row's button isn't an indistinct "Mark as done".
   const doneBtn = iconButton({
@@ -58,6 +63,13 @@ export function notificationRow(n) {
     className: "n-done",
     title: "Mark as done",
     label: `Mark "${n.subject_title}" as done`,
+  });
+  const bookmarkBtn = iconButton({
+    icon: bookmarked ? BOOKMARK_ICON_FILLED : BOOKMARK_ICON,
+    className: `n-bookmark${bookmarked ? " is-on" : ""}`,
+    title: bookmarked ? "Remove bookmark" : "Bookmark",
+    label: `${bookmarked ? "Remove bookmark from" : "Bookmark"} "${n.subject_title}"`,
+    attrs: html`aria-pressed="${bookmarked ? "true" : "false"}"`,
   });
   return html`
     <li class="${cls}" data-thread-id="${n.thread_id}">
@@ -69,6 +81,7 @@ export function notificationRow(n) {
           <div class="n-meta"><span class="n-reason">${n.reason.replace(/_/g, " ")}</span> · ${relTime(n.updated_at)}</div>
         </div>
       </div>
+      ${rawHtml(bookmarkBtn)}
       ${rawHtml(doneBtn)}
     </li>`;
 }

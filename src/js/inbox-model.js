@@ -35,6 +35,7 @@ export const FILTERS = {
   },
   assign: { label: "Assigned", match: (n) => n.reason === "assign" },
   cleanup: { label: "Cleanup", match: (n) => isCleanupCandidate(n) },
+  bookmarked: { label: "Bookmarks", match: (n) => n.bookmarked },
 };
 
 /** Per-filter subtitle for the (illustrated) empty state. The title is always the same
@@ -46,6 +47,7 @@ export const EMPTY_SUBTITLES = {
   review_requested: "No review requests right now.",
   assign: "Nothing's assigned to you right now.",
   cleanup: "No stale subscriptions to clean.",
+  bookmarked: "No bookmarks yet.",
 };
 
 /** Notifications in `group` matching the given type filter. */
