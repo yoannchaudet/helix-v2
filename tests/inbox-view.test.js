@@ -42,11 +42,13 @@ test("notificationRow shows a filled bookmark + pressed state when bookmarked", 
   assert.ok(off.includes('aria-pressed="false"'));
 });
 
-test("notificationRow hides the mark-as-done button for done rows", () => {
+test("notificationRow hides the mark-as-done button (keeps a spacer) for done rows", () => {
   const done = notificationRow({ ...baseNotification, is_done: true });
-  assert.ok(!done.includes('class="n-done"'));
+  assert.ok(done.includes("n-done--spacer"));
+  assert.ok(!done.includes("Mark as done"));
   const active = notificationRow(baseNotification);
-  assert.ok(active.includes('class="n-done"'));
+  assert.ok(active.includes("Mark as done"));
+  assert.ok(!active.includes("n-done--spacer"));
 });
 
 test("subjectBadge maps a known type to its label + class", () => {

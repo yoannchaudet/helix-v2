@@ -58,10 +58,10 @@ export function notificationRow(n) {
   const done = !!n.is_done;
   const cls = `n-row${url ? " n-row--openable" : ""}${isNew}${bookmarked ? " n-row--bookmarked" : ""}${done ? " n-row--done" : ""}`;
   const openAttrs = url ? html` data-url="${url}" role="link" tabindex="0"` : "";
-  // A done thread (only ever shown in Bookmarks) has no mark-as-done button — its absence is
-  // signal enough that it's already done.
+  // A done thread (only ever shown in Bookmarks) has no mark-as-done button; render an inert
+  // spacer in its slot so the bookmark icon stays aligned with active rows.
   const doneBtn = done
-    ? ""
+    ? html`<span class="n-done n-done--spacer" aria-hidden="true"></span>`
     : iconButton({
         icon: DONE_ICON,
         className: "n-done",
