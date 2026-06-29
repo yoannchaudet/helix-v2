@@ -337,9 +337,8 @@ pub struct SyncStatus {
 
 /// Read every recorded rate-limit bucket, ordered by resource name for stable display.
 pub fn read_rate_buckets(conn: &Connection) -> rusqlite::Result<Vec<RateBucket>> {
-    let mut stmt = conn.prepare(
-        "SELECT resource, lim, remaining, reset_at FROM rate_limits ORDER BY resource",
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT resource, lim, remaining, reset_at FROM rate_limits ORDER BY resource")?;
     let rows = stmt.query_map([], |r| {
         Ok(RateBucket {
             resource: r.get(0)?,
@@ -562,13 +561,16 @@ pub fn add_bookmark(conn: &Connection, thread_id: &str) -> rusqlite::Result<()> 
 
 /// Remove a bookmark.
 pub fn remove_bookmark(conn: &Connection, thread_id: &str) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM bookmarks WHERE thread_id = ?1", params![thread_id])?;
+    conn.execute(
+        "DELETE FROM bookmarks WHERE thread_id = ?1",
+        params![thread_id],
+    )?;
     Ok(())
 }
 
-/// Read all bookmarks grouped by repository (newest first), independent of the inbox. Uses
-/// the stored snapshot so done/removed threads still appear. Mirrors `list_by_repo`'s shape;
-/// every notification carries `bookmarked: true`.
+/// Read all bookmarks grouped by repository (repos A–Z, newest first within each repo),
+/// independent of the inbox. Uses the stored snapshot so done/removed threads still appear.
+/// Mirrors `list_by_repo`'s shape; every notification carries `bookmarked: true`.
 pub fn list_bookmarks(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
     let mut stmt = conn.prepare(
         "SELECT repo_id, repo_full_name, repo_private,
@@ -863,7 +865,41 @@ mod tests {
     }
 
     #[test]
-    fn groups_notifications_by_repo() {        let mut conn = mem_conn();
+    fn refresh_bookmark_snapshots_tracks_latest_inbox_data() {
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/a", "Old title")]).unwrap();
+        add_bookmark(&conn, "1").unwrap();
+
+        // Re-sync with a new title; refresh updates the bookmark snapshot.
+        let mut renamed = thread("1", 100, "octo/a", "New title");
+        renamed.updated_at = "2099-01-01T00:00:00Z".to_string();
+        store_notifications(&mut conn, &[renamed]).unwrap();
+        refresh_bookmark_snapshots(&conn).unwrap();
+        assert_eq!(
+            list_bookmarks(&conn).unwrap()[0].notifications[0].subject_title,
+            "New title"
+        );
+
+        // Resolution fills the snapshot's state/number/url too.
+        store_resolved_subject(
+            &conn,
+            "1",
+            &ResolvedSubject {
+                number: Some(7),
+                state: Some("merged".to_string()),
+                html_url: Some("https://example.test/7".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let bm = &list_bookmarks(&conn).unwrap()[0].notifications[0];
+        assert_eq!(bm.subject_number, Some(7));
+        assert_eq!(bm.subject_state.as_deref(), Some("merged"));
+    }
+
+    #[test]
+    fn groups_notifications_by_repo() {
+        let mut conn = mem_conn();
         let threads = vec![
             thread("1", 200, "octo/zeta", "Z one"),
             thread("2", 100, "octo/alpha", "A one"),
@@ -913,18 +949,10 @@ mod tests {
     #[test]
     fn upsert_is_idempotent_and_updates_mutable_fields() {
         let mut conn = mem_conn();
-        store_notifications(
-            &mut conn,
-            &[thread("1", 100, "octo/repo-a", "Old title")],
-        )
-        .unwrap();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "Old title")]).unwrap();
 
         // Re-store the same thread id with a changed title.
-        store_notifications(
-            &mut conn,
-            &[thread("1", 100, "octo/repo-a", "New title")],
-        )
-        .unwrap();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "New title")]).unwrap();
 
         assert_eq!(count(&conn).unwrap(), 1); // no duplicate row
         let title: String = conn
@@ -950,11 +978,7 @@ mod tests {
         .unwrap();
 
         // A subsequent sync must not clobber the resolved columns.
-        store_notifications(
-            &mut conn,
-            &[thread("1", 100, "octo/repo-a", "Title v2")],
-        )
-        .unwrap();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "Title v2")]).unwrap();
         let (state, resolved): (Option<String>, Option<String>) = conn
             .query_row(
                 "SELECT subject_state, resolved_at FROM notifications WHERE thread_id = '1'",
@@ -982,8 +1006,7 @@ mod tests {
 
         // A later full sync only returns thread 1 (2 and 3 were cleared on github.com).
         let outcome =
-            store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")])
-                .unwrap();
+            store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
         assert_eq!(outcome.stored, 1);
         assert_eq!(outcome.removed, 2);
         assert_eq!(count(&conn).unwrap(), 1);
@@ -1048,8 +1071,7 @@ mod tests {
 
         // Next sync drops thread 2 but keeps thread 1 — its resolved column must persist.
         let outcome =
-            store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")])
-                .unwrap();
+            store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
         assert_eq!(outcome.removed, 1);
         let state: Option<String> = conn
             .query_row(
@@ -1097,8 +1119,15 @@ mod tests {
         // Stale fetch still lists thread 1 (same updated_at as when it was marked done).
         let outcome =
             store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
-        assert_eq!(count(&conn).unwrap(), 0, "tombstone must suppress re-insert");
-        assert_eq!(outcome.stored, 0, "a suppressed thread isn't counted as stored");
+        assert_eq!(
+            count(&conn).unwrap(),
+            0,
+            "tombstone must suppress re-insert"
+        );
+        assert_eq!(
+            outcome.stored, 0,
+            "a suppressed thread isn't counted as stored"
+        );
     }
 
     #[test]
@@ -1115,7 +1144,11 @@ mod tests {
         newer.updated_at = "2099-01-01T00:00:00Z".to_string();
         store_notifications(&mut conn, &[newer]).unwrap();
 
-        assert_eq!(count(&conn).unwrap(), 1, "new activity must re-surface the thread");
+        assert_eq!(
+            count(&conn).unwrap(),
+            1,
+            "new activity must re-surface the thread"
+        );
         let tombstones: i64 = conn
             .query_row("SELECT COUNT(*) FROM done_tombstones", [], |r| r.get(0))
             .unwrap();
@@ -1142,7 +1175,10 @@ mod tests {
         let tombstones: i64 = conn
             .query_row("SELECT COUNT(*) FROM done_tombstones", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(tombstones, 0, "tombstone retired after the thread left the fetch");
+        assert_eq!(
+            tombstones, 0,
+            "tombstone retired after the thread left the fetch"
+        );
     }
 
     #[test]
@@ -1163,12 +1199,19 @@ mod tests {
 
         let outcome =
             store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
-        assert_eq!(count(&conn).unwrap(), 0, "an old tombstone must still suppress");
+        assert_eq!(
+            count(&conn).unwrap(),
+            0,
+            "an old tombstone must still suppress"
+        );
         assert_eq!(outcome.stored, 0);
         let tombstones: i64 = conn
             .query_row("SELECT COUNT(*) FROM done_tombstones", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(tombstones, 1, "tombstone is kept while the thread is still listed");
+        assert_eq!(
+            tombstones, 1,
+            "tombstone is kept while the thread is still listed"
+        );
     }
 
     #[test]
@@ -1240,13 +1283,21 @@ mod tests {
         let mut before = thread("1", 100, "octo/repo-a", "One");
         before.updated_at = "2026-02-01T00:00:00Z".to_string();
         store_notifications(&mut conn, &[before]).unwrap();
-        assert_eq!(count(&conn).unwrap(), 0, "NULL-updated_at tombstone suppresses before done_at");
+        assert_eq!(
+            count(&conn).unwrap(),
+            0,
+            "NULL-updated_at tombstone suppresses before done_at"
+        );
 
         // Activity after done_at → genuine re-surface.
         let mut after = thread("1", 100, "octo/repo-a", "One");
         after.updated_at = "2026-04-01T00:00:00Z".to_string();
         store_notifications(&mut conn, &[after]).unwrap();
-        assert_eq!(count(&conn).unwrap(), 1, "activity after done_at resurfaces");
+        assert_eq!(
+            count(&conn).unwrap(),
+            1,
+            "activity after done_at resurfaces"
+        );
     }
 
     #[test]
@@ -1451,7 +1502,10 @@ mod tests {
         .unwrap();
         let pending = subjects_needing_resolution(&conn).unwrap();
         let ids: Vec<&str> = pending.iter().map(|p| p.thread_id.as_str()).collect();
-        assert!(ids.contains(&"2"), "a Release with a subject_url should resolve");
+        assert!(
+            ids.contains(&"2"),
+            "a Release with a subject_url should resolve"
+        );
 
         // A subject with no subject_url (e.g. a CheckSuite) is skipped — nothing to resolve.
         conn.execute(
@@ -1461,7 +1515,10 @@ mod tests {
         .unwrap();
         let pending = subjects_needing_resolution(&conn).unwrap();
         let ids: Vec<&str> = pending.iter().map(|p| p.thread_id.as_str()).collect();
-        assert!(!ids.contains(&"2"), "a subject without a subject_url is not resolved");
+        assert!(
+            !ids.contains(&"2"),
+            "a subject without a subject_url is not resolved"
+        );
     }
 
     #[test]

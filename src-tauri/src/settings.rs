@@ -65,9 +65,11 @@ pub fn delete_key(conn: &Connection, key: &str) -> rusqlite::Result<()> {
 
 /// Current polling interval (seconds) from `sync_state`.
 pub fn get_poll_interval(conn: &Connection) -> rusqlite::Result<i64> {
-    conn.query_row("SELECT poll_interval_s FROM sync_state WHERE id = 1", [], |row| {
-        row.get(0)
-    })
+    conn.query_row(
+        "SELECT poll_interval_s FROM sync_state WHERE id = 1",
+        [],
+        |row| row.get(0),
+    )
 }
 
 /// Update the polling interval (seconds) in `sync_state`.
@@ -106,7 +108,9 @@ mod tests {
         // Reuse the real migrations against an in-memory database.
         let conn = Connection::open_in_memory().unwrap();
         // open_and_migrate works on a path; replicate its migration step here.
-        let mut version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let mut version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         let migrations = db::migrations();
         while (version as usize) < migrations.len() {
             conn.execute_batch(migrations[version as usize]).unwrap();

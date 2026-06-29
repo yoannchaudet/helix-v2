@@ -157,10 +157,7 @@ fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
 
 /// Persist user-facing settings. Rejects a polling interval below the minimum.
 #[tauri::command]
-fn save_settings(
-    poll_interval_s: i64,
-    state: State<'_, AppState>,
-) -> Result<Settings, String> {
+fn save_settings(poll_interval_s: i64, state: State<'_, AppState>) -> Result<Settings, String> {
     if poll_interval_s < settings::MIN_POLL_INTERVAL_S {
         return Err(format!(
             "Polling interval must be at least {} seconds.",
@@ -440,9 +437,7 @@ fn build_app_menu<R: tauri::Runtime>(
     let shortcuts = MenuItemBuilder::with_id("shortcuts", "Keyboard Shortcuts")
         .accelerator("CmdOrCtrl+Slash")
         .build(handle)
-        .or_else(|_| {
-            MenuItemBuilder::with_id("shortcuts", "Keyboard Shortcuts").build(handle)
-        })?;
+        .or_else(|_| MenuItemBuilder::with_id("shortcuts", "Keyboard Shortcuts").build(handle))?;
     // Start from the standard menu (app menu, Edit with copy/paste for the PAT field, etc.).
     let menu = Menu::default(handle)?;
     // Reuse the default's Help submenu if it has one (so we don't create a duplicate);
@@ -458,7 +453,9 @@ fn build_app_menu<R: tauri::Runtime>(
         }
     }
     if !placed {
-        let help = SubmenuBuilder::new(handle, "Help").item(&shortcuts).build()?;
+        let help = SubmenuBuilder::new(handle, "Help")
+            .item(&shortcuts)
+            .build()?;
         menu.append(&help)?;
     }
     Ok(menu)
@@ -524,8 +521,8 @@ pub fn run() {
             let saved_size = settings::get_window_size(&conn).ok().flatten();
             // Appearance preference, read before `conn` moves into state, to set the
             // native window theme at launch (matching the webview's no-FOUC resolution).
-            let saved_theme = settings::get_theme(&conn)
-                .unwrap_or_else(|_| settings::DEFAULT_THEME.to_string());
+            let saved_theme =
+                settings::get_theme(&conn).unwrap_or_else(|_| settings::DEFAULT_THEME.to_string());
 
             app.manage(AppState {
                 db_path: db_path.to_string_lossy().into_owned(),

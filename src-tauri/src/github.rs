@@ -49,10 +49,7 @@ pub enum GitHubError {
         body: String,
     },
     /// A response arrived but couldn't be parsed; `what` names the payload (e.g. "subject").
-    Parse {
-        what: &'static str,
-        source: String,
-    },
+    Parse { what: &'static str, source: String },
 }
 
 impl std::fmt::Display for GitHubError {
@@ -434,7 +431,10 @@ pub struct FetchOutcome {
 /// invoked after each page with `(page_number, total_fetched_so_far)` so the caller can
 /// surface live progress. Rate-limit headers from the last response are returned in
 /// [`FetchOutcome::rate`].
-pub async fn fetch_all_notifications<F>(token: &str, on_page: F) -> Result<FetchOutcome, GitHubError>
+pub async fn fetch_all_notifications<F>(
+    token: &str,
+    on_page: F,
+) -> Result<FetchOutcome, GitHubError>
 where
     F: Fn(u32, usize) + Send,
 {
@@ -624,12 +624,14 @@ mod tests {
 
     #[test]
     fn poll_floor_is_the_max_of_poll_interval_and_retry_after() {
-        let floor = |p, r| RateLimit {
-            poll_interval: p,
-            retry_after: r,
-            ..RateLimit::default()
-        }
-        .poll_floor();
+        let floor = |p, r| {
+            RateLimit {
+                poll_interval: p,
+                retry_after: r,
+                ..RateLimit::default()
+            }
+            .poll_floor()
+        };
         assert_eq!(floor(Some(60), Some(120)), Some(120));
         assert_eq!(floor(Some(60), None), Some(60));
         assert_eq!(floor(None, Some(90)), Some(90));

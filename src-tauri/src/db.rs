@@ -206,8 +206,18 @@ mod tests {
         assert_eq!(schema_version(&conn).unwrap(), MIGRATIONS.len() as i64);
 
         let tables = table_names(&conn).unwrap();
-        for expected in ["done_tombstones", "notifications", "rate_limits", "repos", "settings", "sync_state"] {
-            assert!(tables.contains(&expected.to_string()), "missing table {expected}");
+        for expected in [
+            "done_tombstones",
+            "notifications",
+            "rate_limits",
+            "repos",
+            "settings",
+            "sync_state",
+        ] {
+            assert!(
+                tables.contains(&expected.to_string()),
+                "missing table {expected}"
+            );
         }
 
         // The singleton sync_state row is seeded on first run.
@@ -271,7 +281,9 @@ mod tests {
             )
             .unwrap();
         assert_eq!(title, "Hi");
-        assert!(table_names(&conn).unwrap().contains(&"done_tombstones".to_string()));
+        assert!(table_names(&conn)
+            .unwrap()
+            .contains(&"done_tombstones".to_string()));
     }
 
     #[test]
@@ -290,7 +302,8 @@ mod tests {
         assert_eq!(schema_version(&second).unwrap(), v1);
         assert_eq!(
             second
-                .query_row("SELECT COUNT(*) FROM sync_state", [], |r| r.get::<_, i64>(0))
+                .query_row("SELECT COUNT(*) FROM sync_state", [], |r| r
+                    .get::<_, i64>(0))
                 .unwrap(),
             1
         );

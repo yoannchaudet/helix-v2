@@ -62,7 +62,10 @@ pub struct SyncResult {
 /// `sync:error`. The network fetch runs without holding the DB lock; storage happens in a
 /// single transaction afterwards.
 #[tauri::command]
-pub async fn sync_now(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<SyncResult, String> {
+pub async fn sync_now(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<SyncResult, String> {
     // `read_token` locks the DB itself only for the dev path; the release path reads the
     // Keychain without holding the lock.
     let token = auth::read_token(&state.db)?
@@ -238,7 +241,9 @@ async fn resolve_pending_subjects(app: tauri::AppHandle, token: String) {
     }
 
     // Persist the post-resolution quota so Settings shows the true per-bucket usage.
-    best_effort(&state.db.0, "persisting rate limits", |conn| rate.persist(conn));
+    best_effort(&state.db.0, "persisting rate limits", |conn| {
+        rate.persist(conn)
+    });
 
     if changed > 0 {
         let _ = app.emit("subjects:resolved", serde_json::json!({ "count": changed }));
@@ -364,9 +369,8 @@ where
             let token = token.clone();
             let id = id.clone();
             let task_id = id.clone();
-            let handle = tauri::async_runtime::spawn(async move {
-                call(client, token, task_id).await
-            });
+            let handle =
+                tauri::async_runtime::spawn(async move { call(client, token, task_id).await });
             handles.push((id, handle));
         }
         for (id, handle) in handles {
