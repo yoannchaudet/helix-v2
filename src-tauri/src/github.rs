@@ -174,6 +174,11 @@ struct SubjectResponse {
     merged_at: Option<String>,
     html_url: Option<String>,
     user: Option<SubjectUser>,
+    /// Pull requests only: GitHub's rolled-up mergeability/CI state
+    /// (`clean` | `unstable` | `blocked` | `dirty` | `behind` | `draft` | `unknown`).
+    /// Absent for issues. Computed lazily by GitHub, so it can be `unknown` right after a
+    /// change until the next fetch settles it.
+    mergeable_state: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -192,6 +197,9 @@ pub struct ResolvedSubject {
     pub merged_at: Option<String>,
     pub html_url: Option<String>,
     pub author: Option<String>,
+    /// Pull requests only: GitHub's rolled-up `mergeable_state` (see `SubjectResponse`).
+    /// Drives the PR merge-readiness pill; `None` for issues and other subjects.
+    pub mergeable_state: Option<String>,
 }
 
 impl From<SubjectResponse> for ResolvedSubject {
@@ -210,6 +218,7 @@ impl From<SubjectResponse> for ResolvedSubject {
             merged_at: r.merged_at,
             html_url: r.html_url,
             author: r.user.map(|u| u.login),
+            mergeable_state: r.mergeable_state,
         }
     }
 }
@@ -649,6 +658,8 @@ mod tests {
         }"#;
         let raw: SubjectResponse = serde_json::from_str(body).unwrap();
         let resolved: ResolvedSubject = raw.into();
+        // Issues carry no mergeable_state.
+        assert_eq!(resolved.mergeable_state, None);
         assert_eq!(resolved.number, Some(42));
         assert_eq!(resolved.state.as_deref(), Some("open"));
         assert_eq!(resolved.state_reason, None);
@@ -684,5 +695,22 @@ mod tests {
             .into();
         assert_eq!(resolved.state.as_deref(), Some("merged"));
         assert_eq!(resolved.merged_at.as_deref(), Some("2026-01-02T03:04:05Z"));
+    }
+
+    #[test]
+    fn resolves_pull_request_mergeable_state() {
+        // An open PR response carries the rolled-up mergeable_state we surface as a pill.
+        let body = r#"{
+            "number": 12,
+            "state": "open",
+            "html_url": "https://github.com/o/r/pull/12",
+            "user": { "login": "dev" },
+            "mergeable_state": "clean"
+        }"#;
+        let resolved: ResolvedSubject = serde_json::from_str::<SubjectResponse>(body)
+            .unwrap()
+            .into();
+        assert_eq!(resolved.state.as_deref(), Some("open"));
+        assert_eq!(resolved.mergeable_state.as_deref(), Some("clean"));
     }
 }

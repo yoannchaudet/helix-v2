@@ -870,9 +870,13 @@ code,
   text-transform: capitalize;
 }
 
-/* State pill on its own line under the title (Open / Closed / Merged). */
+/* State pill on its own line under the title (Open / Closed / Merged, plus the PR
+   merge-readiness pill). Multiple pills sit side by side with a small gap. */
 .n-state {
   margin-top: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
 }
 
 /* Subject author (issue/PR), right-aligned at the end of the openable area. `margin-left:
@@ -1681,6 +1685,35 @@ input[type="text"]:focus {
   background: rgba(var(--success-rgb), 0.12);
 }
 .state--muted {
+  color: var(--muted);
+  background: rgba(var(--neutral-rgb), 0.12);
+}
+
+/* PR merge-readiness pill (open PRs only). Green = ready, amber = needs attention
+   (checks/reviews/out-of-date), red = conflicts, muted = draft. */
+.merge {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: var(--space-1) var(--space-6);
+  border-radius: var(--radius-lg);
+  white-space: nowrap;
+}
+.merge--clean {
+  color: var(--success);
+  background: rgba(var(--success-rgb), 0.12);
+}
+.merge--unstable,
+.merge--blocked,
+.merge--behind {
+  color: var(--pending);
+  background: rgba(var(--pending-rgb), 0.12);
+}
+.merge--dirty {
+  color: var(--error);
+  background: rgba(var(--error-rgb), 0.12);
+}
+.merge--draft {
   color: var(--muted);
   background: rgba(var(--neutral-rgb), 0.12);
 }

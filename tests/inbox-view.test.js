@@ -8,6 +8,7 @@ import {
   repoHeader,
   repoSection,
   authorTag,
+  mergeStateBadge,
 } from "../src/js/inbox-view.js";
 
 /* These render pure HTML strings, so they're unit-testable without a DOM. The most
@@ -71,6 +72,67 @@ test("stateBadge renders a pill only for open/closed/merged", () => {
   assert.equal(stateBadge("merged"), '<span class="state state--merged">Merged</span>');
   assert.equal(stateBadge("unresolved"), "");
   assert.equal(stateBadge(null), "");
+});
+
+test("mergeStateBadge maps each state to a pill for open PRs", () => {
+  assert.equal(
+    mergeStateBadge("clean", "PullRequest", "open"),
+    '<span class="merge merge--clean">Ready</span>',
+  );
+  assert.equal(
+    mergeStateBadge("unstable", "PullRequest", "open"),
+    '<span class="merge merge--unstable">Checks failing</span>',
+  );
+  assert.equal(
+    mergeStateBadge("blocked", "PullRequest", "open"),
+    '<span class="merge merge--blocked">Blocked</span>',
+  );
+  assert.equal(
+    mergeStateBadge("dirty", "PullRequest", "open"),
+    '<span class="merge merge--dirty">Conflicts</span>',
+  );
+  assert.equal(
+    mergeStateBadge("behind", "PullRequest", "open"),
+    '<span class="merge merge--behind">Behind</span>',
+  );
+  assert.equal(
+    mergeStateBadge("draft", "PullRequest", "open"),
+    '<span class="merge merge--draft">Draft</span>',
+  );
+});
+
+test("mergeStateBadge shows nothing for non-PRs, non-open PRs, or unknown state", () => {
+  // Not a PR.
+  assert.equal(mergeStateBadge("clean", "Issue", "open"), "");
+  // PR but not open (merged/closed mergeability is moot).
+  assert.equal(mergeStateBadge("clean", "PullRequest", "merged"), "");
+  assert.equal(mergeStateBadge("clean", "PullRequest", "closed"), "");
+  // Unknown / not-yet-computed / missing.
+  assert.equal(mergeStateBadge("unknown", "PullRequest", "open"), "");
+  assert.equal(mergeStateBadge(null, "PullRequest", "open"), "");
+  assert.equal(mergeStateBadge(undefined, "PullRequest", "open"), "");
+});
+
+test("notificationRow shows the merge pill only for an open PR", () => {
+  const openPr = notificationRow({
+    ...baseNotification,
+    subject_type: "PullRequest",
+    subject_state: "open",
+    subject_mergeable_state: "clean",
+  });
+  assert.ok(openPr.includes('class="merge merge--clean">Ready</span>'));
+
+  // A merged PR with a stale mergeable_state must not render the pill.
+  const merged = notificationRow({
+    ...baseNotification,
+    subject_type: "PullRequest",
+    subject_state: "merged",
+    subject_mergeable_state: "clean",
+  });
+  assert.ok(!merged.includes("merge--clean"));
+
+  // No mergeable_state at all → no pill.
+  assert.ok(!notificationRow(baseNotification).includes('class="merge'));
 });
 
 test("notificationRow escapes untrusted fields (title, url, thread id)", () => {
