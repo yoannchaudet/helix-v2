@@ -42,9 +42,16 @@ let selectedTypes = new Set(TYPE_FILTERS.map((t) => t.id));
 /** The dataset the active filter draws from: bookmarks come from their own snapshot (so
  *  done/removed ones still show); every other filter draws from the live inbox. The active
  *  type-pill selection pre-filters whichever dataset is chosen. */
+let typeFilterMemo = { base: null, sig: "", result: null };
 function currentGroups() {
   const base = activeFilter === "bookmarked" ? bookmarkGroups : inboxGroups;
-  return filterGroupsByType(base, selectedTypes);
+  // `selectedTypes` is mutated in place, so key the memo on its contents (not identity)
+  // plus the base dataset reference (reassigned on reload).
+  const sig = TYPE_FILTERS.map((t) => (selectedTypes.has(t.id) ? "1" : "0")).join("");
+  if (typeFilterMemo.base !== base || typeFilterMemo.sig !== sig) {
+    typeFilterMemo = { base, sig, result: filterGroupsByType(base, selectedTypes) };
+  }
+  return typeFilterMemo.result;
 }
 
 /** Apply the active filter, then the optional repo refinement, to the active dataset,

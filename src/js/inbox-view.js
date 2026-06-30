@@ -183,9 +183,7 @@ export function repoSection(group) {
 export function typeFilterBar(selectedTypes) {
   const pills = TYPE_FILTERS.map(({ id, label }) => {
     const on = selectedTypes.has(id);
-    return html`<button type="button" class="type-pill${rawHtml(
-      on ? " is-on" : "",
-    )}" data-type="${id}" aria-pressed="${on ? "true" : "false"}">${label}</button>`;
+    return html`<button type="button" class="type-pill${on ? " is-on" : ""}" data-type="${id}" aria-pressed="${on ? "true" : "false"}">${label}</button>`;
   }).join("");
   return html`<span class="type-filter-label" aria-hidden="true">Showing:</span><div class="type-filter-inner" role="group" aria-label="Filter by subject type">${rawHtml(
     pills,
