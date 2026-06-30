@@ -260,6 +260,7 @@ test("repoSection ties the list to its heading and renders each row", () => {
 
 test("typeFilterBar renders the three pills with labels and data-type ids", () => {
   const out = typeFilterBar(new Set(["pr", "issue", "other"]));
+  assert.match(out, /class="type-filter-label"[^>]*>Showing:</);
   assert.match(out, /role="group"/);
   assert.match(out, /aria-label="Filter by subject type"/);
   assert.match(out, /data-type="pr"[^>]*>Pull requests</);

@@ -174,11 +174,12 @@ export function repoSection(group) {
   )}<ul class="n-list">${rawHtml(rows)}</ul></section>`;
 }
 
-/** The top-of-view subject-type filter: a single line of toggle pills (Pull requests /
- *  Issues / Other) rendered from `TYPE_FILTERS`. `selectedTypes` is a Set of bucket ids;
- *  a selected pill gets `aria-pressed="true"` + `.is-on`. The whole row is a labeled
- *  `role="group"` so assistive tech announces it as one control. Stateless — `inbox.js`
- *  owns the Set and re-renders on toggle. */
+/** The top-of-view subject-type filter: a leading "Showing:" label plus a single line of
+ *  toggle pills (Pull requests / Issues / Other) rendered from `TYPE_FILTERS`.
+ *  `selectedTypes` is a Set of bucket ids; a selected pill gets `aria-pressed="true"` +
+ *  `.is-on`. The pills are wrapped in a labeled `role="group"` so assistive tech announces
+ *  them as one control (the visible label is `aria-hidden`, redundant with that group
+ *  label). Stateless — `inbox.js` owns the Set and re-renders on toggle. */
 export function typeFilterBar(selectedTypes) {
   const pills = TYPE_FILTERS.map(({ id, label }) => {
     const on = selectedTypes.has(id);
@@ -186,7 +187,7 @@ export function typeFilterBar(selectedTypes) {
       on ? " is-on" : "",
     )}" data-type="${id}" aria-pressed="${on ? "true" : "false"}">${label}</button>`;
   }).join("");
-  return html`<div class="type-filter-inner" role="group" aria-label="Filter by subject type">${rawHtml(
+  return html`<span class="type-filter-label" aria-hidden="true">Showing:</span><div class="type-filter-inner" role="group" aria-label="Filter by subject type">${rawHtml(
     pills,
   )}</div>`;
 }
