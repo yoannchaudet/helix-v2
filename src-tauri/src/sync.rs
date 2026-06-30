@@ -1750,7 +1750,7 @@ mod tests {
 
         // Backdate past the one-minute floor → eligible again so the pill can fill in.
         conn.execute(
-            "UPDATE notifications SET resolved_at = '2026-03-01T00:00:00Z' WHERE thread_id = '1'",
+            "UPDATE notifications SET resolved_at = strftime('%Y-%m-%dT%H:%M:%SZ','now','-2 minutes') WHERE thread_id = '1'",
             [],
         )
         .unwrap();
@@ -1771,7 +1771,7 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "UPDATE notifications SET resolved_at = '2026-03-01T00:00:00Z' WHERE thread_id = '1'",
+            "UPDATE notifications SET resolved_at = strftime('%Y-%m-%dT%H:%M:%SZ','now','-2 minutes') WHERE thread_id = '1'",
             [],
         )
         .unwrap();
@@ -1790,7 +1790,7 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "UPDATE notifications SET resolved_at = '2026-03-01T00:00:00Z' WHERE thread_id = '1'",
+            "UPDATE notifications SET resolved_at = strftime('%Y-%m-%dT%H:%M:%SZ','now','-2 minutes') WHERE thread_id = '1'",
             [],
         )
         .unwrap();
