@@ -38,6 +38,39 @@ export const FILTERS = {
   bookmarked: { label: "Bookmarks", match: (n) => n.bookmarked },
 };
 
+/** Subject-type buckets for the top-of-view type filter (orthogonal to the smart filters
+ *  and the per-repo refinement). Pull requests and issues are the two common subjects;
+ *  everything else (Discussion, Release, Commit, CheckSuite, …) folds into "other". */
+export function subjectTypeBucket(n) {
+  if (n.subject_type === "PullRequest") return "pr";
+  if (n.subject_type === "Issue") return "issue";
+  return "other";
+}
+
+/** Ordered type-filter definitions; the single source of truth for the pill ids + labels. */
+export const TYPE_FILTERS = [
+  { id: "pr", label: "Pull requests" },
+  { id: "issue", label: "Issues" },
+  { id: "other", label: "Other" },
+];
+
+/** Does a notification's subject type fall within the selected set of buckets? */
+export function typeMatch(n, selectedTypes) {
+  return selectedTypes.has(subjectTypeBucket(n));
+}
+
+/** Narrow each group's notifications to the selected type buckets, dropping groups left
+ *  empty. Returns new group objects; the input is not mutated. Mirrors `filterGroups`'
+ *  shape so it can pre-filter the dataset before the smart-filter/repo pipeline runs. */
+export function filterGroupsByType(groups, selectedTypes) {
+  return groups
+    .map((g) => ({
+      ...g,
+      notifications: g.notifications.filter((n) => typeMatch(n, selectedTypes)),
+    }))
+    .filter((g) => g.notifications.length);
+}
+
 /** Per-filter subtitle for the (illustrated) empty state. The title is always the same
  *  small "you're caught up" win; the subtitle says specifically what's empty. */
 export const EMPTY_SUBTITLES = {

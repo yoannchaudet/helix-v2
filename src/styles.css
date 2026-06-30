@@ -491,6 +491,76 @@ code,
   white-space: nowrap;
 }
 
+/* Subject-type filter: a "Showing:" label + a single line of toggle pills under the
+   toolbar (Pull requests / Issues / Other). Orthogonal to the smart filters; narrows the
+   whole view. Each active pill is color-coded to match its subject badge on the rows. */
+.type-filter {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  padding: var(--space-8) 16px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.type-filter-label {
+  flex: none;
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.type-filter-inner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-6);
+}
+
+.type-pill {
+  font: inherit;
+  font-size: 0.74rem;
+  font-weight: 600;
+  line-height: 1;
+  padding: var(--space-5) var(--space-10);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease,
+    color 0.12s ease;
+}
+
+.type-pill:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.type-pill:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+/* Active pills mirror the subject badges on the rows (.badge--pr/issue/other), so the
+   filter reads as the same visual language as the notifications it controls. */
+.type-pill.is-on[data-type="pr"] {
+  color: var(--accent-strong);
+  background: rgba(var(--accent-rgb), 0.12);
+  border-color: rgba(var(--accent-rgb), 0.3);
+}
+.type-pill.is-on[data-type="issue"] {
+  color: var(--success);
+  background: rgba(var(--success-rgb), 0.12);
+  border-color: rgba(var(--success-rgb), 0.3);
+}
+.type-pill.is-on[data-type="other"] {
+  color: var(--muted);
+  background: rgba(var(--neutral-rgb), 0.14);
+  border-color: rgba(var(--neutral-rgb), 0.28);
+}
+
 /* Breadcrumb shown when a repo refines the active filter: "Filter › owner/repo". */
 .crumb-sep {
   margin: 0 8px;

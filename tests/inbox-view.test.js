@@ -9,6 +9,7 @@ import {
   repoSection,
   authorTag,
   mergeStateBadge,
+  typeFilterBar,
 } from "../src/js/inbox-view.js";
 
 /* These render pure HTML strings, so they're unit-testable without a DOM. The most
@@ -253,4 +254,24 @@ test("repoSection ties the list to its heading and renders each row", () => {
   assert.ok(html.includes('aria-labelledby="repo-h-7"'));
   assert.ok(html.includes('data-thread-id="t1"'));
   assert.ok(html.includes('data-thread-id="t2"'));
+});
+
+/* -------------------------------- typeFilterBar -------------------------------- */
+
+test("typeFilterBar renders the three pills with labels and data-type ids", () => {
+  const out = typeFilterBar(new Set(["pr", "issue", "other"]));
+  assert.match(out, /class="type-filter-label"[^>]*>Showing:</);
+  assert.match(out, /role="group"/);
+  assert.match(out, /aria-label="Filter by subject type"/);
+  assert.match(out, /data-type="pr"[^>]*>Pull requests</);
+  assert.match(out, /data-type="issue"[^>]*>Issues</);
+  assert.match(out, /data-type="other"[^>]*>Other</);
+});
+
+test("typeFilterBar reflects the selected Set via aria-pressed and .is-on", () => {
+  const out = typeFilterBar(new Set(["pr"]));
+  // PR is on; Issue/Other are off.
+  assert.match(out, /class="type-pill is-on" data-type="pr" aria-pressed="true"/);
+  assert.match(out, /class="type-pill" data-type="issue" aria-pressed="false"/);
+  assert.match(out, /class="type-pill" data-type="other" aria-pressed="false"/);
 });

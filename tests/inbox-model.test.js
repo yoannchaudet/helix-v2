@@ -9,6 +9,10 @@ import {
   latestUpdatedAt,
   sortReposByRecency,
   filterGroups,
+  subjectTypeBucket,
+  TYPE_FILTERS,
+  typeMatch,
+  filterGroupsByType,
 } from "../src/js/inbox-model.js";
 
 /* ------------------------------ isCleanupCandidate ------------------------------ */
@@ -212,5 +216,65 @@ test("filterGroups does not mutate the input groups (deep)", () => {
   const input = groups();
   const snapshot = structuredClone(input);
   filterGroups(input, "mention", null);
+  assert.deepEqual(input, snapshot);
+});
+
+/* ------------------------------ subject-type filter ------------------------------ */
+
+test("subjectTypeBucket maps PullRequest/Issue and folds the rest into other", () => {
+  assert.equal(subjectTypeBucket({ subject_type: "PullRequest" }), "pr");
+  assert.equal(subjectTypeBucket({ subject_type: "Issue" }), "issue");
+  for (const t of ["Discussion", "Release", "Commit", "CheckSuite", "RepositoryInvitation"]) {
+    assert.equal(subjectTypeBucket({ subject_type: t }), "other");
+  }
+});
+
+test("TYPE_FILTERS lists the three buckets in order", () => {
+  assert.deepEqual(TYPE_FILTERS.map((t) => t.id), ["pr", "issue", "other"]);
+});
+
+test("typeMatch respects the selected Set", () => {
+  const sel = new Set(["pr", "other"]);
+  assert.equal(typeMatch({ subject_type: "PullRequest" }, sel), true);
+  assert.equal(typeMatch({ subject_type: "Issue" }, sel), false);
+  assert.equal(typeMatch({ subject_type: "Release" }, sel), true);
+});
+
+function typedGroups() {
+  return [
+    {
+      repo_id: 1,
+      full_name: "octo/a",
+      notifications: [
+        { thread_id: "1", subject_type: "PullRequest" },
+        { thread_id: "2", subject_type: "Issue" },
+        { thread_id: "3", subject_type: "Release" },
+      ],
+    },
+    {
+      repo_id: 2,
+      full_name: "octo/b",
+      notifications: [{ thread_id: "4", subject_type: "Issue" }],
+    },
+  ];
+}
+
+test("filterGroupsByType narrows notifications and drops emptied groups", () => {
+  const out = filterGroupsByType(typedGroups(), new Set(["pr", "other"]));
+  // Repo 2 (only an Issue) is dropped entirely; repo 1 keeps its PR + Release.
+  assert.deepEqual(out.map((g) => g.repo_id), [1]);
+  assert.deepEqual(out[0].notifications.map((n) => n.thread_id), ["1", "3"]);
+});
+
+test("filterGroupsByType with a single bucket keeps only that type", () => {
+  const out = filterGroupsByType(typedGroups(), new Set(["issue"]));
+  assert.deepEqual(out.map((g) => g.repo_id), [1, 2]);
+  assert.deepEqual(out.flatMap((g) => g.notifications.map((n) => n.thread_id)), ["2", "4"]);
+});
+
+test("filterGroupsByType does not mutate the input groups (deep)", () => {
+  const input = typedGroups();
+  const snapshot = structuredClone(input);
+  filterGroupsByType(input, new Set(["pr"]));
   assert.deepEqual(input, snapshot);
 });
