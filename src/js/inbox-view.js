@@ -65,6 +65,7 @@ export function mergeStateBadge(mergeableState, subjectType, subjectState) {
   if (subjectType !== "PullRequest" || subjectState !== "open") return "";
   const map = {
     clean: ["Ready", "merge--clean"],
+    has_hooks: ["Ready", "merge--clean"],
     unstable: ["Checks failing", "merge--unstable"],
     blocked: ["Blocked", "merge--blocked"],
     dirty: ["Conflicts", "merge--dirty"],

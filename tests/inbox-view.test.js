@@ -79,6 +79,11 @@ test("mergeStateBadge maps each state to a pill for open PRs", () => {
     mergeStateBadge("clean", "PullRequest", "open"),
     '<span class="merge merge--clean">Ready</span>',
   );
+  // `has_hooks` is mergeable + clean (base branch just has hooks) → same as clean.
+  assert.equal(
+    mergeStateBadge("has_hooks", "PullRequest", "open"),
+    '<span class="merge merge--clean">Ready</span>',
+  );
   assert.equal(
     mergeStateBadge("unstable", "PullRequest", "open"),
     '<span class="merge merge--unstable">Checks failing</span>',
