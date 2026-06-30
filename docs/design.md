@@ -313,20 +313,46 @@ single merged/closed/open state pill and does not classify issues further.)
 
 ## 7. UI / UX
 
+### Modules — top-level destinations
+Helix is organized into **modules** (à la Adobe Lightroom): independent top-level features,
+each with its own content pane, switched via a **Lightroom-style picker** that lives in an
+**app-level top chrome** spanning the full title-bar strip (`#module-picker` in the
+`.topchrome` header, rendered from the `MODULES` registry in `src/js/modules-model.js`). The
+chrome sits *above* the sidebar+content split, so modules are a genuinely top-level concept
+and each module owns — or omits — its own sidebar. The active module is accent-emphasized;
+`⌘1` / `⌘2` jump straight to a module by position.
+- **Notifications** module — the inbox described below (the original v1 feature). It owns the
+  smart-filter + repository **sidebar**.
+- **Dependabot** module — currently a **placeholder** ("Coming soon"); it has **no sidebar**
+  (the content spans the full body). It will surface the Dependabot-PR subset of
+  notifications with extra triage actions.
+- **Settings is *not* a module** — it's a focused, full-width **overlay** that temporarily
+  covers the active module (hiding the sidebar) and returns to it on close. The top chrome
+  (and picker) stays visible, so switching modules dismisses the overlay. `modules.js` owns
+  the active-module state and pane visibility, exposes `data-module` on `.app` (which CSS
+  keys on to scope the sidebar), and fires an `onSwitch` hook (wired in `main.js`) to dismiss
+  Settings — rather than importing `settings.js`, keeping the dependency one-directional.
+  Settings is reached from a gear button in the top chrome (or `⌘,`), so it's available from
+  every module.
+
 ### Shell — native macOS layout
-A vibrant **sidebar + content** layout that fills the window edge-to-edge (no centered
-column, no marketing hero):
-- **Sidebar** (`NSVisualEffect` *Sidebar* vibrancy via the `window-vibrancy` crate):
-  cross-cutting smart filters (**All**, **Mentions**, **Team mentions**, **Review
-  requests**, **Assigned**, **Cleanup**) with live counts, a **Repositories** list of
-  selectable sources, and a **Settings** entry (`⌘,`) pinned to the bottom. Selection is
-  single-active (a smart filter *or* a repository), Mail-style.
-- **Content pane:** an opaque pane with a **unified toolbar** fused into the overlay title
-  bar (`titleBarStyle: "Overlay"`, `hiddenTitle: true`, transparent window +
-  `macOSPrivateApi`). The toolbar shows the active source title (left) and sync
-  status + refresh (right), and stays pinned while the list scrolls.
-- Accent (purple) is applied **sparingly** — selection tint, counts — not as
-  large filled buttons (system control styling otherwise).
+A vibrant layout that fills the window edge-to-edge (no centered column, no marketing hero):
+a full-width **top module chrome** (brand + module picker + Settings), and below it the active
+module's **sidebar + content** split:
+- **Top chrome** (`.topchrome`): the overlay title-bar strip (`titleBarStyle: "Overlay"`,
+  `hiddenTitle: true`, transparent window + `macOSPrivateApi`); it reserves the traffic-light
+  region on macOS, and is a window drag region. Hosts the **Helix** wordmark (left), the
+  **module picker** (right, Lightroom-style), and the **Settings** gear (`⌘,`).
+- **Sidebar** (`NSVisualEffect` *Sidebar* vibrancy via the `window-vibrancy` crate),
+  **module-scoped**: for Notifications it shows the cross-cutting smart filters (**All**,
+  **Mentions**, **Team mentions**, **Review requests**, **Assigned**, **Cleanup**) with live
+  counts and a **Repositories** list of selectable sources. Selection is single-active (a
+  smart filter *or* a repository), Mail-style. Modules without a sidebar (e.g. Dependabot)
+  collapse it.
+- **Content pane:** an opaque pane with a **toolbar** below the chrome showing the active
+  source title (left) and sync status + refresh (right), pinned while the list scrolls.
+- Accent (purple) is applied **sparingly** — selection tint, counts, the active module tab —
+  not as large filled buttons (system control styling otherwise).
 
 ### Views (v1)
 - **Notifications:** a full-width, dense list with **sticky, Mail-style repo section

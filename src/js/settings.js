@@ -5,6 +5,7 @@ import { poll } from "./state.js";
 import { startPolling, updateSyncButtonHint } from "./sync.js";
 import { isAuthenticated } from "./account.js";
 import { isShortcutsOpen } from "./shortcuts.js";
+import { hideModulePanes, showActiveModulePane } from "./modules.js";
 
 /* The Settings pane: appearance/theme, the polling-interval form, and the pane toggle.
  * Theme and the settings form are persisted independently (toggling theme always saves,
@@ -236,15 +237,18 @@ async function applySettings() {
 
 /* --------------------------------- Panes --------------------------------- */
 
-/** Toggle between the notifications pane and the Settings pane (single window). */
+/** Toggle between the active module pane and the Settings overlay (single window). */
 export function showSettings(show) {
   // Detect an actual pane transition: selectFilter/selectRepo call showSettings(false)
   // while already in Notifications, and we must not steal focus in that case.
   const wasShown = !$("#view-settings").hidden;
-  $("#view-notifications").hidden = show;
   $("#view-settings").hidden = !show;
-  // Settings is a focused, full-width pane: hide the sidebar (and its resizer) so the
-  // content spans the whole window. CSS also insets the toolbar past the traffic lights.
+  // Settings is a focused full-width overlay covering whichever module is active. Opening it
+  // hides all module panes; closing it restores the active module's pane.
+  if (show) hideModulePanes();
+  else showActiveModulePane();
+  // Hide the sidebar (and its resizer) so the content spans the whole window. CSS also
+  // insets the toolbar past the traffic lights and hides the module picker.
   document.querySelector(".app")?.classList.toggle("app--settings", show);
   if (show) {
     // Refresh the GitHub-cadence note with the latest floor learned from sync status.

@@ -13,8 +13,9 @@ import {
   registerSyncEvents,
   configureSync,
 } from "./js/sync.js";
-import { initSettings, loadSettings } from "./js/settings.js";
+import { initSettings, loadSettings, showSettings } from "./js/settings.js";
 import { initInbox, loadInbox } from "./js/inbox.js";
+import { initModules, configureModules } from "./js/modules.js";
 import { initShortcuts } from "./js/shortcuts.js";
 
 /* main.js is the thin orchestrator: it wires each domain module's init on DOMContentLoaded
@@ -42,6 +43,12 @@ window.addEventListener("DOMContentLoaded", () => {
   initSidebarResize();
   initInbox();
   initShortcuts();
+
+  // Module system: render the title-bar module picker and wire ⌘1/⌘2. Switching modules
+  // dismisses the Settings overlay (modules.js fires onSwitch rather than importing
+  // settings.js, keeping the dependency one-directional).
+  initModules();
+  configureModules({ onSwitch: () => showSettings(false) });
 
   registerSyncEvents();
   // Sync reloads the inbox after a sync (and after background subject resolution) via this
