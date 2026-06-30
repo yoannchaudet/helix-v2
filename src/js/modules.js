@@ -67,7 +67,10 @@ export function switchModule(id) {
   activeModuleId = id;
   // Dismiss transient UI tied to the outgoing module so it can't linger over the new one:
   // any open context menu/popover (e.g. an inbox row menu) and the Settings overlay.
-  closeMenu();
+  // Close the menu WITHOUT restoring focus: its return target is inside the outgoing module,
+  // which `showActiveModulePane()` is about to hide — restoring focus there would strand it
+  // on a hidden element. Letting focus fall to <body> is the safe, stable outcome.
+  closeMenu(false);
   hooks.onSwitch?.(id);
   showActiveModulePane();
   renderPickerState();

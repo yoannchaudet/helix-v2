@@ -474,6 +474,10 @@ code,
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  /* The picker sits inside the `.topchrome` drag region. Let pointer events fall through the
+     container (and its gaps) to the attributed `.topchrome` so the empty space stays draggable;
+     the `.module-tab` buttons below re-enable pointer events so they remain clickable. */
+  pointer-events: none;
 }
 
 .module-tab {
@@ -484,6 +488,7 @@ code,
   font: inherit;
   font-size: 0.82rem;
   font-weight: 600;
+  pointer-events: auto;
   letter-spacing: 0.01em;
   padding: var(--space-4) var(--space-10);
   border-radius: var(--radius-lg);

@@ -247,17 +247,17 @@ export function showSettings(show) {
   // hides all module panes; closing it restores the active module's pane.
   if (show) hideModulePanes();
   else showActiveModulePane();
-  // Hide the sidebar (and its resizer) so the content spans the whole window. CSS also
-  // insets the toolbar past the traffic lights and hides the module picker.
+  // Hide the sidebar (and its resizer) so the content spans the whole window. The top chrome
+  // (module picker + Settings gear) intentionally stays visible during Settings.
   document.querySelector(".app")?.classList.toggle("app--settings", show);
   if (show) {
     // Refresh the GitHub-cadence note with the latest floor learned from sync status.
     updateSyncingNote();
   }
   if (show === wasShown) return;
-  // The sidebar (and its #open-settings trigger) is hidden in Settings, so keyboard focus
-  // would otherwise fall to <body>. Move focus to a sensible target on each transition:
-  // into the pane when opening, back to the sidebar trigger when closing.
+  // The sidebar is hidden in Settings, so keyboard focus would otherwise fall to <body>.
+  // Move focus to a sensible target on each transition: into the pane when opening, back to
+  // the top-chrome Settings gear when closing.
   if (show) {
     $("#settings-back")?.focus();
   } else {
