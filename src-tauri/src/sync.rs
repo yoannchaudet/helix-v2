@@ -416,6 +416,12 @@ pub struct PendingSubject {
 ///     repo before a scope upgrade) and was last attempted over an hour ago. This is a
 ///     bounded retry; a successful resolution always sets an html_url (and PR/Issue/
 ///     Discussion a state), so it is never re-fetched on subsequent syncs.
+///   * an **open PR** whose `mergeable_state` is still unknown (GitHub computes mergeability
+///     lazily, so the first fetch after a push usually returns `unknown`/null) and was last
+///     attempted over a minute ago. Fetching the PR nudges GitHub to compute it, so the next
+///     resolution typically returns a real state. The one-minute floor bounds the cost: a PR
+///     genuinely stuck on `unknown` is re-fetched at most once per minute, not every sync.
+///     Merged/closed PRs naturally drop out of this clause (their state is no longer `open`).
 pub fn subjects_needing_resolution(conn: &Connection) -> rusqlite::Result<Vec<PendingSubject>> {
     let mut stmt = conn.prepare(
         "SELECT thread_id, subject_url
@@ -427,6 +433,10 @@ pub fn subjects_needing_resolution(conn: &Connection) -> rusqlite::Result<Vec<Pe
               OR (subject_state IS NULL
                   AND subject_html_url IS NULL
                   AND resolved_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1 hour'))
+              OR (subject_type = 'PullRequest'
+                  AND subject_state = 'open'
+                  AND (subject_mergeable_state IS NULL OR subject_mergeable_state = 'unknown')
+                  AND resolved_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1 minute'))
            )
          ORDER BY updated_at DESC",
     )?;
@@ -1711,6 +1721,80 @@ mod tests {
             subjects_needing_resolution(&conn).unwrap().is_empty(),
             "a resolved subject with an html_url must not be retried, even without a state"
         );
+    }
+
+    #[test]
+    fn open_pr_with_unknown_mergeable_state_is_retried_after_a_minute() {
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
+        conn.execute(
+            "UPDATE notifications SET subject_type = 'PullRequest' WHERE thread_id = '1'",
+            [],
+        )
+        .unwrap();
+
+        // Resolved as an open PR but GitHub hasn't computed mergeability yet (unknown).
+        store_resolved_subject(
+            &conn,
+            "1",
+            &ResolvedSubject {
+                state: Some("open".to_string()),
+                mergeable_state: Some("unknown".to_string()),
+                html_url: Some("https://github.com/octo/repo-a/pull/1".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // Just attempted → not retried yet (avoids per-sync hammering at the poll floor).
+        assert!(subjects_needing_resolution(&conn).unwrap().is_empty());
+
+        // Backdate past the one-minute floor → eligible again so the pill can fill in.
+        conn.execute(
+            "UPDATE notifications SET resolved_at = '2026-03-01T00:00:00Z' WHERE thread_id = '1'",
+            [],
+        )
+        .unwrap();
+        let pending = subjects_needing_resolution(&conn).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].thread_id, "1");
+
+        // Once a real mergeable_state lands, the old row is NOT retried by this clause.
+        store_resolved_subject(
+            &conn,
+            "1",
+            &ResolvedSubject {
+                state: Some("open".to_string()),
+                mergeable_state: Some("clean".to_string()),
+                html_url: Some("https://github.com/octo/repo-a/pull/1".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE notifications SET resolved_at = '2026-03-01T00:00:00Z' WHERE thread_id = '1'",
+            [],
+        )
+        .unwrap();
+        assert!(subjects_needing_resolution(&conn).unwrap().is_empty());
+
+        // A merged PR stuck on unknown is also not retried — its state is no longer open.
+        store_resolved_subject(
+            &conn,
+            "1",
+            &ResolvedSubject {
+                state: Some("merged".to_string()),
+                mergeable_state: Some("unknown".to_string()),
+                html_url: Some("https://github.com/octo/repo-a/pull/1".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE notifications SET resolved_at = '2026-03-01T00:00:00Z' WHERE thread_id = '1'",
+            [],
+        )
+        .unwrap();
+        assert!(subjects_needing_resolution(&conn).unwrap().is_empty());
     }
 
     #[test]
