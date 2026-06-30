@@ -6,8 +6,11 @@ import {
   repoMatches,
   sortReposByRecency,
   filterGroups,
+  filterGroupsByType,
+  typeMatch,
+  TYPE_FILTERS,
 } from "./inbox-model.js";
-import { repoSection } from "./inbox-view.js";
+import { repoSection, typeFilterBar } from "./inbox-view.js";
 import { sourceButton } from "./ui.js";
 import { openContextMenu, closeMenu, isMenuOpen, menuContains } from "./menu.js";
 import { isAuthenticated } from "./account.js";
@@ -31,11 +34,17 @@ let bookmarkGroups = [];
 let activeFilter = "all";
 /** Optional repository refinement: a repo_id, or null for "all repositories". */
 let activeRepo = null;
+/** Selected subject-type buckets (top-of-view pills). All three on by default; at least
+ *  one always stays selected. Pre-filters both datasets so the smart-filter counts, repo
+ *  list, and main view all reflect the active type selection. Resets each launch. */
+let selectedTypes = new Set(TYPE_FILTERS.map((t) => t.id));
 
 /** The dataset the active filter draws from: bookmarks come from their own snapshot (so
- *  done/removed ones still show); every other filter draws from the live inbox. */
+ *  done/removed ones still show); every other filter draws from the live inbox. The active
+ *  type-pill selection pre-filters whichever dataset is chosen. */
 function currentGroups() {
-  return activeFilter === "bookmarked" ? bookmarkGroups : inboxGroups;
+  const base = activeFilter === "bookmarked" ? bookmarkGroups : inboxGroups;
+  return filterGroupsByType(base, selectedTypes);
 }
 
 /** Apply the active filter, then the optional repo refinement, to the active dataset,
@@ -239,13 +248,19 @@ function renderFilterList() {
 
 /** Update sidebar filter/repo selection styling + the smart-filter counts. */
 function renderSidebar() {
-  const all = inboxGroups.flatMap((g) => g.notifications);
+  // Smart-filter counts are pre-filtered by the active type pills so they match the view.
+  const all = inboxGroups
+    .flatMap((g) => g.notifications)
+    .filter((n) => typeMatch(n, selectedTypes));
   // Derive counts from FILTERS so adding/renaming a filter updates the sidebar in one place.
   const counts = Object.fromEntries(
     Object.entries(FILTERS).map(([id, { match }]) => [id, all.filter(match).length]),
   );
-  // Bookmarks live in their own snapshot dataset (incl. done/removed), so count those.
-  counts.bookmarked = bookmarkGroups.flatMap((g) => g.notifications).length;
+  // Bookmarks live in their own snapshot dataset (incl. done/removed), so count those —
+  // also narrowed to the selected types.
+  counts.bookmarked = bookmarkGroups
+    .flatMap((g) => g.notifications)
+    .filter((n) => typeMatch(n, selectedTypes)).length;
   for (const el of $$(".source-count")) {
     const key = el.dataset.count;
     const value = counts[key] ?? 0;
@@ -314,6 +329,48 @@ function selectFilter(filterId, kbd = false) {
   renderSidebar();
   renderInbox();
   focusFirstRow(kbd);
+  announceView();
+}
+
+/** Build the subject-type pill row once and wire each pill's click to `toggleType`.
+ *  Called at init; thereafter the on/off styling is updated in place by `syncTypePills`. */
+function renderTypeFilter() {
+  const bar = $("#type-filter");
+  if (!bar) return;
+  bar.innerHTML = typeFilterBar(selectedTypes);
+  for (const btn of bar.querySelectorAll(".type-pill")) {
+    btn.addEventListener("click", () => toggleType(btn.dataset.type));
+  }
+}
+
+/** Reflect the current `selectedTypes` on the existing pill buttons (class + aria) without
+ *  replacing the nodes, so focus stays on the pill the user just activated. */
+function syncTypePills() {
+  for (const btn of $$("#type-filter .type-pill")) {
+    const on = selectedTypes.has(btn.dataset.type);
+    btn.classList.toggle("is-on", on);
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+}
+
+/** Toggle a subject-type pill on/off. At least one bucket always stays selected, so
+ *  clicking the last active pill is a no-op. After changing the selection, re-validate the
+ *  repo refinement (a repo with no matching notifications under the new type+filter is
+ *  cleared) and re-render the whole view so counts and the list track the change. */
+function toggleType(typeId) {
+  if (!selectedTypes.has(typeId)) {
+    selectedTypes.add(typeId);
+  } else {
+    if (selectedTypes.size === 1) return; // Keep at least one type selected.
+    selectedTypes.delete(typeId);
+  }
+  if (activeRepo != null) {
+    const group = currentGroups().find((g) => g.repo_id === activeRepo);
+    if (!group || !repoMatches(group, activeFilter).length) activeRepo = null;
+  }
+  syncTypePills();
+  renderSidebar();
+  renderInbox();
   announceView();
 }
 
@@ -743,6 +800,8 @@ export function initInbox() {
   for (const btn of $$(".source[data-filter]")) {
     btn.addEventListener("click", () => selectFilter(btn.dataset.filter));
   }
+  // Subject-type pills (Pull requests / Issues / Other); renders + wires its own clicks.
+  renderTypeFilter();
 
   // Notification actions: left-click an (openable) row to open it in the browser,
   // right-click for the row menu, ••• for the visible set. Enter opens a focused row.

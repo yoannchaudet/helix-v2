@@ -1,6 +1,7 @@
 import { html, rawHtml } from "./dom.js";
 import { relTime } from "./format.js";
 import { pill, iconButton } from "./ui.js";
+import { TYPE_FILTERS } from "./inbox-model.js";
 
 /* Pure HTML templating for the inbox: given a notification (or repo group), return the
  * markup string. No DOM access, no module state — so these are unit-testable and the
@@ -171,4 +172,21 @@ export function repoSection(group) {
   return html`<section class="repo-section" role="group" aria-labelledby="repo-h-${group.repo_id}">${rawHtml(
     repoHeader(group),
   )}<ul class="n-list">${rawHtml(rows)}</ul></section>`;
+}
+
+/** The top-of-view subject-type filter: a single line of toggle pills (Pull requests /
+ *  Issues / Other) rendered from `TYPE_FILTERS`. `selectedTypes` is a Set of bucket ids;
+ *  a selected pill gets `aria-pressed="true"` + `.is-on`. The whole row is a labeled
+ *  `role="group"` so assistive tech announces it as one control. Stateless — `inbox.js`
+ *  owns the Set and re-renders on toggle. */
+export function typeFilterBar(selectedTypes) {
+  const pills = TYPE_FILTERS.map(({ id, label }) => {
+    const on = selectedTypes.has(id);
+    return html`<button type="button" class="type-pill${rawHtml(
+      on ? " is-on" : "",
+    )}" data-type="${id}" aria-pressed="${on ? "true" : "false"}">${label}</button>`;
+  }).join("");
+  return html`<div class="type-filter-inner" role="group" aria-label="Filter by subject type">${rawHtml(
+    pills,
+  )}</div>`;
 }

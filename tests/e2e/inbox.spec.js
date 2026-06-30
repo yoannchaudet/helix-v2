@@ -49,6 +49,49 @@ test("refining by repository shows only that repo, with a breadcrumb", async ({ 
   await expect(page.locator("#view-title .crumb-repo")).toHaveText("acme/widgets");
 });
 
+test("the subject-type pills narrow the whole view and reduce counts", async ({ page }) => {
+  await openApp(page);
+
+  // All three pills are on by default → the full fixture shows (2 PRs + 1 Issue).
+  await expect(page.locator(".type-pill")).toHaveCount(3);
+  await expect(page.locator('.type-pill[data-type="pr"]')).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(page.locator("#inbox .n-row")).toHaveCount(3);
+
+  // Turn PRs off → only the Issue (t2, octo/hello) remains; acme/widgets (PR-only) drops out.
+  await page.locator('.type-pill[data-type="pr"]').click();
+  await expect(page.locator('.type-pill[data-type="pr"]')).toHaveAttribute(
+    "aria-pressed",
+    "false",
+  );
+  // Toggling updates the pill in place, so the activated pill keeps focus (no DOM teardown).
+  await expect(page.locator('.type-pill[data-type="pr"]')).toBeFocused();
+  await expect(page.locator("#inbox .n-row")).toHaveCount(1);
+  await expect(page.locator(".n-title")).toContainText("Crash on launch");
+  await expect(page.locator("#inbox .repo-section")).toHaveCount(1);
+  // Smart-filter + repo counts shrink to match the type selection.
+  await expect(page.locator('.source-count[data-count="all"]')).toHaveText("1");
+  await expect(page.locator('.source-count[data-count="cleanup"]')).toHaveText("");
+  await expect(page.locator('.repo-source[data-repo="2"]')).toHaveCount(0);
+
+  // Clicking the last remaining pill is a no-op — at least one type stays selected.
+  // Turn Other off too, leaving only Issues selected…
+  await page.locator('.type-pill[data-type="other"]').click();
+  await expect(page.locator('.type-pill[data-type="issue"]')).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  // …then clicking Issues (now the only one) must not deselect it.
+  await page.locator('.type-pill[data-type="issue"]').click();
+  await expect(page.locator('.type-pill[data-type="issue"]')).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(page.locator("#inbox .n-row")).toHaveCount(1);
+});
+
 test("marking a single row done removes it and decrements the count", async ({ page }) => {
   await openApp(page);
 
