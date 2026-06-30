@@ -56,6 +56,28 @@ export function stateBadge(state) {
   return pill(label, `state ${cls}`);
 }
 
+/** Map a PR's rolled-up `mergeable_state` to a merge-readiness pill. Only meaningful for an
+ *  **open** pull request (a merged/closed PR's mergeability is moot), so returns "" for any
+ *  other subject type/state, and for `unknown`/null (GitHub computes it lazily). The single
+ *  `mergeable_state` field already folds in required checks + reviews, so no extra API call
+ *  is needed — it rides along on the PR resolution Helix already does. */
+export function mergeStateBadge(mergeableState, subjectType, subjectState) {
+  if (subjectType !== "PullRequest" || subjectState !== "open") return "";
+  const map = {
+    clean: ["Ready", "merge--clean"],
+    has_hooks: ["Ready", "merge--clean"],
+    unstable: ["Checks failing", "merge--unstable"],
+    blocked: ["Blocked", "merge--blocked"],
+    dirty: ["Conflicts", "merge--dirty"],
+    behind: ["Behind", "merge--behind"],
+    draft: ["Draft", "merge--draft"],
+  };
+  const entry = map[mergeableState];
+  if (!entry) return "";
+  const [label, cls] = entry;
+  return pill(label, `merge ${cls}`);
+}
+
 /** Checkmark glyph for the "mark as done" affordances (row / toolbar / repo header). */
 const DONE_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3.4 8.5l3 3 6.2-6.8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
@@ -67,7 +89,11 @@ export function notificationRow(n) {
   const number =
     n.subject_number != null ? html`<span class="n-number">#${n.subject_number}</span> ` : "";
   const badge = stateBadge(n.subject_state);
-  const stateLine = badge ? html`<div class="n-state">${rawHtml(badge)}</div>` : "";
+  const merge = mergeStateBadge(n.subject_mergeable_state, n.subject_type, n.subject_state);
+  const stateLine =
+    badge || merge
+      ? html`<div class="n-state">${rawHtml(badge)}${rawHtml(merge)}</div>`
+      : "";
   // Only rows with a resolved web URL are openable (clickable + hover affordance).
   const url = n.subject_html_url || "";
   const isNew = n.is_new ? " n-row--new" : "";

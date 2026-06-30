@@ -144,6 +144,13 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE bookmarks ADD COLUMN subject_author TEXT;
     "#,
+    // v9 — PR merge-readiness. GitHub's rolled-up `mergeable_state` (clean/blocked/dirty/…)
+    // captured for free from the PR resolution response we already fetch. Null for non-PRs
+    // and until first resolved. Snapshotted onto bookmarks too (mirrors subject_author).
+    r#"
+    ALTER TABLE notifications ADD COLUMN subject_mergeable_state TEXT;
+    ALTER TABLE bookmarks ADD COLUMN subject_mergeable_state TEXT;
+    "#,
 ];
 
 /// Open the database at `db_path`, apply any pending migrations, and return the

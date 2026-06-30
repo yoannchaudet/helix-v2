@@ -416,6 +416,12 @@ pub struct PendingSubject {
 ///     repo before a scope upgrade) and was last attempted over an hour ago. This is a
 ///     bounded retry; a successful resolution always sets an html_url (and PR/Issue/
 ///     Discussion a state), so it is never re-fetched on subsequent syncs.
+///   * an **open PR** whose `mergeable_state` is still unknown (GitHub computes mergeability
+///     lazily, so the first fetch after a push usually returns `unknown`/null) and was last
+///     attempted over a minute ago. Fetching the PR nudges GitHub to compute it, so the next
+///     resolution typically returns a real state. The one-minute floor bounds the cost: a PR
+///     genuinely stuck on `unknown` is re-fetched at most once per minute, not every sync.
+///     Merged/closed PRs naturally drop out of this clause (their state is no longer `open`).
 pub fn subjects_needing_resolution(conn: &Connection) -> rusqlite::Result<Vec<PendingSubject>> {
     let mut stmt = conn.prepare(
         "SELECT thread_id, subject_url
@@ -427,6 +433,10 @@ pub fn subjects_needing_resolution(conn: &Connection) -> rusqlite::Result<Vec<Pe
               OR (subject_state IS NULL
                   AND subject_html_url IS NULL
                   AND resolved_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1 hour'))
+              OR (subject_type = 'PullRequest'
+                  AND subject_state = 'open'
+                  AND (subject_mergeable_state IS NULL OR subject_mergeable_state = 'unknown')
+                  AND resolved_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1 minute'))
            )
          ORDER BY updated_at DESC",
     )?;
@@ -448,13 +458,14 @@ pub fn store_resolved_subject(
 ) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE notifications SET
-           subject_number       = ?2,
-           subject_state        = ?3,
-           subject_state_reason = ?4,
-           subject_merged_at    = ?5,
-           subject_author       = ?6,
-           subject_html_url     = ?7,
-           resolved_at          = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+           subject_number          = ?2,
+           subject_state           = ?3,
+           subject_state_reason    = ?4,
+           subject_merged_at       = ?5,
+           subject_author          = ?6,
+           subject_html_url        = ?7,
+           subject_mergeable_state = ?8,
+           resolved_at             = strftime('%Y-%m-%dT%H:%M:%SZ','now')
          WHERE thread_id = ?1",
         params![
             thread_id,
@@ -464,15 +475,23 @@ pub fn store_resolved_subject(
             subject.merged_at,
             subject.author,
             subject.html_url,
+            subject.mergeable_state,
         ],
     )?;
     // Keep a bookmark's snapshot current too, so a bookmarked thread marked done before the
     // next sync still carries the resolved number/state/url in the Bookmarks filter.
     conn.execute(
         "UPDATE bookmarks SET subject_number = ?2, subject_state = ?3, subject_html_url = ?4,
-           subject_author = ?5
+           subject_author = ?5, subject_mergeable_state = ?6
          WHERE thread_id = ?1",
-        params![thread_id, subject.number, subject.state, subject.html_url, subject.author],
+        params![
+            thread_id,
+            subject.number,
+            subject.state,
+            subject.html_url,
+            subject.author,
+            subject.mergeable_state
+        ],
     )?;
     Ok(())
 }
@@ -540,11 +559,12 @@ pub fn add_bookmark(conn: &Connection, thread_id: &str) -> rusqlite::Result<()> 
     conn.execute(
         "INSERT INTO bookmarks (
              thread_id, repo_id, repo_full_name, repo_private, subject_type, subject_title,
-             subject_number, subject_state, subject_author, subject_html_url, thread_url, reason,
+             subject_number, subject_state, subject_author, subject_mergeable_state,
+             subject_html_url, thread_url, reason,
              updated_at, bookmarked_at)
          SELECT n.thread_id, n.repo_id, r.full_name, r.private, n.subject_type, n.subject_title,
-                n.subject_number, n.subject_state, n.subject_author, n.subject_html_url,
-                n.thread_url, COALESCE(n.reason, ''), n.updated_at,
+                n.subject_number, n.subject_state, n.subject_author, n.subject_mergeable_state,
+                n.subject_html_url, n.thread_url, COALESCE(n.reason, ''), n.updated_at,
                 strftime('%Y-%m-%dT%H:%M:%SZ','now')
          FROM notifications n JOIN repos r ON r.id = n.repo_id
          WHERE n.thread_id = ?1
@@ -553,6 +573,7 @@ pub fn add_bookmark(conn: &Connection, thread_id: &str) -> rusqlite::Result<()> 
            repo_private = excluded.repo_private, subject_type = excluded.subject_type,
            subject_title = excluded.subject_title, subject_number = excluded.subject_number,
            subject_state = excluded.subject_state, subject_author = excluded.subject_author,
+           subject_mergeable_state = excluded.subject_mergeable_state,
            subject_html_url = excluded.subject_html_url,
            thread_url = excluded.thread_url, reason = excluded.reason,
            updated_at = excluded.updated_at",
@@ -579,6 +600,7 @@ pub fn list_bookmarks(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
                 b.thread_id, b.subject_type, b.subject_title, NULL,
                 COALESCE(b.reason, ''), b.updated_at, b.thread_url,
                 b.subject_number, b.subject_state, b.subject_html_url, b.subject_author,
+                b.subject_mergeable_state,
                 CASE WHEN n.thread_id IS NULL THEN 1 ELSE 0 END AS is_done
          FROM bookmarks b
          LEFT JOIN notifications n ON n.thread_id = b.thread_id
@@ -603,8 +625,9 @@ pub fn list_bookmarks(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
                 resolved_at: None,
                 is_new: false,
                 subject_author: r.get(13)?,
+                subject_mergeable_state: r.get(14)?,
                 bookmarked: true,
-                is_done: r.get::<_, i64>(14)? != 0,
+                is_done: r.get::<_, i64>(15)? != 0,
             },
         ))
     })?;
@@ -637,6 +660,7 @@ pub fn refresh_bookmark_snapshots(conn: &Connection) -> rusqlite::Result<()> {
            subject_type = n.subject_type, subject_title = n.subject_title,
            subject_number = n.subject_number, subject_state = n.subject_state,
            subject_author = n.subject_author,
+           subject_mergeable_state = n.subject_mergeable_state,
            subject_html_url = n.subject_html_url, thread_url = n.thread_url,
            reason = COALESCE(n.reason, ''), updated_at = n.updated_at
          FROM notifications n JOIN repos r ON r.id = n.repo_id
@@ -666,6 +690,9 @@ pub struct NotificationView {
     /// Resolved subject author login (Issues/PRs only; null for other subject types or
     /// until the subject is first resolved). Shown right-aligned on the row.
     pub subject_author: Option<String>,
+    /// Pull requests only: GitHub's rolled-up `mergeable_state` (clean/blocked/dirty/…),
+    /// driving the merge-readiness pill. Null for non-PRs or until first resolved.
+    pub subject_mergeable_state: Option<String>,
     /// When the subject was last resolved. Compared against `updated_at` to tell whether
     /// `subject_state` still reflects the latest thread activity (the cleanup filter only
     /// trusts a fresh resolution; see the frontend `isCleanupCandidate`).
@@ -702,7 +729,7 @@ pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
                 COALESCE(n.reason, '') AS reason,
                 n.updated_at, n.thread_url,
                 n.subject_number, n.subject_state, n.subject_html_url, n.resolved_at,
-                n.is_new, n.subject_author,
+                n.is_new, n.subject_author, n.subject_mergeable_state,
                 CASE WHEN b.thread_id IS NULL THEN 0 ELSE 1 END AS bookmarked
          FROM notifications n
          JOIN repos r ON r.id = n.repo_id
@@ -729,7 +756,8 @@ pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
                 resolved_at: r.get(13)?,
                 is_new: r.get::<_, i64>(14)? != 0,
                 subject_author: r.get(15)?,
-                bookmarked: r.get::<_, i64>(16)? != 0,
+                subject_mergeable_state: r.get(16)?,
+                bookmarked: r.get::<_, i64>(17)? != 0,
                 is_done: false,
             },
         ))
@@ -956,6 +984,47 @@ mod tests {
                 .subject_author
                 .as_deref(),
             Some("octocat")
+        );
+    }
+
+    #[test]
+    fn subject_mergeable_state_surfaces_in_inbox_and_bookmarks() {
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/a", "A PR")]).unwrap();
+        add_bookmark(&conn, "1").unwrap();
+
+        // Unresolved: no mergeable state yet in either view.
+        assert!(list_by_repo(&conn).unwrap()[0].notifications[0]
+            .subject_mergeable_state
+            .is_none());
+        assert!(list_bookmarks(&conn).unwrap()[0].notifications[0]
+            .subject_mergeable_state
+            .is_none());
+
+        // Resolution stores it; it surfaces in the inbox and the bookmark snapshot.
+        store_resolved_subject(
+            &conn,
+            "1",
+            &ResolvedSubject {
+                number: Some(7),
+                state: Some("open".to_string()),
+                html_url: Some("https://example.test/7".to_string()),
+                mergeable_state: Some("clean".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            list_by_repo(&conn).unwrap()[0].notifications[0]
+                .subject_mergeable_state
+                .as_deref(),
+            Some("clean")
+        );
+        assert_eq!(
+            list_bookmarks(&conn).unwrap()[0].notifications[0]
+                .subject_mergeable_state
+                .as_deref(),
+            Some("clean")
         );
     }
 
@@ -1655,6 +1724,80 @@ mod tests {
     }
 
     #[test]
+    fn open_pr_with_unknown_mergeable_state_is_retried_after_a_minute() {
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
+        conn.execute(
+            "UPDATE notifications SET subject_type = 'PullRequest' WHERE thread_id = '1'",
+            [],
+        )
+        .unwrap();
+
+        // Resolved as an open PR but GitHub hasn't computed mergeability yet (unknown).
+        store_resolved_subject(
+            &conn,
+            "1",
+            &ResolvedSubject {
+                state: Some("open".to_string()),
+                mergeable_state: Some("unknown".to_string()),
+                html_url: Some("https://github.com/octo/repo-a/pull/1".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // Just attempted → not retried yet (avoids per-sync hammering at the poll floor).
+        assert!(subjects_needing_resolution(&conn).unwrap().is_empty());
+
+        // Backdate past the one-minute floor → eligible again so the pill can fill in.
+        conn.execute(
+            "UPDATE notifications SET resolved_at = strftime('%Y-%m-%dT%H:%M:%SZ','now','-2 minutes') WHERE thread_id = '1'",
+            [],
+        )
+        .unwrap();
+        let pending = subjects_needing_resolution(&conn).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].thread_id, "1");
+
+        // Once a real mergeable_state lands, the old row is NOT retried by this clause.
+        store_resolved_subject(
+            &conn,
+            "1",
+            &ResolvedSubject {
+                state: Some("open".to_string()),
+                mergeable_state: Some("clean".to_string()),
+                html_url: Some("https://github.com/octo/repo-a/pull/1".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE notifications SET resolved_at = strftime('%Y-%m-%dT%H:%M:%SZ','now','-2 minutes') WHERE thread_id = '1'",
+            [],
+        )
+        .unwrap();
+        assert!(subjects_needing_resolution(&conn).unwrap().is_empty());
+
+        // A merged PR stuck on unknown is also not retried — its state is no longer open.
+        store_resolved_subject(
+            &conn,
+            "1",
+            &ResolvedSubject {
+                state: Some("merged".to_string()),
+                mergeable_state: Some("unknown".to_string()),
+                html_url: Some("https://github.com/octo/repo-a/pull/1".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE notifications SET resolved_at = strftime('%Y-%m-%dT%H:%M:%SZ','now','-2 minutes') WHERE thread_id = '1'",
+            [],
+        )
+        .unwrap();
+        assert!(subjects_needing_resolution(&conn).unwrap().is_empty());
+    }
+
+    #[test]
     fn reset_resolution_requeues_everything() {
         let mut conn = mem_conn();
         store_notifications(
@@ -1698,12 +1841,14 @@ mod tests {
                 merged_at: Some("2026-01-02T03:04:05Z".to_string()),
                 html_url: Some("https://github.com/octo/repo-a/pull/99".to_string()),
                 author: Some("dev".to_string()),
+                mergeable_state: Some("clean".to_string()),
             },
         )
         .unwrap();
 
-        let (number, state, merged_at, author, html_url, resolved_at): (
+        let (number, state, merged_at, author, html_url, mergeable_state, resolved_at): (
             Option<i64>,
+            Option<String>,
             Option<String>,
             Option<String>,
             Option<String>,
@@ -1712,7 +1857,7 @@ mod tests {
         ) = conn
             .query_row(
                 "SELECT subject_number, subject_state, subject_merged_at, subject_author,
-                        subject_html_url, resolved_at
+                        subject_html_url, subject_mergeable_state, resolved_at
                  FROM notifications WHERE thread_id = '1'",
                 [],
                 |r| {
@@ -1723,6 +1868,7 @@ mod tests {
                         r.get(3)?,
                         r.get(4)?,
                         r.get(5)?,
+                        r.get(6)?,
                     ))
                 },
             )
@@ -1735,6 +1881,7 @@ mod tests {
             html_url.as_deref(),
             Some("https://github.com/octo/repo-a/pull/99")
         );
+        assert_eq!(mergeable_state.as_deref(), Some("clean"));
         assert!(resolved_at.is_some());
     }
 }
