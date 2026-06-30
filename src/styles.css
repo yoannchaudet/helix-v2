@@ -239,26 +239,68 @@ code,
 .app {
   position: relative;
   display: grid;
-  grid-template-columns: var(--sidebar-w) 1fr;
+  grid-template-rows: var(--titlebar-h) 1fr;
   height: 100%;
 }
 
-/* Settings is a focused full-width pane: collapse the sidebar column and hide the
-   sidebar + its resizer so the content spans the whole window. */
-.app--settings {
+/* App-level top chrome: the full-width title-bar strip hosting the brand, the module picker,
+   and Settings. The macOS overlay title bar draws the traffic lights over its top-left, so
+   inset the left padding to clear them (macOS only). */
+.topchrome {
+  display: flex;
+  align-items: center;
+  gap: var(--space-10);
+  height: var(--titlebar-h);
+  padding: 0 var(--space-16);
+  border-bottom: 1px solid var(--hairline);
+  background: var(--toolbar-bg);
+  backdrop-filter: saturate(180%) blur(14px);
+  -webkit-backdrop-filter: saturate(180%) blur(14px);
+}
+
+[data-platform="macos"] .topchrome {
+  padding-left: 80px;
+}
+
+.topchrome-brand {
+  /* Fill the space between the (traffic-light-inset) left edge and the picker, centering the
+     wordmark within it. */
+  flex: 1;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+  user-select: none;
+}
+
+.topchrome-actions {
+  display: flex;
+  align-items: center;
+}
+
+/* The module body: the per-module sidebar + content split, below the top chrome. */
+.app-body {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--sidebar-w) 1fr;
+  min-height: 0;
+}
+
+/* Module-scoped sidebar: collapse the sidebar column (and hide the sidebar + its resizer)
+   for modules that have no sidebar (e.g. Dependabot) and while the Settings overlay is open,
+   so the content spans the whole body. */
+.app[data-module="dependabot"] .app-body,
+.app--settings .app-body {
   grid-template-columns: 1fr;
 }
 
+.app[data-module="dependabot"] .sidebar,
+.app[data-module="dependabot"] .sidebar-resizer,
 .app--settings .sidebar,
 .app--settings .sidebar-resizer {
   display: none;
-}
-
-/* With the sidebar gone, the toolbar slides under the macOS traffic lights — inset
-   its left padding so the back button clears them (macOS only; other platforms have
-   no overlaid traffic lights). */
-[data-platform="macos"] .app--settings #view-settings .toolbar {
-  padding-left: 80px;
 }
 
 /* Sidebar resize handle: an invisible hit area straddling the sidebar/content seam,
@@ -310,25 +352,7 @@ code,
      when private-api vibrancy is unavailable. */
   background: var(--sidebar-bg);
   border-right: 1px solid var(--hairline);
-  padding: 0 var(--space-10) var(--space-10);
-}
-
-/* Reserve the traffic-light region (the overlay title bar runs full-height). */
-.sidebar-traffic {
-  height: var(--titlebar-h);
-  flex: none;
-}
-
-/* Native macOS source-list header: subtle, uppercase, muted. */
-.sidebar-title {
-  margin: 0 0 var(--space-8);
-  padding: 0 var(--space-12);
-  font-size: 13px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--muted);
-  user-select: none;
+  padding: var(--space-12) var(--space-10) var(--space-10);
 }
 
 .sources {
@@ -433,18 +457,6 @@ code,
   opacity: 0.85;
 }
 
-.sidebar-footer {
-  flex: none;
-  padding-top: 8px;
-  border-top: 1px solid var(--hairline);
-}
-
-.source--settings .kbd {
-  flex: none;
-  font-size: 0.75rem;
-  color: var(--muted);
-}
-
 /* ================================ Content ================================= */
 .content {
   min-width: 0;
@@ -452,6 +464,94 @@ code,
   background: var(--bg);
   display: flex;
   flex-direction: column;
+}
+
+/* ============================= Module picker ============================== */
+/* Lightroom-style module switcher: subtle text tabs living in the top chrome, pushed to the
+   right (Lightroom puts the module picker top-right). The brand sits on the left; this picker
+   takes the remaining space up to the Settings action. */
+.module-picker {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  /* The picker sits inside the `.topchrome` drag region. Let pointer events fall through the
+     container (and its gaps) to the attributed `.topchrome` so the empty space stays draggable;
+     the `.module-tab` buttons below re-enable pointer events so they remain clickable. */
+  pointer-events: none;
+}
+
+.module-tab {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  pointer-events: auto;
+  letter-spacing: 0.01em;
+  padding: var(--space-4) var(--space-10);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  transition:
+    color var(--duration-fast) ease,
+    background var(--duration-fast) ease;
+}
+
+.module-tab:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+
+.module-tab--active,
+.module-tab--active:hover {
+  color: var(--accent-strong);
+  background: var(--accent-tint);
+}
+
+.module-tab:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+/* Centered "coming soon" empty-state for placeholder modules (e.g. Dependabot). Mirrors the
+   inbox empty-state layout but kept on its own class so module placeholders and the inbox
+   empty-state evolve independently. */
+.module-placeholder {
+  flex: 1;
+  min-height: 0;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-4);
+  color: var(--muted);
+  padding: var(--space-24);
+  text-align: center;
+}
+
+.module-placeholder-art {
+  width: 116px;
+  height: 116px;
+  margin-bottom: var(--space-12);
+  opacity: 0.85;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.module-placeholder-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.module-placeholder-sub {
+  margin: 0;
+  max-width: 38ch;
+  font-size: 0.88rem;
+  color: var(--muted);
 }
 
 .pane {
