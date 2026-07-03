@@ -1846,7 +1846,7 @@ mod tests {
         )
         .unwrap();
 
-        let (number, state, merged_at, author, html_url, mergeable_state, resolved_at): (
+        type ResolvedRow = (
             Option<i64>,
             Option<String>,
             Option<String>,
@@ -1854,8 +1854,9 @@ mod tests {
             Option<String>,
             Option<String>,
             Option<String>,
-        ) = conn
-            .query_row(
+        );
+        let (number, state, merged_at, author, html_url, mergeable_state, resolved_at): ResolvedRow =
+            conn.query_row(
                 "SELECT subject_number, subject_state, subject_merged_at, subject_author,
                         subject_html_url, subject_mergeable_state, resolved_at
                  FROM notifications WHERE thread_id = '1'",

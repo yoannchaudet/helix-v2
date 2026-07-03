@@ -57,8 +57,7 @@ function renderSignedIn(login, name, justSignedIn = false) {
   const hasLogin = Boolean(login) && login !== "(unknown)";
   const hasName = Boolean(name);
   const primary = hasName ? name : hasLogin ? `@${login}` : "Signed in";
-  const secondary =
-    hasName && hasLogin ? html`<span class="account-login">@${login}</span>` : "";
+  const secondary = hasName && hasLogin ? html`<span class="account-login">@${login}</span>` : "";
   const avatar = hasLogin
     ? html`<img class="avatar" id="account-avatar" alt=""
         src="https://github.com/${encodeURIComponent(login)}.png?size=96" />`

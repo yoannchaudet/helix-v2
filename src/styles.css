@@ -125,10 +125,10 @@
   --z-toast: 80;
 
   --radius: var(--radius-4xl);
-  --shadow: 0 1px 2px rgba(var(--text-rgb), 0.06),
-    0 8px 24px rgba(var(--text-rgb), 0.06);
-  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto,
-    Helvetica, Arial, sans-serif;
+  --shadow: 0 1px 2px rgba(var(--text-rgb), 0.06), 0 8px 24px rgba(var(--text-rgb), 0.06);
+  --font:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial,
+    sans-serif;
   --mono: "SF Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
 
   --sidebar-w: 232px;
@@ -718,7 +718,9 @@ code,
   color: var(--muted);
   border-radius: var(--radius-xl);
   cursor: pointer;
-  transition: background var(--duration-fast) ease, color var(--duration-fast) ease,
+  transition:
+    background var(--duration-fast) ease,
+    color var(--duration-fast) ease,
     border-color var(--duration-fast) ease;
 }
 
@@ -744,10 +746,7 @@ code,
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  background: conic-gradient(
-    var(--accent) calc(var(--poll-progress, 0) * 360deg),
-    transparent 0
-  );
+  background: conic-gradient(var(--accent) calc(var(--poll-progress, 0) * 360deg), transparent 0);
   opacity: 0.2;
   pointer-events: none;
 }
@@ -878,7 +877,9 @@ code,
   /* Inert while hidden so a click on the reserved (transparent) slot never marks a row
      done — it's only revealed + clickable on hover or keyboard focus. */
   pointer-events: none;
-  transition: opacity var(--duration-fast) ease, color var(--duration-fast) ease,
+  transition:
+    opacity var(--duration-fast) ease,
+    color var(--duration-fast) ease,
     background var(--duration-fast) ease;
 }
 
@@ -1518,7 +1519,9 @@ code {
   box-shadow: var(--toast-shadow);
   opacity: 0;
   pointer-events: none;
-  transition: opacity var(--duration-medium) ease, transform var(--duration-medium) ease;
+  transition:
+    opacity var(--duration-medium) ease,
+    transform var(--duration-medium) ease;
 }
 
 .toast--show {
@@ -1623,7 +1626,9 @@ input[type="text"] {
   border: 1px solid var(--border);
   border-radius: var(--radius-2xl);
   outline: none;
-  transition: border-color var(--duration-base) ease, box-shadow var(--duration-base) ease;
+  transition:
+    border-color var(--duration-base) ease,
+    box-shadow var(--duration-base) ease;
 }
 
 input[type="number"]:focus,
@@ -1650,7 +1655,9 @@ input[type="text"]:focus {
   padding: var(--space-9) var(--space-16);
   border-radius: var(--radius-2xl);
   cursor: pointer;
-  transition: background var(--duration-base) ease, border-color var(--duration-base) ease,
+  transition:
+    background var(--duration-base) ease,
+    border-color var(--duration-base) ease,
     opacity var(--duration-base) ease;
 }
 
@@ -1775,7 +1782,9 @@ input[type="text"]:focus {
   font-weight: 500;
   color: var(--muted);
   cursor: pointer;
-  transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
+  transition:
+    background var(--duration-fast) ease,
+    color var(--duration-fast) ease;
 }
 
 .seg-opt input:checked + span {
@@ -1970,7 +1979,9 @@ input[type="text"]:focus {
   font-size: 0.84rem;
   text-align: left;
   cursor: pointer;
-  transition: background var(--duration-quick) ease, color var(--duration-quick) ease;
+  transition:
+    background var(--duration-quick) ease,
+    color var(--duration-quick) ease;
 }
 
 .context-menu-item:hover:not(:disabled),

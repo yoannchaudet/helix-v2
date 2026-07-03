@@ -136,9 +136,7 @@ function renderSyncStats(status) {
   } else if (status.last_status === "success") {
     // Green only confirms a sync that happened in this session. On launch we're showing
     // cached local state, so the same "success" record renders neutral with its age.
-    const label = status.last_sync_at
-      ? `Synced ${relTime(status.last_sync_at)}`
-      : "Synced";
+    const label = status.last_sync_at ? `Synced ${relTime(status.last_sync_at)}` : "Synced";
     setSyncStatus(session.syncedThisSession ? "success" : "neutral", label);
   } else {
     setSyncStatus("pending", "Never synced");

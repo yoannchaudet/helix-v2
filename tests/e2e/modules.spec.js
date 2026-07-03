@@ -58,7 +58,9 @@ test("the Notifications module shows the sidebar; Dependabot hides it", async ({
   await expect(page.locator(".sidebar")).toBeVisible();
 });
 
-test("the picker stays in the chrome during Settings; switching modules leaves Settings", async ({ page }) => {
+test("the picker stays in the chrome during Settings; switching modules leaves Settings", async ({
+  page,
+}) => {
   await openApp(page);
 
   await page.locator("#open-settings").click();

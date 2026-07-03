@@ -62,10 +62,7 @@ test("subjectBadge maps a known type to its label + class", () => {
 });
 
 test("subjectBadge falls back to the (escaped) raw type for unknown subjects", () => {
-  assert.equal(
-    subjectBadge("<weird>"),
-    '<span class="badge badge--other">&lt;weird&gt;</span>',
-  );
+  assert.equal(subjectBadge("<weird>"), '<span class="badge badge--other">&lt;weird&gt;</span>');
 });
 
 test("stateBadge renders a pill only for open/closed/merged", () => {
@@ -145,7 +142,7 @@ test("notificationRow escapes untrusted fields (title, url, thread id)", () => {
   const row = notificationRow({
     ...baseNotification,
     thread_id: 't"1',
-    subject_title: '<img src=x onerror=alert(1)>',
+    subject_title: "<img src=x onerror=alert(1)>",
     subject_html_url: 'https://e.x/"onmouseover="alert(1)',
   });
   assert.ok(!row.includes("<img src=x"), "raw HTML title must not appear unescaped");
@@ -169,9 +166,7 @@ test("notificationRow marks rows with a URL as openable, and bare rows as not", 
 
 test("notificationRow shows the subject number only when present", () => {
   assert.ok(notificationRow(baseNotification).includes('<span class="n-number">#42</span>'));
-  assert.ok(
-    !notificationRow({ ...baseNotification, subject_number: null }).includes("n-number"),
-  );
+  assert.ok(!notificationRow({ ...baseNotification, subject_number: null }).includes("n-number"));
 });
 
 test("notificationRow shows the subject author only when present, and escapes it", () => {
@@ -179,14 +174,12 @@ test("notificationRow shows the subject author only when present, and escapes it
   assert.ok(withAuthor.includes('<span class="n-author"'));
   assert.ok(withAuthor.includes(">octocat</span>"));
 
-  assert.ok(
-    !notificationRow({ ...baseNotification, subject_author: null }).includes("n-author"),
-  );
+  assert.ok(!notificationRow({ ...baseNotification, subject_author: null }).includes("n-author"));
   assert.ok(!notificationRow(baseNotification).includes("n-author"));
 
   const evil = notificationRow({
     ...baseNotification,
-    subject_author: '<img src=x onerror=alert(1)>',
+    subject_author: "<img src=x onerror=alert(1)>",
   });
   assert.ok(!evil.includes("<img src=x"), "raw HTML author must not appear unescaped");
   assert.ok(evil.includes("&lt;img src=x onerror=alert(1)&gt;"));
@@ -219,7 +212,7 @@ test("authorTag returns empty string for a missing author", () => {
 });
 
 test("authorTag escapes the login (including for bots)", () => {
-  const tag = authorTag('<x>[bot]');
+  const tag = authorTag("<x>[bot]");
   assert.ok(!tag.includes("<x>"), "raw HTML must not appear unescaped");
   assert.ok(tag.includes("&lt;x&gt;"));
   assert.ok(tag.includes("n-bot-icon"));

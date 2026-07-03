@@ -23,9 +23,7 @@ test("opens Settings with the ⌘, / Ctrl, shortcut", async ({ page }) => {
   await expect(page.locator("#view-settings")).toBeVisible();
 });
 
-test("rejects a poll interval below the minimum, then accepts a valid one", async ({
-  page,
-}) => {
+test("rejects a poll interval below the minimum, then accepts a valid one", async ({ page }) => {
   await openApp(page);
   await page.locator("#open-settings").click();
 
@@ -57,9 +55,7 @@ test("the theme picker paints the document and persists the choice", async ({ pa
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
 
   // The choice is mirrored to localStorage for the no-FOUC head script.
-  await expect.poll(() => page.evaluate(() => localStorage.getItem("helix-theme"))).toBe(
-    "light",
-  );
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("helix-theme"))).toBe("light");
 });
 
 test("surfaces GitHub's poll-cadence override (refresh tooltip + Settings note)", async ({
@@ -85,9 +81,7 @@ test("surfaces GitHub's poll-cadence override (refresh tooltip + Settings note)"
   );
 });
 
-test("no override note when the user's interval already meets GitHub's floor", async ({
-  page,
-}) => {
+test("no override note when the user's interval already meets GitHub's floor", async ({ page }) => {
   // Default fixture: user 3600s ≥ GitHub's 60s, so nothing is overridden.
   await openApp(page);
 

@@ -1,12 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  MODULES,
-  DEFAULT_MODULE_ID,
-  isModuleId,
-  moduleAt,
-} from "../src/js/modules-model.js";
+import { MODULES, DEFAULT_MODULE_ID, isModuleId, moduleAt } from "../src/js/modules-model.js";
 
 /* --------------------------------- MODULES -------------------------------- */
 test("MODULES lists the expected top-level modules in picker order", () => {

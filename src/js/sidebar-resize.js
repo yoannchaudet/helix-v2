@@ -3,11 +3,7 @@
    `initSidebarResize()` once after the DOM is ready. */
 
 import { $ } from "./dom.js";
-import {
-  SIDEBAR_MIN_FALLBACK_PX,
-  SIDEBAR_MAX_PX,
-  SIDEBAR_KEY_STEP_PX,
-} from "./constants.js";
+import { SIDEBAR_MIN_FALLBACK_PX, SIDEBAR_MAX_PX, SIDEBAR_KEY_STEP_PX } from "./constants.js";
 
 export function initSidebarResize() {
   const resizer = $("#sidebar-resizer");
@@ -15,8 +11,7 @@ export function initSidebarResize() {
 
   const root = document.documentElement;
   const min =
-    parseInt(getComputedStyle(root).getPropertyValue("--sidebar-w"), 10) ||
-    SIDEBAR_MIN_FALLBACK_PX;
+    parseInt(getComputedStyle(root).getPropertyValue("--sidebar-w"), 10) || SIDEBAR_MIN_FALLBACK_PX;
   const max = SIDEBAR_MAX_PX;
   const STEP = SIDEBAR_KEY_STEP_PX;
   let current = min;

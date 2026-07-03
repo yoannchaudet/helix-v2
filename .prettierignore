@@ -1,0 +1,11 @@
+node_modules
+package-lock.json
+src-tauri/target
+src-tauri/gen
+dist
+
+# HTML is excluded: this is a Tauri/WKWebView app where inter-element whitespace
+# can be rendering-significant, so we don't let Prettier reflow markup.
+*.html
+# Markdown/docs are left to authors' discretion for now.
+*.md

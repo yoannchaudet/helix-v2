@@ -88,4 +88,3 @@ window.addEventListener("DOMContentLoaded", () => {
   // safety-net (see lib.rs) reveals the window if this call ever fails.
   invoke("show_main_window").catch(() => {});
 });
-
