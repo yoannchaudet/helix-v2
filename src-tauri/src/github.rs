@@ -520,6 +520,12 @@ where
 
 /// Search page size (the Search API caps `per_page` at 100).
 const SEARCH_PER_PAGE: u32 = 100;
+/// Delay between Search API page requests. The Search API is far stricter than the core REST
+/// API — firing pages back-to-back trips a **secondary** rate limit (an abuse/burst guard,
+/// distinct from the 30/min primary quota). Spacing pages by ~1s keeps us gentle enough to
+/// avoid it while staying well under the primary limit (search caps pagination at 1000
+/// results = 10 pages, so this adds at most ~9s for the largest possible result set).
+const SEARCH_PAGE_DELAY: std::time::Duration = std::time::Duration::from_millis(1000);
 /// The fixed query behind the Dependabot module: every **open pull request authored by
 /// Dependabot** in a non-archived repo the token can see. `app/dependabot` targets the
 /// Dependabot GitHub App (its PR author login is `dependabot[bot]`).
@@ -691,7 +697,12 @@ where
         on_page(page, prs.len());
 
         match next {
-            Some(next_url) => url = next_url,
+            Some(next_url) => {
+                url = next_url;
+                // Pace pagination so the next page request doesn't burst into a secondary
+                // rate limit (see `SEARCH_PAGE_DELAY`).
+                tokio::time::sleep(SEARCH_PAGE_DELAY).await;
+            }
             None => break,
         }
     }
