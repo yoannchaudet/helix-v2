@@ -128,5 +128,9 @@ export function filterGroups(groups, filterId, repoId) {
     result = result.filter((g) => g.repo_id === repoId);
   }
   // Bubble the repo with the most recently updated matching notification to the top.
-  return sortReposByRecency(result, (g) => g.notifications, (g) => g.full_name);
+  return sortReposByRecency(
+    result,
+    (g) => g.notifications,
+    (g) => g.full_name,
+  );
 }

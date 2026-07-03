@@ -19,8 +19,7 @@ export function installTauriMock(fixtures) {
   };
   window.__TAURI_CALLS__ = [];
 
-  const countAll = () =>
-    state.inbox.reduce((sum, g) => sum + g.notifications.length, 0);
+  const countAll = () => state.inbox.reduce((sum, g) => sum + g.notifications.length, 0);
 
   const handlers = {
     show_main_window: () => null,
@@ -56,9 +55,7 @@ export function installTauriMock(fixtures) {
     list_inbox: () => JSON.parse(JSON.stringify(state.inbox)),
     list_bookmarks: () => {
       // is_done is derived: a bookmark not present in the live inbox is done/removed.
-      const inboxIds = new Set(
-        state.inbox.flatMap((g) => g.notifications.map((n) => n.thread_id)),
-      );
+      const inboxIds = new Set(state.inbox.flatMap((g) => g.notifications.map((n) => n.thread_id)));
       const groups = (state.bookmarks ?? []).map((g) => ({
         ...g,
         notifications: g.notifications.map((n) => ({
@@ -145,9 +142,7 @@ export function defaultFixtures() {
       last_status: "success",
       last_error: null,
       github_poll_interval_s: 60,
-      rate_buckets: [
-        { resource: "core", limit: 5000, remaining: 4800, reset_at: 4102444800 },
-      ],
+      rate_buckets: [{ resource: "core", limit: 5000, remaining: 4800, reset_at: 4102444800 }],
     },
     appVersion: "0.1.0",
     updaterEnabled: false,

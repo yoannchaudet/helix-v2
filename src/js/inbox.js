@@ -166,9 +166,7 @@ function focusTargetAfterRemoval(removedIds) {
   // path keep the user where they are.
   if (firstRemoved === -1) return null;
   const after = flat.slice(firstRemoved + 1).find((n) => !removed.has(n.thread_id));
-  const before = [...flat.slice(0, firstRemoved)]
-    .reverse()
-    .find((n) => !removed.has(n.thread_id));
+  const before = [...flat.slice(0, firstRemoved)].reverse().find((n) => !removed.has(n.thread_id));
   const survivor = after || before;
   // Nothing left to focus in the list — keep focus in a sensible place by sending it to the
   // inbox container (made programmatically focusable in renderInbox's empty branch).
@@ -215,9 +213,7 @@ function renderInbox() {
     // The intended row is gone (e.g. removed by a background reconcile) — keep the user in
     // the list on the first row rather than dropping focus to <body>.
     if (!landed) {
-      inbox
-        .querySelector(".n-open[tabindex], .n-done")
-        ?.focus({ preventScroll });
+      inbox.querySelector(".n-open[tabindex], .n-done")?.focus({ preventScroll });
     }
   }
 }
@@ -412,10 +408,7 @@ function announceView() {
 
 export async function loadInbox() {
   try {
-    const [inbox, bookmarks] = await Promise.all([
-      invoke("list_inbox"),
-      invoke("list_bookmarks"),
-    ]);
+    const [inbox, bookmarks] = await Promise.all([invoke("list_inbox"), invoke("list_bookmarks")]);
     inboxGroups = inbox;
     bookmarkGroups = bookmarks;
     // Drop a repo refinement whose repository is no longer present in the active dataset.
@@ -454,10 +447,7 @@ function reportMutation(result, verb) {
   if (failed.length) {
     // setSyncProgress cancels any pending "clear" timer from an earlier success so it
     // can't wipe this error message out from under the user.
-    setSyncProgress(
-      `${result.ok} ${verb}, ${failed.length} failed: ${failed[0].error}`,
-      "error",
-    );
+    setSyncProgress(`${result.ok} ${verb}, ${failed.length} failed: ${failed[0].error}`, "error");
   } else if (result.ok > 0) {
     flashSyncProgress(`${result.ok} ${verb}.`, "success");
   }
@@ -476,8 +466,7 @@ async function markDone(threadIds) {
   // we mutate it, so keyboard users aren't dropped to <body> when their row is removed.
   // Exception: in the Bookmarks filter the row doesn't vanish (it stays as a now-done
   // snapshot), so retargeting focus would be a jarring hop — keep the user on the same row.
-  const focusTarget =
-    activeFilter === "bookmarked" ? null : focusTargetAfterRemoval(ids);
+  const focusTarget = activeFilter === "bookmarked" ? null : focusTargetAfterRemoval(ids);
   // Optimistic: drop the rows locally so they disappear immediately.
   const idSet = new Set(ids);
   inboxGroups = inboxGroups
@@ -711,7 +700,6 @@ function onCommandKeydown(e) {
   }
 }
 
-
 /** Confirm + mark all of one repo's (filtered) notifications done, from its header icon.
  *  Skips already-done rows (only present in the Bookmarks filter). */
 function confirmRepoDone(btn) {
@@ -830,7 +818,9 @@ export function initInbox() {
     }
     const btn = e.currentTarget;
     confirmDone(
-      visibleNotifications().filter((n) => !n.is_done).map((n) => n.thread_id),
+      visibleNotifications()
+        .filter((n) => !n.is_done)
+        .map((n) => n.thread_id),
       btn,
     );
     // Reflect the expanded state for assistive tech (closeMenu resets it). Only when the

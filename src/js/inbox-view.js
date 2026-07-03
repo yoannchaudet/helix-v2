@@ -92,15 +92,11 @@ export function notificationRow(n) {
   const badge = stateBadge(n.subject_state);
   const merge = mergeStateBadge(n.subject_mergeable_state, n.subject_type, n.subject_state);
   const stateLine =
-    badge || merge
-      ? html`<div class="n-state">${rawHtml(badge)}${rawHtml(merge)}</div>`
-      : "";
+    badge || merge ? html`<div class="n-state">${rawHtml(badge)}${rawHtml(merge)}</div>` : "";
   // Only rows with a resolved web URL are openable (clickable + hover affordance).
   const url = n.subject_html_url || "";
   const isNew = n.is_new ? " n-row--new" : "";
-  const author = n.subject_author
-    ? authorTag(n.subject_author)
-    : "";
+  const author = n.subject_author ? authorTag(n.subject_author) : "";
   const bookmarked = !!n.bookmarked;
   const done = !!n.is_done;
   const cls = `n-row${url ? " n-row--openable" : ""}${isNew}${bookmarked ? " n-row--bookmarked" : ""}${done ? " n-row--done" : ""}`;
@@ -124,7 +120,7 @@ export function notificationRow(n) {
     attrs: html`aria-pressed="${bookmarked ? "true" : "false"}"`,
   });
   return html`
-    <li class="${cls}" data-thread-id="${n.thread_id}"${rawHtml(done ? " data-done=\"true\"" : "")}>
+    <li class="${cls}" data-thread-id="${n.thread_id}"${rawHtml(done ? ' data-done="true"' : "")}>
       <div class="n-open"${rawHtml(openAttrs)}>
         <span class="n-badge-slot">${rawHtml(subjectBadge(n.subject_type))}</span>
         <div class="n-main">

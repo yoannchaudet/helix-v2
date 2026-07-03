@@ -6,9 +6,7 @@ import { openApp, signedOutFixtures } from "./tauri-mock.js";
 test("signed out: the inbox prompts to connect an account", async ({ page }) => {
   await openApp(page, signedOutFixtures());
 
-  await expect(page.locator(".inbox-empty")).toContainText(
-    "Connect your GitHub account",
-  );
+  await expect(page.locator(".inbox-empty")).toContainText("Connect your GitHub account");
   await expect(page.locator(".inbox-empty .js-goto-settings")).toBeVisible();
 });
 

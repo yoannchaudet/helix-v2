@@ -54,18 +54,12 @@ test("the subject-type pills narrow the whole view and reduce counts", async ({ 
 
   // All three pills are on by default → the full fixture shows (2 PRs + 1 Issue).
   await expect(page.locator(".type-pill")).toHaveCount(3);
-  await expect(page.locator('.type-pill[data-type="pr"]')).toHaveAttribute(
-    "aria-pressed",
-    "true",
-  );
+  await expect(page.locator('.type-pill[data-type="pr"]')).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator("#inbox .n-row")).toHaveCount(3);
 
   // Turn PRs off → only the Issue (t2, octo/hello) remains; acme/widgets (PR-only) drops out.
   await page.locator('.type-pill[data-type="pr"]').click();
-  await expect(page.locator('.type-pill[data-type="pr"]')).toHaveAttribute(
-    "aria-pressed",
-    "false",
-  );
+  await expect(page.locator('.type-pill[data-type="pr"]')).toHaveAttribute("aria-pressed", "false");
   // Toggling updates the pill in place, so the activated pill keeps focus (no DOM teardown).
   await expect(page.locator('.type-pill[data-type="pr"]')).toBeFocused();
   await expect(page.locator("#inbox .n-row")).toHaveCount(1);

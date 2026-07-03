@@ -27,9 +27,7 @@ const SHORTCUTS = [
   },
   {
     group: "Filters",
-    items: [
-      { keys: ["1"], desc: "Switch smart filter (1 = All … 7 = Bookmarks)" },
-    ],
+    items: [{ keys: ["1"], desc: "Switch smart filter (1 = All … 7 = Bookmarks)" }],
   },
   {
     group: "General",
@@ -128,8 +126,7 @@ export function initShortcuts() {
     // Don't hijack typing in form fields.
     const t = e.target;
     const typing =
-      t instanceof HTMLElement &&
-      (t.matches("input, textarea, select") || t.isContentEditable);
+      t instanceof HTMLElement && (t.matches("input, textarea, select") || t.isContentEditable);
 
     if (overlay) {
       if (e.key === "Escape") {

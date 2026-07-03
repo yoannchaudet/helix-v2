@@ -114,6 +114,22 @@ npm run test:e2e
 > ships on, so engine-specific behavior (the focusout/click race, clipboard)
 > still has to be smoke-tested by hand on a real build.
 
+### Linting
+
+CI enforces formatting and lints on every PR; run them locally before pushing:
+
+```sh
+npm run lint                       # Prettier --check (JS/CSS/JSON)
+npm run format                     # Prettier --write to auto-fix
+cd src-tauri && cargo fmt --check  # Rust formatting
+cd src-tauri && cargo clippy --all-targets -- -D warnings
+```
+
+Prettier's [embedded-language formatting is disabled](.prettierrc.json) so it
+never reflows the `html`-tagged template literals in `src/js/` (their
+inter-element whitespace is rendering-significant); HTML and Markdown are left to
+authors' discretion (see `.prettierignore`).
+
 ### Token storage (macOS)
 
 Where Helix keeps your GitHub PAT depends on the build:

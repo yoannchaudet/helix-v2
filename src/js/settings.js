@@ -110,9 +110,7 @@ let settingsApplySeq = 0;
  *  Used at init with the fallback, then by `loadSettings()` with the backend's value.
  *  Guards against a missing/non-numeric value so the clamp can never become NaN. */
 function applyPollMin(seconds) {
-  poll.minIntervalS = Number.isInteger(seconds)
-    ? seconds
-    : FALLBACK_MIN_POLL_INTERVAL_S;
+  poll.minIntervalS = Number.isInteger(seconds) ? seconds : FALLBACK_MIN_POLL_INTERVAL_S;
   const input = $("#poll-interval");
   if (input) input.min = String(poll.minIntervalS);
   const label = $("#poll-min-label");

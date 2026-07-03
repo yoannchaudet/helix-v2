@@ -57,8 +57,7 @@ function onMenuKeydown(e) {
   const idx = items.indexOf(document.activeElement);
   let next = null;
   if (e.key === "ArrowDown") next = items[idx < 0 ? 0 : (idx + 1) % items.length];
-  else if (e.key === "ArrowUp")
-    next = items[idx <= 0 ? items.length - 1 : idx - 1];
+  else if (e.key === "ArrowUp") next = items[idx <= 0 ? items.length - 1 : idx - 1];
   else if (e.key === "Home") next = items[0];
   else if (e.key === "End") next = items[items.length - 1];
   else if (e.key === "Tab") {
@@ -104,8 +103,7 @@ export function openContextMenu(x, y, items) {
   const previouslyFocused = document.activeElement;
   closeMenu(false);
   if (!reopening) {
-    menuReturnFocus =
-      previouslyFocused instanceof HTMLElement ? previouslyFocused : null;
+    menuReturnFocus = previouslyFocused instanceof HTMLElement ? previouslyFocused : null;
   }
   const menu = document.createElement("div");
   menu.className = "context-menu";
