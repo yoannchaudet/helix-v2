@@ -526,9 +526,18 @@ const SEARCH_PER_PAGE: u32 = 100;
 /// avoid it while staying well under the primary limit (search caps pagination at 1000
 /// results = 10 pages, so this adds at most ~9s for the largest possible result set).
 const SEARCH_PAGE_DELAY: std::time::Duration = std::time::Duration::from_millis(1000);
+/// How many search pages to fetch at most. GitHub's Search API is aggressively burst-limited
+/// (a *secondary* rate limit, distinct from the 30/min primary quota), and paginating deeply
+/// reliably trips it — especially once an account has been throttled, since the penalty
+/// escalates. Capping at a single page keeps each sync to **one** search request (the safest
+/// possible footprint) at the cost of showing "only" the most-recently-updated 100 PRs; the
+/// rest are reported as an incomplete result so they're never reconcile-deleted. Bump this if
+/// paged fetching proves reliable in practice.
+const SEARCH_MAX_PAGES: u32 = 1;
 /// The fixed query behind the Dependabot module: every **open pull request authored by
-/// Dependabot** in a non-archived repo the token can see. `app/dependabot` targets the
-/// Dependabot GitHub App (its PR author login is `dependabot[bot]`).
+/// Dependabot** in a non-archived repo the token can see, most-recently-updated first (so a
+/// single capped page surfaces the freshest PRs). `app/dependabot` targets the Dependabot
+/// GitHub App (its PR author login is `dependabot[bot]`).
 const DEPENDABOT_SEARCH_QUERY: &str = "is:pr is:open author:app/dependabot archived:false";
 
 /// One open Dependabot pull request as returned by the Search API, flattened to just the
@@ -625,7 +634,9 @@ where
     let client = reqwest::Client::new();
     // GitHub search accepts `+` for spaces in the `q` parameter; `:` and `/` are valid as-is.
     let q = DEPENDABOT_SEARCH_QUERY.replace(' ', "+");
-    let mut url = format!("{API_BASE}/search/issues?q={q}&per_page={SEARCH_PER_PAGE}");
+    let mut url = format!(
+        "{API_BASE}/search/issues?q={q}&sort=updated&order=desc&per_page={SEARCH_PER_PAGE}"
+    );
     let mut prs: Vec<DependabotPr> = Vec::new();
     let mut rate = RateLimit::default();
     let mut page: u32 = 0;
@@ -698,6 +709,14 @@ where
 
         match next {
             Some(next_url) => {
+                // Stop at the page cap — treat the remainder as an incomplete result (so the
+                // caller won't reconcile-delete the PRs we didn't fetch). Keeps each sync to
+                // `SEARCH_MAX_PAGES` search requests, avoiding the pagination burst that trips
+                // GitHub's secondary rate limit.
+                if page >= SEARCH_MAX_PAGES {
+                    incomplete = true;
+                    break;
+                }
                 url = next_url;
                 // Pace pagination so the next page request doesn't burst into a secondary
                 // rate limit (see `SEARCH_PAGE_DELAY`).

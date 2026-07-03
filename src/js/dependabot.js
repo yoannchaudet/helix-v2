@@ -324,7 +324,12 @@ export async function syncDependabot() {
   } catch (err) {
     syncing = false;
     setDepStatus("error", "Error");
-    setDepProgress(String(err), "error");
+    // GitHub's raw rate-limit 403 body is noisy; show a short, actionable message instead.
+    const raw = String(err);
+    const friendly = /rate limit/i.test(raw)
+      ? "GitHub is rate-limiting requests right now. Wait a few minutes, then sync again."
+      : raw;
+    setDepProgress(friendly, "error");
   } finally {
     syncing = false;
     setDepBusy(false);
