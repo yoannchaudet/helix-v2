@@ -195,15 +195,20 @@ pub async fn sync_dependabot(
         });
     }
 
-    let search_owners = owners.clone();
-    let (result, token) =
-        sync_dependabot_core(&state.db, app.clone(), move |token, on_page| async move {
-            github::search_dependabot_prs(&token, &search_owners, &self_login, on_page).await
-        })
-        .await?;
+    let fetch_owners = owners.clone();
+    let (result, token) = sync_dependabot_core(
+        &state.db,
+        app.clone(),
+        move |token, on_progress| async move {
+            github::fetch_admin_dependabot_prs(&token, &fetch_owners, &self_login, on_progress)
+                .await
+        },
+    )
+    .await?;
 
-    // Prune any cached PRs outside the current scope (e.g. a just-deselected org, or rows the
-    // incomplete-result guard kept from a broader earlier scope).
+    // Prune any cached PRs outside the current scope (e.g. a just-deselected owner). The
+    // enumeration is complete, so `store_prs` reconciles within scope; this covers scope
+    // *narrowing* independently of that.
     best_effort(&state.db.0, "pruning Dependabot cache to owners", |conn| {
         dependabot::prune_to_owners(conn, &owners).map(|_| ())
     });
@@ -217,19 +222,19 @@ pub async fn sync_dependabot(
     Ok(result)
 }
 
-/// Tauri-free core of [`sync_dependabot`]: reads the token, searches via the injected
-/// `search` closure, stores + reconciles the results, folds the rate snapshot, and emits
-/// lifecycle events through `sink`. Returns the [`DependabotSyncResult`] with the token used,
-/// so the wrapper hands the same credential to the background merge-state resolver.
-async fn sync_dependabot_core<S, Search, Fut>(
+/// Tauri-free core of [`sync_dependabot`]: reads the token, fetches via the injected `fetch`
+/// closure, stores + reconciles the results, folds the rate snapshot, and emits lifecycle
+/// events through `sink`. Returns the [`DependabotSyncResult`] with the token used, so the
+/// wrapper hands the same credential to the background merge-state resolver.
+async fn sync_dependabot_core<S, Fetch, Fut>(
     db: &Db,
     sink: S,
-    search: Search,
+    fetch: Fetch,
 ) -> Result<(DependabotSyncResult, String), String>
 where
     S: EventSink + Clone + Send + Sync + 'static,
-    Search: FnOnce(String, Box<dyn Fn(u32, usize) + Send>) -> Fut,
-    Fut: std::future::Future<Output = Result<github::DependabotSearchOutcome, github::GitHubError>>,
+    Fetch: FnOnce(String, Box<dyn Fn(usize, usize) + Send>) -> Fut,
+    Fut: std::future::Future<Output = Result<github::DependabotFetchOutcome, github::GitHubError>>,
 {
     let token = auth::read_token(db)?
         .ok_or_else(|| "Not connected — add a GitHub token first.".to_string())?;
@@ -237,13 +242,13 @@ where
     sink.emit("dependabot:started", serde_json::Value::Null);
 
     let progress_sink = sink.clone();
-    let on_page: Box<dyn Fn(u32, usize) + Send> = Box::new(move |page, fetched| {
+    let on_progress: Box<dyn Fn(usize, usize) + Send> = Box::new(move |scanned, found| {
         progress_sink.emit(
             "dependabot:progress",
-            serde_json::json!({ "page": page, "fetched": fetched }),
+            serde_json::json!({ "scanned": scanned, "found": found }),
         );
     });
-    let outcome = match search(token.clone(), on_page).await {
+    let outcome = match fetch(token.clone(), on_progress).await {
         Ok(o) => o,
         Err(err) => {
             let err = err.to_string();
@@ -255,7 +260,7 @@ where
         }
     };
 
-    // Store the PRs and persist the search bucket's rate snapshot.
+    // Store the PRs and persist the core bucket's rate snapshot.
     let store_result = (|| -> Result<dependabot::StoreOutcome, String> {
         let mut guard = db.0.lock().map_err(|e| e.to_string())?;
         let conn: &mut rusqlite::Connection = &mut guard;
@@ -415,7 +420,7 @@ mod tests {
 
     use super::*;
     use crate::github::{
-        DependabotPr, DependabotSearchOutcome, GitHubError, RateLimit, ResolveError, ResolveResult,
+        DependabotFetchOutcome, DependabotPr, GitHubError, RateLimit, ResolveError, ResolveResult,
         ResolvedSubject,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -564,15 +569,15 @@ mod tests {
         let (result, token) = tauri::async_runtime::block_on(sync_dependabot_core(
             &db,
             sink.clone(),
-            |token, on_page| async move {
+            |token, on_progress| async move {
                 assert_eq!(token, "test-token");
-                on_page(1, 2);
-                Ok(DependabotSearchOutcome {
+                on_progress(1, 2);
+                Ok(DependabotFetchOutcome {
                     prs: vec![
                         pr(1, "octo/repo-a", 10, "Bump a"),
                         pr(2, "octo/repo-b", 11, "Bump b"),
                     ],
-                    rate: rate("search", 28, 30),
+                    rate: rate("core", 4990, 5000),
                     complete: true,
                 })
             },
@@ -581,7 +586,7 @@ mod tests {
 
         assert_eq!(result.count, 2);
         assert_eq!(result.removed, 0);
-        assert_eq!(result.rate_remaining, Some(28));
+        assert_eq!(result.rate_remaining, Some(4990));
         assert_eq!(token, "test-token");
         assert_eq!(pr_count(&db), 2);
         assert_eq!(
@@ -594,7 +599,7 @@ mod tests {
         );
         assert_eq!(
             sink.payload("dependabot:progress"),
-            Some(serde_json::json!({ "page": 1, "fetched": 2 }))
+            Some(serde_json::json!({ "scanned": 1, "found": 2 }))
         );
     }
 
@@ -615,9 +620,9 @@ mod tests {
             &db,
             sink.clone(),
             |_, _| async move {
-                Ok(DependabotSearchOutcome {
+                Ok(DependabotFetchOutcome {
                     prs: vec![pr(1, "octo/repo-a", 10, "Bump a")],
-                    rate: rate("search", 27, 30),
+                    rate: rate("core", 4980, 5000),
                     complete: true,
                 })
             },
@@ -639,7 +644,7 @@ mod tests {
             tauri::async_runtime::block_on(sync_dependabot_core(&db, sink.clone(), |_, _| {
                 called = true;
                 async move {
-                    Ok(DependabotSearchOutcome {
+                    Ok(DependabotFetchOutcome {
                         prs: vec![],
                         rate: RateLimit::default(),
                         complete: true,

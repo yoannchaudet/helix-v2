@@ -71,6 +71,16 @@ impl std::fmt::Display for GitHubError {
 
 impl std::error::Error for GitHubError {}
 
+impl GitHubError {
+    /// Whether this is GitHub telling us we're rate-limited: a **403 Forbidden** whose body
+    /// mentions a rate limit (both the primary "API rate limit exceeded" and the secondary
+    /// "exceeded a secondary rate limit" surface as 403). A non-rate 403 (scope/SAML) returns
+    /// false so it isn't mistaken for throttling.
+    pub fn is_rate_limited(&self) -> bool {
+        matches!(self, GitHubError::Forbidden(body) if body.to_lowercase().contains("rate limit"))
+    }
+}
+
 impl From<GitHubError> for String {
     fn from(e: GitHubError) -> Self {
         e.to_string()
@@ -373,13 +383,7 @@ impl ResolveError {
     /// deliberately excluded so it's treated as an ordinary per-row failure and doesn't starve
     /// the rest of the queue by aborting every pass.
     pub fn should_back_off(&self) -> bool {
-        if self.rate.retry_after.is_some() {
-            return true;
-        }
-        match &self.error {
-            GitHubError::Forbidden(body) => body.to_lowercase().contains("rate limit"),
-            _ => false,
-        }
+        self.rate.retry_after.is_some() || self.error.is_rate_limited()
     }
 }
 
@@ -569,53 +573,19 @@ where
     Ok(FetchOutcome { threads, rate })
 }
 
-/* ----------------------------- Dependabot search -------------------------- */
+/* --------------------------- Dependabot enumeration ----------------------- */
 
-/// Search page size (the Search API caps `per_page` at 100).
-const SEARCH_PER_PAGE: u32 = 100;
-/// Delay between Search API page requests. The Search API is far stricter than the core REST
-/// API — firing pages back-to-back trips a **secondary** rate limit (an abuse/burst guard,
-/// distinct from the 30/min primary quota). Spacing pages by ~1s keeps us gentle enough to
-/// avoid it while staying well under the primary limit (search caps pagination at 1000
-/// results = 10 pages, so this adds at most ~9s for the largest possible result set).
-const SEARCH_PAGE_DELAY: std::time::Duration = std::time::Duration::from_millis(1000);
-/// How many search pages to fetch at most. GitHub's Search API is aggressively burst-limited
-/// (a *secondary* rate limit, distinct from the 30/min primary quota), and paginating deeply
-/// reliably trips it — especially once an account has been throttled, since the penalty
-/// escalates. Capping at a single page keeps each sync to **one** search request (the safest
-/// possible footprint) at the cost of showing "only" the most-recently-updated 100 PRs; the
-/// rest are reported as an incomplete result so they're never reconcile-deleted. Bump this if
-/// paged fetching proves reliable in practice.
-const SEARCH_MAX_PAGES: u32 = 1;
-/// The base of the Dependabot search query: every **open pull request authored by
-/// Dependabot** in a non-archived repo. `app/dependabot` targets the Dependabot GitHub App
-/// (its PR author login is `dependabot[bot]`). Owner (`user:`/`org:`) qualifiers that scope it
-/// to the accounts the user cares about are appended by [`build_dependabot_query`].
-const DEPENDABOT_SEARCH_QUERY: &str = "is:pr is:open author:app/dependabot archived:false";
+/// Page size for the repo/PR listings behind the Dependabot module (the REST max).
+const DEPENDABOT_PER_PAGE: u32 = 100;
+/// Delay between the (core-REST) requests the Dependabot enumeration makes. Enumerating admin
+/// repos and their open PRs is many small requests; pacing them serially keeps us clear of
+/// GitHub's secondary rate limit (the burst guard) while staying trivially within the core
+/// 5000/hr budget.
+const DEPENDABOT_REQUEST_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
 
-/// Build the scoped search `q` value: the base query plus one owner qualifier per selected
-/// account — `user:<login>` for the authenticated user (matched via `self_login`) and
-/// `org:<login>` for everyone else. GitHub OR's multiple `user:`/`org:` qualifiers, so this
-/// returns Dependabot PRs across all selected accounts. Spaces are encoded as `+` (valid in a
-/// search `q`); `:`/`/` are fine as-is. (Sorting is applied via the request's `sort`/`order`
-/// params, not here.) Callers must not pass an empty `owners` — an unscoped query would search
-/// every accessible repo.
-fn build_dependabot_query(owners: &[String], self_login: &str) -> String {
-    let mut q = DEPENDABOT_SEARCH_QUERY.to_string();
-    for owner in owners {
-        // GitHub logins are case-insensitive; match the authenticated user regardless of case.
-        if owner.eq_ignore_ascii_case(self_login) {
-            q.push_str(&format!(" user:{owner}"));
-        } else {
-            q.push_str(&format!(" org:{owner}"));
-        }
-    }
-    q.replace(' ', "+")
-}
-
-/// One open Dependabot pull request as returned by the Search API, flattened to just the
-/// fields Helix stores. `pull_url` is the PR's REST API URL (`.../pulls/{n}`), resolved
-/// later to a `mergeable_state` for the merge-readiness pill (search omits it).
+/// One open Dependabot pull request, flattened to just the fields Helix stores. `pull_url` is
+/// the PR's REST API URL (`.../pulls/{n}`), resolved later to a `mergeable_state` for the
+/// merge-readiness pill (the PR *list* endpoint omits it).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DependabotPr {
     pub id: i64,
@@ -631,185 +601,249 @@ pub struct DependabotPr {
     pub updated_at: String,
 }
 
-/// Result of a full Dependabot search: the flattened PRs plus the last response's
-/// rate-limit snapshot (the Search API has its own, smaller bucket — `resource = "search"`).
-/// `complete` is false when GitHub couldn't return the full result set — either it flagged
-/// `incomplete_results` (a timed-out search) or the match count exceeds what pagination can
-/// reach (the Search API caps results at 1000). Callers must NOT reconcile-delete local rows
-/// from an incomplete search, or they'd wrongly drop PRs that simply fell outside the window.
-pub struct DependabotSearchOutcome {
+/// Result of a full Dependabot fetch: the collected PRs plus the last response's rate-limit
+/// snapshot (the `core` bucket). `complete` is true when the enumeration finished normally, so
+/// the caller may reconcile-delete stale local rows; it is only ever false if a future variant
+/// returns partial results.
+pub struct DependabotFetchOutcome {
     pub prs: Vec<DependabotPr>,
     pub rate: RateLimit,
     pub complete: bool,
 }
 
-/// Raw Search API envelope (`GET /search/issues`): a JSON object wrapping the results,
-/// unlike the bare arrays the other endpoints return.
+/// A repository as returned by the repo-list endpoints, with the authenticated user's
+/// permissions (present on authenticated responses). Only the fields we need are deserialized.
 #[derive(Debug, Deserialize)]
-struct SearchIssuesResponse {
-    /// Total matches GitHub found (may exceed the 1000-result pagination cap).
-    total_count: i64,
-    /// True when GitHub's search timed out and the results are partial.
-    incomplete_results: bool,
-    items: Vec<SearchIssueItem>,
+struct RepoListItem {
+    name: String,
+    owner: RepoOwnerLogin,
+    permissions: Option<RepoPermissions>,
 }
 
-/// A single search result. Only the fields Helix needs are deserialized. `pull_request` is
-/// present only for PRs (the query already restricts to `is:pr`, but we guard anyway).
 #[derive(Debug, Deserialize)]
-struct SearchIssueItem {
+struct RepoOwnerLogin {
+    login: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepoPermissions {
+    #[serde(default)]
+    admin: bool,
+}
+
+/// A pull request as returned by the PR *list* endpoint (no `mergeable_state`; that needs the
+/// single-PR GET, done later during resolution). `url` is the PR's REST API URL.
+#[derive(Debug, Deserialize)]
+struct PullListItem {
     id: i64,
     number: i64,
     title: String,
     html_url: String,
+    url: String,
     user: Option<SubjectUser>,
-    /// e.g. `https://api.github.com/repos/octo/repo` — the repo identity is derived from this.
-    repository_url: String,
-    pull_request: Option<SearchPullRequest>,
     created_at: String,
     updated_at: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct SearchPullRequest {
-    /// The PR's REST API URL (`.../pulls/{number}`); resolved for `mergeable_state`.
-    url: String,
+/// Whether `login` is a Dependabot bot author (`dependabot[bot]`, or the legacy
+/// `dependabot-preview[bot]`).
+fn is_dependabot_author(login: &str) -> bool {
+    matches!(login, "dependabot[bot]" | "dependabot-preview[bot]")
 }
 
-/// Split a `repository_url` (`.../repos/{owner}/{name}`) into `(full_name, owner, name)`.
-/// Returns `None` for a URL that doesn't carry both segments.
-fn repo_identity(repository_url: &str) -> Option<(String, String, String)> {
-    let tail = repository_url.rsplit("/repos/").next()?;
-    let (owner, name) = tail.split_once('/')?;
-    if owner.is_empty() || name.is_empty() {
-        return None;
+/// Soft reserve for the admin enumeration: stop before the `core` bucket dips below this
+/// fraction of its limit, so scanning a very large admin scope can't exhaust the quota other
+/// operations need. Stopping early yields an *incomplete* result (the caller then skips
+/// reconcile-delete), so nothing is lost — the rest resolves on a later sync.
+const CORE_RESERVE_FRACTION: f64 = 0.1;
+
+/// Whether the tracked `core` quota has fallen to/below the reserve. Unknown quota (before the
+/// first response populates the headers) is treated as "not low" so enumeration can start.
+fn core_below_reserve(rate: &RateLimit) -> bool {
+    match (rate.remaining, rate.limit) {
+        (Some(remaining), Some(limit)) if limit > 0 => {
+            (remaining as f64) <= CORE_RESERVE_FRACTION * (limit as f64)
+        }
+        _ => false,
     }
-    Some((
-        format!("{owner}/{name}"),
-        owner.to_string(),
-        name.to_string(),
-    ))
 }
 
-/// Search the **selected owners'** repos for open Dependabot PRs, following `Link` pagination.
-///
-/// `owners` are the account logins to scope to (the user + chosen orgs); `self_login` tells
-/// the query builder which one is the authenticated user (→ `user:`) vs an org (→ `org:`).
-/// `on_page` is invoked after each page with `(page_number, total_fetched_so_far)` for live
-/// progress. Items missing a `pull_request` link or an unparseable `repository_url` are
-/// skipped defensively. The last response's rate snapshot (the `search` bucket) is returned so
-/// the caller keeps quota accounting accurate.
-///
-/// Callers must pass a non-empty `owners`; an unscoped search would hit every accessible repo
-/// (and reliably trip the search rate limit). The command layer enforces this.
-pub async fn search_dependabot_prs<F>(
+/// GET a single page and return `(json_body, next_page_url)`, updating `rate` and mapping the
+/// usual auth/forbidden/status/parse failures to [`GitHubError`]. Shared by the repo and PR
+/// list loops below.
+async fn get_page<T: for<'de> serde::Deserialize<'de>>(
+    client: &reqwest::Client,
+    url: &str,
     token: &str,
-    owners: &[String],
+    what: &'static str,
+    rate: &mut RateLimit,
+) -> Result<(T, Option<String>), GitHubError> {
+    let resp = authed_get(client, url, token)
+        .send()
+        .await
+        .map_err(|e| GitHubError::Network(e.to_string()))?;
+    let status = resp.status();
+    rate.update_from(resp.headers());
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(GitHubError::Unauthorized);
+    }
+    if status == reqwest::StatusCode::FORBIDDEN {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(GitHubError::Forbidden(body.trim().to_string()));
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(GitHubError::Status {
+            status,
+            body: body.trim().to_string(),
+        });
+    }
+    let next = next_page_url(resp.headers());
+    let body: T = resp.json().await.map_err(|e| GitHubError::Parse {
+        what,
+        source: e.to_string(),
+    })?;
+    Ok((body, next))
+}
+
+/// List the repositories in `owner` where the authenticated user is an **admin**, following
+/// `Link` pagination. Uses `/user/repos?affiliation=owner` for the user's own account and
+/// `/orgs/{owner}/repos` for an org; both include the authed user's `permissions`. Requests
+/// are paced (see `DEPENDABOT_REQUEST_DELAY`).
+async fn list_admin_repos(
+    client: &reqwest::Client,
+    token: &str,
+    owner: &str,
     self_login: &str,
-    on_page: F,
-) -> Result<DependabotSearchOutcome, GitHubError>
-where
-    F: Fn(u32, usize) + Send,
-{
-    let client = reqwest::Client::new();
-    let q = build_dependabot_query(owners, self_login);
-    let mut url = format!(
-        "{API_BASE}/search/issues?q={q}&sort=updated&order=desc&per_page={SEARCH_PER_PAGE}"
-    );
-    let mut prs: Vec<DependabotPr> = Vec::new();
-    let mut rate = RateLimit::default();
-    let mut page: u32 = 0;
-    // Completeness tracking: total matches (from the envelope) and whether GitHub ever
-    // flagged the results as partial. Used to decide if the caller may reconcile-delete.
-    let mut total_count: Option<i64> = None;
-    let mut incomplete = false;
-
+    rate: &mut RateLimit,
+) -> Result<Vec<(String, String)>, GitHubError> {
+    let mut url = if owner.eq_ignore_ascii_case(self_login) {
+        format!("{API_BASE}/user/repos?affiliation=owner&per_page={DEPENDABOT_PER_PAGE}")
+    } else {
+        format!("{API_BASE}/orgs/{owner}/repos?per_page={DEPENDABOT_PER_PAGE}")
+    };
+    let mut repos = Vec::new();
     loop {
-        page += 1;
-        let resp = authed_get(&client, &url, token)
-            .send()
-            .await
-            .map_err(|e| GitHubError::Network(e.to_string()))?;
-
-        let status = resp.status();
-        rate.update_from(resp.headers());
-
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(GitHubError::Unauthorized);
+        let (page, next): (Vec<RepoListItem>, _) =
+            get_page(client, &url, token, "repositories", rate).await?;
+        for r in page {
+            if r.permissions.map(|p| p.admin).unwrap_or(false) {
+                repos.push((r.owner.login, r.name));
+            }
         }
-        if status == reqwest::StatusCode::FORBIDDEN {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(GitHubError::Forbidden(body.trim().to_string()));
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(GitHubError::Status {
-                status,
-                body: body.trim().to_string(),
-            });
-        }
-
-        let next = next_page_url(resp.headers());
-        let body: SearchIssuesResponse = resp.json().await.map_err(|e| GitHubError::Parse {
-            what: "dependabot search",
-            source: e.to_string(),
-        })?;
-
-        // Capture the total from the first page (it's identical across pages); reading it via
-        // `is_none()` also keeps the `None` initializer live for the linter.
-        if total_count.is_none() {
-            total_count = Some(body.total_count);
-        }
-        incomplete |= body.incomplete_results;
-
-        for item in body.items {
-            let Some(pr) = item.pull_request else {
-                continue;
-            };
-            let Some((repo_full_name, repo_owner, repo_name)) = repo_identity(&item.repository_url)
-            else {
-                continue;
-            };
-            prs.push(DependabotPr {
-                id: item.id,
-                number: item.number,
-                title: item.title,
-                html_url: item.html_url,
-                author: item.user.map(|u| u.login).unwrap_or_default(),
-                repo_full_name,
-                repo_owner,
-                repo_name,
-                pull_url: pr.url,
-                created_at: item.created_at,
-                updated_at: item.updated_at,
-            });
-        }
-        on_page(page, prs.len());
-
         match next {
             Some(next_url) => {
-                // Stop at the page cap — treat the remainder as an incomplete result (so the
-                // caller won't reconcile-delete the PRs we didn't fetch). Keeps each sync to
-                // `SEARCH_MAX_PAGES` search requests, avoiding the pagination burst that trips
-                // GitHub's secondary rate limit.
-                if page >= SEARCH_MAX_PAGES {
-                    incomplete = true;
-                    break;
-                }
                 url = next_url;
-                // Pace pagination so the next page request doesn't burst into a secondary
-                // rate limit (see `SEARCH_PAGE_DELAY`).
-                tokio::time::sleep(SEARCH_PAGE_DELAY).await;
+                tokio::time::sleep(DEPENDABOT_REQUEST_DELAY).await;
             }
             None => break,
         }
     }
+    Ok(repos)
+}
 
-    // Complete only if GitHub didn't flag a partial result AND we could actually page through
-    // every match (search caps pagination at 1000, so a larger match set is unreachable).
-    let complete = !incomplete && (prs.len() as i64) >= total_count.unwrap_or(0);
+/// List the open, Dependabot-authored pull requests in one repository (paginated + paced).
+async fn list_open_dependabot_prs(
+    client: &reqwest::Client,
+    token: &str,
+    owner: &str,
+    name: &str,
+    rate: &mut RateLimit,
+) -> Result<Vec<DependabotPr>, GitHubError> {
+    let mut url =
+        format!("{API_BASE}/repos/{owner}/{name}/pulls?state=open&per_page={DEPENDABOT_PER_PAGE}");
+    let mut prs = Vec::new();
+    loop {
+        let (page, next): (Vec<PullListItem>, _) =
+            get_page(client, &url, token, "pull requests", rate).await?;
+        for p in page {
+            let author = p.user.map(|u| u.login).unwrap_or_default();
+            if !is_dependabot_author(&author) {
+                continue;
+            }
+            prs.push(DependabotPr {
+                id: p.id,
+                number: p.number,
+                title: p.title,
+                html_url: p.html_url,
+                author,
+                repo_full_name: format!("{owner}/{name}"),
+                repo_owner: owner.to_string(),
+                repo_name: name.to_string(),
+                pull_url: p.url,
+                created_at: p.created_at,
+                updated_at: p.updated_at,
+            });
+        }
+        match next {
+            Some(next_url) => {
+                url = next_url;
+                tokio::time::sleep(DEPENDABOT_REQUEST_DELAY).await;
+            }
+            None => break,
+        }
+    }
+    Ok(prs)
+}
 
-    Ok(DependabotSearchOutcome {
+/// Fetch open Dependabot PRs across the repos the user **admins** within the selected owners.
+///
+/// For each owner, lists its repos and keeps those with `permissions.admin`, then lists each
+/// such repo's open Dependabot-authored PRs. This uses only the core REST API (no search), so
+/// — paced serially (see `DEPENDABOT_REQUEST_DELAY`) — it avoids the search secondary rate
+/// limit entirely. `on_progress` is invoked as repos are scanned with `(repos_scanned,
+/// prs_found_so_far)`. Callers must pass a non-empty `owners`. The result is always `complete`
+/// (a full enumeration), so the caller may reconcile-delete stale local rows.
+pub async fn fetch_admin_dependabot_prs<F>(
+    token: &str,
+    owners: &[String],
+    self_login: &str,
+    on_progress: F,
+) -> Result<DependabotFetchOutcome, GitHubError>
+where
+    F: Fn(usize, usize) + Send,
+{
+    let client = reqwest::Client::new();
+    let mut rate = RateLimit::default();
+
+    // 1. Collect the admin repos across the selected owners (de-duplicated).
+    let mut admin_repos: Vec<(String, String)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for owner in owners {
+        let repos = list_admin_repos(&client, token, owner, self_login, &mut rate).await?;
+        for (o, n) in repos {
+            if seen.insert((o.to_lowercase(), n.to_lowercase())) {
+                admin_repos.push((o, n));
+            }
+        }
+        tokio::time::sleep(DEPENDABOT_REQUEST_DELAY).await;
+    }
+
+    // 2. List each admin repo's open Dependabot PRs. Stop early (marking the result
+    //    incomplete, so the caller won't reconcile-delete) if we approach the core-quota
+    //    reserve or GitHub starts rate-limiting — the rest resolves on a later sync.
+    let mut prs: Vec<DependabotPr> = Vec::new();
+    let mut scanned = 0usize;
+    let mut complete = true;
+    for (owner, name) in &admin_repos {
+        if core_below_reserve(&rate) {
+            complete = false;
+            break;
+        }
+        match list_open_dependabot_prs(&client, token, owner, name, &mut rate).await {
+            Ok(repo_prs) => prs.extend(repo_prs),
+            Err(e) if e.is_rate_limited() => {
+                complete = false;
+                break;
+            }
+            Err(e) => return Err(e),
+        }
+        scanned += 1;
+        on_progress(scanned, prs.len());
+        tokio::time::sleep(DEPENDABOT_REQUEST_DELAY).await;
+    }
+
+    Ok(DependabotFetchOutcome {
         prs,
         rate,
         complete,
@@ -899,34 +933,13 @@ mod tests {
     }
 
     #[test]
-    fn build_dependabot_query_scopes_by_owner() {
-        // Self → user:, orgs → org:; spaces encoded as '+'.
-        let q = build_dependabot_query(&["octocat".into(), "acme".into()], "octocat");
-        assert_eq!(
-            q,
-            "is:pr+is:open+author:app/dependabot+archived:false+user:octocat+org:acme"
-        );
-        // No owners → just the base query (the command layer guarantees a non-empty list).
-        assert_eq!(
-            build_dependabot_query(&[], "octocat"),
-            "is:pr+is:open+author:app/dependabot+archived:false"
-        );
-        // A single org (self not included) → only org:.
-        assert_eq!(
-            build_dependabot_query(&["acme".into()], "octocat"),
-            "is:pr+is:open+author:app/dependabot+archived:false+org:acme"
-        );
-    }
-
-    #[test]
-    fn repo_identity_splits_repository_url() {
-        assert_eq!(
-            repo_identity("https://api.github.com/repos/octo/repo-a"),
-            Some(("octo/repo-a".into(), "octo".into(), "repo-a".into()))
-        );
-        // Missing name segment → None.
-        assert_eq!(repo_identity("https://api.github.com/repos/octo"), None);
-        assert_eq!(repo_identity("https://api.github.com/repos/"), None);
+    fn is_dependabot_author_matches_bot_logins() {
+        assert!(is_dependabot_author("dependabot[bot]"));
+        assert!(is_dependabot_author("dependabot-preview[bot]"));
+        // A human or another bot is not Dependabot.
+        assert!(!is_dependabot_author("octocat"));
+        assert!(!is_dependabot_author("renovate[bot]"));
+        assert!(!is_dependabot_author("dependabot")); // not a bot login
     }
 
     #[test]

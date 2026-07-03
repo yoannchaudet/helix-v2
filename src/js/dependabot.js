@@ -56,8 +56,9 @@ function emptyDependabot() {
     <img class="inbox-empty-art" src="/assets/helix-muted.svg" alt="" width="116" height="116" />
     <p class="inbox-empty-title">No open Dependabot pull requests.</p>
     <p class="inbox-empty-sub">
-      Dependabot PRs across your selected accounts show up here. Use
-      <span class="inbox-empty-hint">Choose accounts</span> in the toolbar to pick your user and orgs.
+      Open Dependabot PRs in repositories you <strong>admin</strong> (across your selected
+      accounts) show up here. Use <span class="inbox-empty-hint">Choose accounts</span> in the
+      toolbar to pick your user and orgs.
     </p>
   </div>`;
 }
@@ -514,11 +515,11 @@ export function initDependabot() {
   });
   renderIdleStatus();
 
-  // Live progress during a sync (mirrors the notifications `sync:progress` handling).
+  // Live progress during a sync (repos scanned / Dependabot PRs found).
   listen("dependabot:progress", (event) => {
     if (!syncing) return;
-    const { page, fetched } = event.payload ?? {};
-    setDepProgress(`Searching page ${page}… (${fetched} so far)`);
+    const { found } = event.payload ?? {};
+    setDepProgress(`Scanning repositories… (${found ?? 0} found)`);
   });
   // Merge-readiness pills resolve in the background after a sync; reload once they land.
   listen("dependabot:resolved", () => {

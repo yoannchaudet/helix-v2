@@ -405,10 +405,13 @@ module's **sidebar + content** split:
     account picker can list your org memberships (private-repo PRs also need `repo`).
   - Fine-grained PAT alternative: read access to **Notifications**, plus
     Issues/Pull-requests read on the relevant repos for subject resolution. The
-    **Dependabot** module additionally reads **Pull requests** (for merge-readiness) and
-    **Organization** membership (to list orgs in the account picker).
-- The Dependabot module scopes its search to the accounts you select (your user + chosen
-  orgs); it never searches every accessible repo.
+    **Dependabot** module additionally reads **Pull requests** (for the PR list +
+    merge-readiness), repository **Administration/Metadata** (to detect which repos you
+    admin), and **Organization** membership (to list orgs in the account picker).
+- The Dependabot module does **not** use the search API. It enumerates the repos you
+  **admin** within the accounts you select (your user + chosen orgs) and lists each one's open
+  Dependabot PRs — all via the core REST API, paced serially to stay under secondary rate
+  limits.
 - All GitHub traffic is HTTPS to `api.github.com`.
 
 ## 9. Status & deferred work
