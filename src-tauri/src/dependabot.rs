@@ -224,6 +224,25 @@ pub fn store_merge_state(
     Ok(())
 }
 
+/// Delete cached PRs whose repository owner is not in `owners` — i.e. prune the cache to the
+/// currently-selected accounts. Runs on every sync so PRs from a now-deselected owner (or
+/// left over from an earlier, broader scope) are dropped even when the search comes back
+/// incomplete (which suppresses the normal reconcile). An empty `owners` clears everything.
+/// Returns the number of rows removed.
+pub fn prune_to_owners(conn: &Connection, owners: &[String]) -> rusqlite::Result<usize> {
+    if owners.is_empty() {
+        return conn.execute("DELETE FROM dependabot_prs", []);
+    }
+    // Compare case-insensitively: GitHub logins are case-insensitive, so a casing difference
+    // between a stored `repo_owner` and the selected login must not prune an in-scope PR.
+    let placeholders = std::iter::repeat_n("?", owners.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!("DELETE FROM dependabot_prs WHERE LOWER(repo_owner) NOT IN ({placeholders})");
+    let lowered: Vec<String> = owners.iter().map(|o| o.to_lowercase()).collect();
+    conn.execute(&sql, rusqlite::params_from_iter(lowered.iter()))
+}
+
 /// Count stored Dependabot PRs (helper, also used by tests).
 #[cfg(test)]
 pub fn count(conn: &Connection) -> rusqlite::Result<i64> {
@@ -326,6 +345,36 @@ mod tests {
             .flat_map(|g| g.prs.into_iter().map(|p| p.id))
             .collect();
         assert_eq!(ids, vec![1, 3]);
+    }
+
+    #[test]
+    fn prune_to_owners_keeps_only_selected_owners() {
+        let mut conn = mem_conn();
+        store_prs(
+            &mut conn,
+            &[
+                pr(1, "octo/repo-a", 10, "Bump a"),
+                pr(2, "acme/widgets", 11, "Bump b"),
+                pr(3, "other/thing", 12, "Bump c"),
+            ],
+            true,
+        )
+        .unwrap();
+
+        // Keep octo + acme; drop other.
+        let removed = prune_to_owners(&conn, &["octo".into(), "acme".into()]).unwrap();
+        assert_eq!(removed, 1);
+        let owners: Vec<i64> = list_by_repo(&conn)
+            .unwrap()
+            .into_iter()
+            .flat_map(|g| g.prs.into_iter().map(|p| p.id))
+            .collect();
+        assert_eq!(owners, vec![2, 1]); // acme/widgets, then octo/repo-a (repo name order)
+
+        // Empty owner set clears everything.
+        let removed = prune_to_owners(&conn, &[]).unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(count(&conn).unwrap(), 0);
     }
 
     #[test]

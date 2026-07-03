@@ -401,9 +401,14 @@ module's **sidebar + content** split:
   by `get_settings`.
 - **Recommended token scopes** (document for the user):
   - Classic PAT: `notifications` (read/modify the inbox). Add `repo` to resolve subjects
-    in **private** repositories.
+    in **private** repositories. For the **Dependabot** module, add `read:org` so the
+    account picker can list your org memberships (private-repo PRs also need `repo`).
   - Fine-grained PAT alternative: read access to **Notifications**, plus
-    Issues/Pull-requests read on the relevant repos for subject resolution.
+    Issues/Pull-requests read on the relevant repos for subject resolution. The
+    **Dependabot** module additionally reads **Pull requests** (for merge-readiness) and
+    **Organization** membership (to list orgs in the account picker).
+- The Dependabot module scopes its search to the accounts you select (your user + chosen
+  orgs); it never searches every accessible repo.
 - All GitHub traffic is HTTPS to `api.github.com`.
 
 ## 9. Status & deferred work

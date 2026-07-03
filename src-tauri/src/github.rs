@@ -116,6 +116,59 @@ pub async fn fetch_user(token: &str) -> Result<GitHubUser, GitHubError> {
     })
 }
 
+/// One organization the authenticated user belongs to (just the login Helix needs).
+#[derive(Debug, Deserialize)]
+struct OrgResponse {
+    login: String,
+}
+
+/// List the organizations the authenticated user is a member of (`GET /user/orgs`,
+/// Link-paginated). Used by the Dependabot module's account picker so the user can scope the
+/// search to their user + selected orgs. Note: classic PATs need `read:org` for the complete
+/// membership list (public-only otherwise); fine-grained tokens need org membership read.
+pub async fn fetch_orgs(token: &str) -> Result<Vec<String>, GitHubError> {
+    let client = reqwest::Client::new();
+    let mut url = format!("{API_BASE}/user/orgs?per_page=100");
+    let mut orgs: Vec<String> = Vec::new();
+
+    loop {
+        let resp = authed_get(&client, &url, token)
+            .send()
+            .await
+            .map_err(|e| GitHubError::Network(e.to_string()))?;
+
+        let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(GitHubError::Unauthorized);
+        }
+        if status == reqwest::StatusCode::FORBIDDEN {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(GitHubError::Forbidden(body.trim().to_string()));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(GitHubError::Status {
+                status,
+                body: body.trim().to_string(),
+            });
+        }
+
+        let next = next_page_url(resp.headers());
+        let page: Vec<OrgResponse> = resp.json().await.map_err(|e| GitHubError::Parse {
+            what: "organizations",
+            source: e.to_string(),
+        })?;
+        orgs.extend(page.into_iter().map(|o| o.login));
+
+        match next {
+            Some(next_url) => url = next_url,
+            None => break,
+        }
+    }
+
+    Ok(orgs)
+}
+
 /* ------------------------------ Notifications ------------------------------ */
 
 /// A notification thread (subset of the `Thread` schema Helix stores).
@@ -534,11 +587,31 @@ const SEARCH_PAGE_DELAY: std::time::Duration = std::time::Duration::from_millis(
 /// rest are reported as an incomplete result so they're never reconcile-deleted. Bump this if
 /// paged fetching proves reliable in practice.
 const SEARCH_MAX_PAGES: u32 = 1;
-/// The fixed query behind the Dependabot module: every **open pull request authored by
-/// Dependabot** in a non-archived repo the token can see, most-recently-updated first (so a
-/// single capped page surfaces the freshest PRs). `app/dependabot` targets the Dependabot
-/// GitHub App (its PR author login is `dependabot[bot]`).
+/// The base of the Dependabot search query: every **open pull request authored by
+/// Dependabot** in a non-archived repo. `app/dependabot` targets the Dependabot GitHub App
+/// (its PR author login is `dependabot[bot]`). Owner (`user:`/`org:`) qualifiers that scope it
+/// to the accounts the user cares about are appended by [`build_dependabot_query`].
 const DEPENDABOT_SEARCH_QUERY: &str = "is:pr is:open author:app/dependabot archived:false";
+
+/// Build the scoped search `q` value: the base query plus one owner qualifier per selected
+/// account — `user:<login>` for the authenticated user (matched via `self_login`) and
+/// `org:<login>` for everyone else. GitHub OR's multiple `user:`/`org:` qualifiers, so this
+/// returns Dependabot PRs across all selected accounts. Spaces are encoded as `+` (valid in a
+/// search `q`); `:`/`/` are fine as-is. (Sorting is applied via the request's `sort`/`order`
+/// params, not here.) Callers must not pass an empty `owners` — an unscoped query would search
+/// every accessible repo.
+fn build_dependabot_query(owners: &[String], self_login: &str) -> String {
+    let mut q = DEPENDABOT_SEARCH_QUERY.to_string();
+    for owner in owners {
+        // GitHub logins are case-insensitive; match the authenticated user regardless of case.
+        if owner.eq_ignore_ascii_case(self_login) {
+            q.push_str(&format!(" user:{owner}"));
+        } else {
+            q.push_str(&format!(" org:{owner}"));
+        }
+    }
+    q.replace(' ', "+")
+}
 
 /// One open Dependabot pull request as returned by the Search API, flattened to just the
 /// fields Helix stores. `pull_url` is the PR's REST API URL (`.../pulls/{n}`), resolved
@@ -618,22 +691,28 @@ fn repo_identity(repository_url: &str) -> Option<(String, String, String)> {
     ))
 }
 
-/// Search **all** accessible repos for open Dependabot PRs, following `Link` pagination.
+/// Search the **selected owners'** repos for open Dependabot PRs, following `Link` pagination.
 ///
+/// `owners` are the account logins to scope to (the user + chosen orgs); `self_login` tells
+/// the query builder which one is the authenticated user (→ `user:`) vs an org (→ `org:`).
 /// `on_page` is invoked after each page with `(page_number, total_fetched_so_far)` for live
-/// progress (mirrors [`fetch_all_notifications`]). Items missing a `pull_request` link or an
-/// unparseable `repository_url` are skipped defensively. The last response's rate snapshot
-/// (the `search` bucket) is returned so the caller keeps quota accounting accurate.
+/// progress. Items missing a `pull_request` link or an unparseable `repository_url` are
+/// skipped defensively. The last response's rate snapshot (the `search` bucket) is returned so
+/// the caller keeps quota accounting accurate.
+///
+/// Callers must pass a non-empty `owners`; an unscoped search would hit every accessible repo
+/// (and reliably trip the search rate limit). The command layer enforces this.
 pub async fn search_dependabot_prs<F>(
     token: &str,
+    owners: &[String],
+    self_login: &str,
     on_page: F,
 ) -> Result<DependabotSearchOutcome, GitHubError>
 where
     F: Fn(u32, usize) + Send,
 {
     let client = reqwest::Client::new();
-    // GitHub search accepts `+` for spaces in the `q` parameter; `:` and `/` are valid as-is.
-    let q = DEPENDABOT_SEARCH_QUERY.replace(' ', "+");
+    let q = build_dependabot_query(owners, self_login);
     let mut url = format!(
         "{API_BASE}/search/issues?q={q}&sort=updated&order=desc&per_page={SEARCH_PER_PAGE}"
     );
@@ -817,6 +896,26 @@ mod tests {
         .should_back_off());
         // Other errors don't back off.
         assert!(!rl(None, GitHubError::Network("timeout".into())).should_back_off());
+    }
+
+    #[test]
+    fn build_dependabot_query_scopes_by_owner() {
+        // Self → user:, orgs → org:; spaces encoded as '+'.
+        let q = build_dependabot_query(&["octocat".into(), "acme".into()], "octocat");
+        assert_eq!(
+            q,
+            "is:pr+is:open+author:app/dependabot+archived:false+user:octocat+org:acme"
+        );
+        // No owners → just the base query (the command layer guarantees a non-empty list).
+        assert_eq!(
+            build_dependabot_query(&[], "octocat"),
+            "is:pr+is:open+author:app/dependabot+archived:false"
+        );
+        // A single org (self not included) → only org:.
+        assert_eq!(
+            build_dependabot_query(&["acme".into()], "octocat"),
+            "is:pr+is:open+author:app/dependabot+archived:false+org:acme"
+        );
     }
 
     #[test]

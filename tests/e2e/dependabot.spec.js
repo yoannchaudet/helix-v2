@@ -82,3 +82,40 @@ test("empty state when there are no Dependabot PRs", async ({ page }) => {
   await expect(page.locator("#dependabot")).toContainText("No open Dependabot pull requests");
   await expect(page.locator("#dependabot-repo-list .source-empty")).toBeVisible();
 });
+
+test("the accounts picker lists user + orgs and persists a change on close", async ({ page }) => {
+  await openDependabot(page);
+
+  await page.locator("#dependabot-accounts-btn").click();
+  const popover = page.locator(".accounts-popover");
+  await expect(popover).toBeVisible();
+
+  // Your user (pre-selected) + the two orgs from the fixture.
+  await expect(popover.locator(".accounts-check")).toHaveCount(3);
+  await expect(popover.locator('.accounts-check[data-login="octocat"]')).toBeChecked();
+  await expect(popover.locator('.accounts-check[data-login="acme"]')).not.toBeChecked();
+
+  // Select an org, then close the popover by clicking outside.
+  await popover.locator('.accounts-check[data-login="acme"]').check();
+  await page.keyboard.press("Escape");
+  await expect(popover).toBeHidden();
+
+  // The new selection is persisted and a re-sync is triggered.
+  const calls = await page.evaluate(() => window.__TAURI_CALLS__);
+  const saved = calls.filter((c) => c.cmd === "set_dependabot_owners").pop();
+  expect(saved, "set_dependabot_owners should have been invoked").toBeTruthy();
+  expect(saved.args.owners).toEqual(["octocat", "acme"]);
+});
+
+test("closing the picker with no change does not persist or re-sync", async ({ page }) => {
+  await openDependabot(page);
+  await page.evaluate(() => (window.__TAURI_CALLS__.length = 0));
+
+  await page.locator("#dependabot-accounts-btn").click();
+  await expect(page.locator(".accounts-popover")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".accounts-popover")).toBeHidden();
+
+  const calls = await page.evaluate(() => window.__TAURI_CALLS__);
+  expect(calls.some((c) => c.cmd === "set_dependabot_owners")).toBe(false);
+});

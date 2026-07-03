@@ -2114,3 +2114,78 @@ input[type="text"]:focus {
   border-radius: 5px;
   box-shadow: 0 1px 0 var(--border);
 }
+
+/* ============================ Dependabot accounts ========================= */
+/* The account picker popover (toolbar "Choose accounts"): a small fixed panel of the user +
+   their orgs as checkboxes. Mirrors the context-menu surface; changes apply on close. */
+.accounts-popover {
+  position: fixed;
+  z-index: var(--z-popover);
+  min-width: 240px;
+  max-width: 320px;
+  padding: var(--space-8);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-3xl);
+  box-shadow: var(--shadow);
+  animation: flash-in var(--duration-quick) ease;
+}
+
+.accounts-title {
+  margin: 0 0 var(--space-6);
+  padding: 0 var(--space-4);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.accounts-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.accounts-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  padding: var(--space-6) var(--space-8);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+}
+
+.accounts-row:hover {
+  background: var(--hover);
+}
+
+.accounts-login {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.84rem;
+}
+
+.accounts-tag {
+  font-size: 0.68rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.accounts-note {
+  margin: var(--space-6) 0 0;
+  padding: 0 var(--space-4);
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.inbox-empty-hint {
+  font-weight: 600;
+  color: var(--text);
+}

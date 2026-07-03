@@ -8,7 +8,7 @@
 //! or Keychain I/O — each pass takes it only briefly to snapshot work or record results.
 
 use crate::db::Db;
-use crate::{auth, dependabot, github, sync, AppState, EventSink};
+use crate::{auth, dependabot, github, settings, sync, AppState, EventSink};
 use serde::Serialize;
 use tauri::{Manager, State};
 
@@ -50,6 +50,45 @@ pub struct DependabotSyncResult {
     rate_remaining: Option<i64>,
 }
 
+/// One selectable account in the Dependabot picker: the authenticated user or an org they
+/// belong to, plus whether it's currently in the search scope.
+#[derive(Debug, Clone, Serialize)]
+pub struct OwnerOption {
+    login: String,
+    is_org: bool,
+    selected: bool,
+}
+
+/// Whether `login` is a syntactically valid GitHub account login (1–39 chars, alphanumeric or
+/// hyphen, not starting/ending with a hyphen). Used to sanitize the owner selection before it
+/// is stored and interpolated into the search query, since the command is IPC-exposed.
+fn is_valid_login(login: &str) -> bool {
+    let bytes = login.as_bytes();
+    !login.is_empty()
+        && login.len() <= 39
+        && bytes[0] != b'-'
+        && bytes[bytes.len() - 1] != b'-'
+        && login
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// Resolve the effective owner scope: the stored selection, or — when never configured — the
+/// authenticated user alone. Returns `(self_login, owners)`. Empty/invalid logins are filtered
+/// out, so `owners` is empty only when the user explicitly saved an empty selection (or the
+/// login cache is missing, in which case the module degrades to "nothing selected" rather than
+/// issuing a malformed `user:` query).
+fn resolve_owners(conn: &rusqlite::Connection) -> Result<(String, Vec<String>), String> {
+    let self_login = settings::get_string(conn, settings::KEY_GITHUB_LOGIN)
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    let owners = settings::get_dependabot_owners(conn)
+        .map_err(|e| e.to_string())?
+        .unwrap_or_else(|| vec![self_login.clone()]);
+    let owners = owners.into_iter().filter(|o| is_valid_login(o)).collect();
+    Ok((self_login, owners))
+}
+
 /// Read all stored Dependabot PRs grouped by repository (offline-first local read).
 #[tauri::command]
 pub fn list_dependabot(
@@ -59,9 +98,76 @@ pub fn list_dependabot(
     dependabot::list_by_repo(&conn).map_err(|e| e.to_string())
 }
 
+/// List the accounts the user can scope the Dependabot search to — their own user plus the
+/// orgs they belong to — each flagged with whether it's currently selected. Fetches orgs from
+/// GitHub; the selection (and the self default) comes from local settings.
+#[tauri::command]
+pub async fn list_dependabot_owners(
+    state: State<'_, AppState>,
+) -> Result<Vec<OwnerOption>, String> {
+    let token = auth::read_token(&state.db)?
+        .ok_or_else(|| "Not connected — add a GitHub token first.".to_string())?;
+
+    let orgs = github::fetch_orgs(&token)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+    let (self_login, selected_list) = resolve_owners(&conn)?;
+    let selected: std::collections::HashSet<String> =
+        selected_list.iter().map(|s| s.to_lowercase()).collect();
+    let is_selected = |login: &str| selected.contains(&login.to_lowercase());
+
+    let mut options = Vec::with_capacity(orgs.len() + selected_list.len() + 1);
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if !self_login.is_empty() {
+        seen.insert(self_login.to_lowercase());
+        options.push(OwnerOption {
+            selected: is_selected(&self_login),
+            login: self_login,
+            is_org: false,
+        });
+    }
+    for org in orgs {
+        if seen.insert(org.to_lowercase()) {
+            options.push(OwnerOption {
+                selected: is_selected(&org),
+                login: org,
+                is_org: true,
+            });
+        }
+    }
+    // Surface any still-selected owner the org list no longer returns (e.g. membership/visibility
+    // changed), so it stays visible and can be deselected rather than silently sticking.
+    for login in &selected_list {
+        if seen.insert(login.to_lowercase()) {
+            options.push(OwnerOption {
+                login: login.clone(),
+                is_org: true,
+                selected: true,
+            });
+        }
+    }
+    Ok(options)
+}
+
+/// Persist the Dependabot owner selection (account logins to scope the search to). Invalid
+/// logins are dropped defensively — the command is IPC-exposed and the logins are interpolated
+/// into the search query.
+#[tauri::command]
+pub fn set_dependabot_owners(
+    owners: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let owners: Vec<String> = owners.into_iter().filter(|o| is_valid_login(o)).collect();
+    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+    settings::set_dependabot_owners(&conn, &owners).map_err(|e| e.to_string())
+}
+
 /// Search GitHub for open Dependabot PRs and store them locally, emitting progress events.
 ///
-/// Emits `dependabot:started`, `dependabot:progress` ({ page, fetched }), and
+/// The search is scoped to the selected accounts (the user + chosen orgs; defaults to the user
+/// alone). Emits `dependabot:started`, `dependabot:progress` ({ page, fetched }), and
 /// `dependabot:done` / `dependabot:error`. The search runs without holding the DB lock;
 /// storage happens in a single transaction afterwards. Merge-readiness is then resolved in
 /// the background (emitting `dependabot:resolved`) so the sync returns immediately.
@@ -70,11 +176,38 @@ pub async fn sync_dependabot(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<DependabotSyncResult, String> {
+    // Resolve the account scope up front (short DB read, no network held).
+    let (self_login, owners) = {
+        let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+        resolve_owners(&conn)?
+    };
+
+    // No accounts selected → nothing to search. Clear the cache so the module shows empty,
+    // and return without touching the network (an unscoped search would hit every repo).
+    if owners.is_empty() {
+        let removed = {
+            let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+            dependabot::prune_to_owners(&conn, &owners).map_err(|e| e.to_string())?
+        };
+        return Ok(DependabotSyncResult {
+            count: 0,
+            removed,
+            rate_remaining: None,
+        });
+    }
+
+    let search_owners = owners.clone();
     let (result, token) =
-        sync_dependabot_core(&state.db, app.clone(), |token, on_page| async move {
-            github::search_dependabot_prs(&token, on_page).await
+        sync_dependabot_core(&state.db, app.clone(), move |token, on_page| async move {
+            github::search_dependabot_prs(&token, &search_owners, &self_login, on_page).await
         })
         .await?;
+
+    // Prune any cached PRs outside the current scope (e.g. a just-deselected org, or rows the
+    // incomplete-result guard kept from a broader earlier scope).
+    best_effort(&state.db.0, "pruning Dependabot cache to owners", |conn| {
+        dependabot::prune_to_owners(conn, &owners).map(|_| ())
+    });
 
     // Resolve merge-readiness (mergeable_state) in the background, reusing the same token.
     let resolve_app = app.clone();
@@ -288,6 +421,20 @@ mod tests {
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn is_valid_login_accepts_logins_and_rejects_query_injection() {
+        assert!(is_valid_login("octocat"));
+        assert!(is_valid_login("my-org-42"));
+        // Empty, leading/trailing hyphen, spaces, or query-breaking chars are rejected — the
+        // command is IPC-exposed and logins are interpolated into the search query.
+        assert!(!is_valid_login(""));
+        assert!(!is_valid_login("-nope"));
+        assert!(!is_valid_login("nope-"));
+        assert!(!is_valid_login("has space"));
+        assert!(!is_valid_login("is:pr"));
+        assert!(!is_valid_login("a/b"));
+    }
 
     fn mem_db() -> Db {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
