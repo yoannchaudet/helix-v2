@@ -10,25 +10,9 @@
 
 use crate::db::Db;
 use crate::sync::SyncStatus;
-use crate::{auth, github, sync, AppState};
+use crate::{auth, github, sync, AppState, EventSink};
 use serde::Serialize;
-use tauri::{Emitter, Manager, State};
-
-/// Sink for the UI lifecycle/progress events the orchestration emits. Abstracting this
-/// behind a trait (rather than calling `AppHandle::emit` directly) lets the Tauri-free
-/// `*_core` functions below run against a recording fake in tests — no Tauri runtime, no
-/// real `AppHandle` — while production keeps emitting through the real handle.
-pub(crate) trait EventSink {
-    fn emit(&self, event: &str, payload: serde_json::Value);
-}
-
-impl EventSink for tauri::AppHandle {
-    fn emit(&self, event: &str, payload: serde_json::Value) {
-        // Emission is best-effort in the original code (`let _ = app.emit(...)`); a closed
-        // event channel must never fail a sync.
-        let _ = Emitter::emit(self, event, payload);
-    }
-}
+use tauri::{Manager, State};
 
 /// Concurrency and quota tuning for background GitHub work. Centralized here so the knobs
 /// are easy to find and adjust without hunting through the command handlers.

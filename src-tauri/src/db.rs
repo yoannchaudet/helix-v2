@@ -151,6 +151,34 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE notifications ADD COLUMN subject_mergeable_state TEXT;
     ALTER TABLE bookmarks ADD COLUMN subject_mergeable_state TEXT;
     "#,
+    // v10 — the Dependabot module's local store: open Dependabot PRs from the Search API,
+    // cached so the module reads offline-first (like notifications) and GitHub is only hit on
+    // an explicit/auto sync. Self-contained (repo identity denormalized from the search
+    // result's `repository_url`; no FK to `repos`, which is keyed on GitHub repo id the
+    // search doesn't return). `mergeable_state`/`resolved_at` back the merge-readiness pill,
+    // resolved lazily per PR (search omits it) with the same smart-cache + rate-reserve
+    // discipline as notification subjects. Rows the search no longer returns (merged/closed)
+    // are reconciled away on the next sync.
+    r#"
+    CREATE TABLE IF NOT EXISTS dependabot_prs (
+        id              INTEGER PRIMARY KEY,
+        repo_full_name  TEXT NOT NULL,
+        repo_owner      TEXT NOT NULL,
+        repo_name       TEXT NOT NULL,
+        number          INTEGER NOT NULL,
+        title           TEXT NOT NULL,
+        html_url        TEXT NOT NULL,
+        author          TEXT NOT NULL,
+        pull_url        TEXT NOT NULL,
+        mergeable_state TEXT,
+        created_at      TEXT,
+        updated_at      TEXT NOT NULL,
+        resolved_at     TEXT,
+        fetched_at      TEXT NOT NULL
+    );
+
+    CREATE INDEX idx_dependabot_prs_repo ON dependabot_prs(repo_full_name);
+    "#,
 ];
 
 /// Open the database at `db_path`, apply any pending migrations, and return the
@@ -220,6 +248,7 @@ mod tests {
 
         let tables = table_names(&conn).unwrap();
         for expected in [
+            "dependabot_prs",
             "done_tombstones",
             "notifications",
             "rate_limits",

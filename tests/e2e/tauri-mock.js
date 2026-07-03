@@ -16,6 +16,7 @@ export function installTauriMock(fixtures) {
     settings: { ...fixtures.settings },
     theme: fixtures.settings.theme,
     inbox: JSON.parse(JSON.stringify(fixtures.inbox)),
+    dependabot: JSON.parse(JSON.stringify(fixtures.dependabot ?? [])),
   };
   window.__TAURI_CALLS__ = [];
 
@@ -97,6 +98,12 @@ export function installTauriMock(fixtures) {
       return null;
     },
     sync_now: () => ({ count: countAll(), removed: 0 }),
+    list_dependabot: () => JSON.parse(JSON.stringify(state.dependabot)),
+    sync_dependabot: () => ({
+      count: state.dependabot.reduce((sum, g) => sum + g.prs.length, 0),
+      removed: 0,
+      rate_remaining: 28,
+    }),
     mark_threads_done: ({ threadIds }) => {
       const ids = new Set(threadIds);
       state.inbox = state.inbox
@@ -146,6 +153,47 @@ export function defaultFixtures() {
     },
     appVersion: "0.1.0",
     updaterEnabled: false,
+    dependabot: [
+      {
+        full_name: "octo/hello",
+        total: 2,
+        prs: [
+          {
+            id: 101,
+            number: 40,
+            title: "Bump lodash from 4.17.20 to 4.17.21",
+            html_url: "https://github.com/octo/hello/pull/40",
+            author: "dependabot[bot]",
+            updated_at: "2026-06-27T10:30:00Z",
+            mergeable_state: "clean",
+          },
+          {
+            id: 102,
+            number: 41,
+            title: "Bump actions/checkout from 4 to 5",
+            html_url: "https://github.com/octo/hello/pull/41",
+            author: "dependabot[bot]",
+            updated_at: "2026-06-27T09:30:00Z",
+            mergeable_state: "blocked",
+          },
+        ],
+      },
+      {
+        full_name: "acme/widgets",
+        total: 1,
+        prs: [
+          {
+            id: 103,
+            number: 9,
+            title: "Bump serde from 1.0.0 to 1.0.1",
+            html_url: "https://github.com/acme/widgets/pull/9",
+            author: "dependabot[bot]",
+            updated_at: "2026-06-27T11:15:00Z",
+            mergeable_state: null,
+          },
+        ],
+      },
+    ],
     inbox: [
       {
         repo_id: 1,

@@ -15,6 +15,7 @@ import {
 } from "./js/sync.js";
 import { initSettings, loadSettings, showSettings } from "./js/settings.js";
 import { initInbox, loadInbox } from "./js/inbox.js";
+import { initDependabot, onDependabotOpened } from "./js/dependabot.js";
 import { initModules, configureModules } from "./js/modules.js";
 import { initShortcuts } from "./js/shortcuts.js";
 
@@ -42,13 +43,20 @@ window.addEventListener("DOMContentLoaded", () => {
 
   initSidebarResize();
   initInbox();
+  initDependabot();
   initShortcuts();
 
   // Module system: render the title-bar module picker and wire ⌘1/⌘2. Switching modules
-  // dismisses the Settings overlay (modules.js fires onSwitch rather than importing
-  // settings.js, keeping the dependency one-directional).
+  // dismisses the Settings overlay, and opening the Dependabot module loads it (and
+  // staleness-gated auto-syncs). modules.js fires onSwitch rather than importing these
+  // modules, keeping the dependency one-directional.
   initModules();
-  configureModules({ onSwitch: () => showSettings(false) });
+  configureModules({
+    onSwitch: (id) => {
+      showSettings(false);
+      if (id === "dependabot") onDependabotOpened();
+    },
+  });
 
   registerSyncEvents();
   // Sync reloads the inbox after a sync (and after background subject resolution) via this

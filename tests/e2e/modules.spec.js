@@ -23,7 +23,6 @@ test("clicking a module swaps the visible pane and active tab", async ({ page })
 
   await expect(page.locator("#view-dependabot")).toBeVisible();
   await expect(page.locator("#view-notifications")).toBeHidden();
-  await expect(page.locator("#view-dependabot")).toContainText("coming soon");
   await expect(page.locator('.module-tab[data-module="dependabot"]')).toHaveAttribute(
     "aria-current",
     "true",
@@ -46,16 +45,23 @@ test("⌘1 / ⌘2 jump straight to a module", async ({ page }) => {
   await expect(page.locator("#view-dependabot")).toBeHidden();
 });
 
-test("the Notifications module shows the sidebar; Dependabot hides it", async ({ page }) => {
+test("each module shows its own sidebar sources; Settings hides the sidebar", async ({ page }) => {
   await openApp(page);
 
+  // Notifications: sidebar visible with its smart-filter list.
   await expect(page.locator(".sidebar")).toBeVisible();
+  await expect(page.locator(".sidebar-module--notifications")).toBeVisible();
+  await expect(page.locator(".sidebar-module--dependabot")).toBeHidden();
 
+  // Dependabot: sidebar still visible, but showing only its repo list.
   await page.locator('.module-tab[data-module="dependabot"]').click();
-  await expect(page.locator(".sidebar")).toBeHidden();
+  await expect(page.locator(".sidebar")).toBeVisible();
+  await expect(page.locator(".sidebar-module--dependabot")).toBeVisible();
+  await expect(page.locator(".sidebar-module--notifications")).toBeHidden();
+  await expect(page.locator("#filter-list")).toBeHidden();
 
   await page.locator('.module-tab[data-module="notifications"]').click();
-  await expect(page.locator(".sidebar")).toBeVisible();
+  await expect(page.locator(".sidebar-module--notifications")).toBeVisible();
 });
 
 test("the picker stays in the chrome during Settings; switching modules leaves Settings", async ({

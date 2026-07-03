@@ -496,6 +496,197 @@ where
     Ok(FetchOutcome { threads, rate })
 }
 
+/* ----------------------------- Dependabot search -------------------------- */
+
+/// Search page size (the Search API caps `per_page` at 100).
+const SEARCH_PER_PAGE: u32 = 100;
+/// The fixed query behind the Dependabot module: every **open pull request authored by
+/// Dependabot** in a non-archived repo the token can see. `app/dependabot` targets the
+/// Dependabot GitHub App (its PR author login is `dependabot[bot]`).
+const DEPENDABOT_SEARCH_QUERY: &str = "is:pr is:open author:app/dependabot archived:false";
+
+/// One open Dependabot pull request as returned by the Search API, flattened to just the
+/// fields Helix stores. `pull_url` is the PR's REST API URL (`.../pulls/{n}`), resolved
+/// later to a `mergeable_state` for the merge-readiness pill (search omits it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependabotPr {
+    pub id: i64,
+    pub number: i64,
+    pub title: String,
+    pub html_url: String,
+    pub author: String,
+    pub repo_full_name: String,
+    pub repo_owner: String,
+    pub repo_name: String,
+    pub pull_url: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Result of a full Dependabot search: the flattened PRs plus the last response's
+/// rate-limit snapshot (the Search API has its own, smaller bucket — `resource = "search"`).
+/// `complete` is false when GitHub couldn't return the full result set — either it flagged
+/// `incomplete_results` (a timed-out search) or the match count exceeds what pagination can
+/// reach (the Search API caps results at 1000). Callers must NOT reconcile-delete local rows
+/// from an incomplete search, or they'd wrongly drop PRs that simply fell outside the window.
+pub struct DependabotSearchOutcome {
+    pub prs: Vec<DependabotPr>,
+    pub rate: RateLimit,
+    pub complete: bool,
+}
+
+/// Raw Search API envelope (`GET /search/issues`): a JSON object wrapping the results,
+/// unlike the bare arrays the other endpoints return.
+#[derive(Debug, Deserialize)]
+struct SearchIssuesResponse {
+    /// Total matches GitHub found (may exceed the 1000-result pagination cap).
+    total_count: i64,
+    /// True when GitHub's search timed out and the results are partial.
+    incomplete_results: bool,
+    items: Vec<SearchIssueItem>,
+}
+
+/// A single search result. Only the fields Helix needs are deserialized. `pull_request` is
+/// present only for PRs (the query already restricts to `is:pr`, but we guard anyway).
+#[derive(Debug, Deserialize)]
+struct SearchIssueItem {
+    id: i64,
+    number: i64,
+    title: String,
+    html_url: String,
+    user: Option<SubjectUser>,
+    /// e.g. `https://api.github.com/repos/octo/repo` — the repo identity is derived from this.
+    repository_url: String,
+    pull_request: Option<SearchPullRequest>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SearchPullRequest {
+    /// The PR's REST API URL (`.../pulls/{number}`); resolved for `mergeable_state`.
+    url: String,
+}
+
+/// Split a `repository_url` (`.../repos/{owner}/{name}`) into `(full_name, owner, name)`.
+/// Returns `None` for a URL that doesn't carry both segments.
+fn repo_identity(repository_url: &str) -> Option<(String, String, String)> {
+    let tail = repository_url.rsplit("/repos/").next()?;
+    let (owner, name) = tail.split_once('/')?;
+    if owner.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some((
+        format!("{owner}/{name}"),
+        owner.to_string(),
+        name.to_string(),
+    ))
+}
+
+/// Search **all** accessible repos for open Dependabot PRs, following `Link` pagination.
+///
+/// `on_page` is invoked after each page with `(page_number, total_fetched_so_far)` for live
+/// progress (mirrors [`fetch_all_notifications`]). Items missing a `pull_request` link or an
+/// unparseable `repository_url` are skipped defensively. The last response's rate snapshot
+/// (the `search` bucket) is returned so the caller keeps quota accounting accurate.
+pub async fn search_dependabot_prs<F>(
+    token: &str,
+    on_page: F,
+) -> Result<DependabotSearchOutcome, GitHubError>
+where
+    F: Fn(u32, usize) + Send,
+{
+    let client = reqwest::Client::new();
+    // GitHub search accepts `+` for spaces in the `q` parameter; `:` and `/` are valid as-is.
+    let q = DEPENDABOT_SEARCH_QUERY.replace(' ', "+");
+    let mut url = format!("{API_BASE}/search/issues?q={q}&per_page={SEARCH_PER_PAGE}");
+    let mut prs: Vec<DependabotPr> = Vec::new();
+    let mut rate = RateLimit::default();
+    let mut page: u32 = 0;
+    // Completeness tracking: total matches (from the envelope) and whether GitHub ever
+    // flagged the results as partial. Used to decide if the caller may reconcile-delete.
+    let mut total_count: Option<i64> = None;
+    let mut incomplete = false;
+
+    loop {
+        page += 1;
+        let resp = authed_get(&client, &url, token)
+            .send()
+            .await
+            .map_err(|e| GitHubError::Network(e.to_string()))?;
+
+        let status = resp.status();
+        rate.update_from(resp.headers());
+
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(GitHubError::Unauthorized);
+        }
+        if status == reqwest::StatusCode::FORBIDDEN {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(GitHubError::Forbidden(body.trim().to_string()));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(GitHubError::Status {
+                status,
+                body: body.trim().to_string(),
+            });
+        }
+
+        let next = next_page_url(resp.headers());
+        let body: SearchIssuesResponse = resp.json().await.map_err(|e| GitHubError::Parse {
+            what: "dependabot search",
+            source: e.to_string(),
+        })?;
+
+        // Capture the total from the first page (it's identical across pages); reading it via
+        // `is_none()` also keeps the `None` initializer live for the linter.
+        if total_count.is_none() {
+            total_count = Some(body.total_count);
+        }
+        incomplete |= body.incomplete_results;
+
+        for item in body.items {
+            let Some(pr) = item.pull_request else {
+                continue;
+            };
+            let Some((repo_full_name, repo_owner, repo_name)) = repo_identity(&item.repository_url)
+            else {
+                continue;
+            };
+            prs.push(DependabotPr {
+                id: item.id,
+                number: item.number,
+                title: item.title,
+                html_url: item.html_url,
+                author: item.user.map(|u| u.login).unwrap_or_default(),
+                repo_full_name,
+                repo_owner,
+                repo_name,
+                pull_url: pr.url,
+                created_at: item.created_at,
+                updated_at: item.updated_at,
+            });
+        }
+        on_page(page, prs.len());
+
+        match next {
+            Some(next_url) => url = next_url,
+            None => break,
+        }
+    }
+
+    // Complete only if GitHub didn't flag a partial result AND we could actually page through
+    // every match (search caps pagination at 1000, so a larger match set is unreachable).
+    let complete = !incomplete && (prs.len() as i64) >= total_count.unwrap_or(0);
+
+    Ok(DependabotSearchOutcome {
+        prs,
+        rate,
+        complete,
+    })
+}
+
 /// Apply the standard GitHub headers (auth, accept, pinned API version, user-agent) to a
 /// request builder. Shared by every verb so the discipline in `AGENT.md` is applied once.
 fn authed(builder: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
@@ -545,6 +736,17 @@ fn next_page_url(headers: &HeaderMap) -> Option<String> {
 mod tests {
     use super::*;
     use reqwest::header::{HeaderMap, HeaderValue};
+
+    #[test]
+    fn repo_identity_splits_repository_url() {
+        assert_eq!(
+            repo_identity("https://api.github.com/repos/octo/repo-a"),
+            Some(("octo/repo-a".into(), "octo".into(), "repo-a".into()))
+        );
+        // Missing name segment → None.
+        assert_eq!(repo_identity("https://api.github.com/repos/octo"), None);
+        assert_eq!(repo_identity("https://api.github.com/repos/"), None);
+    }
 
     #[test]
     fn github_error_display_matches_user_facing_messages() {

@@ -31,13 +31,23 @@
       <!-- Module-scoped: shown for the Notifications module, hidden for modules without a
            sidebar (e.g. Dependabot) and while the Settings overlay is open. -->
       <aside class="sidebar">
-        <nav class="sources" aria-label="Views">
+        <!-- Notifications module sources: smart filters + repositories. -->
+        <nav class="sources sidebar-module sidebar-module--notifications" aria-label="Notification views">
           <!-- Smart filters are rendered from FILTERS by inbox.js (renderFilterList). -->
           <ul class="source-list" id="filter-list"></ul>
 
           <p class="source-group-label">Repositories</p>
           <ul class="source-list" id="repo-list">
             <li class="source-empty" id="repo-empty">No repositories yet.</li>
+          </ul>
+        </nav>
+
+        <!-- Dependabot module sources: repositories only (no smart filters). Rendered by
+             dependabot.js (renderDependabotSidebar). -->
+        <nav class="sources sidebar-module sidebar-module--dependabot" aria-label="Dependabot views">
+          <p class="source-group-label">Repositories</p>
+          <ul class="source-list" id="dependabot-repo-list">
+            <li class="source-empty">No repositories yet.</li>
           </ul>
         </nav>
       </aside>
@@ -101,16 +111,29 @@
       </section>
 
       <!-- ============================== Dependabot ============================= -->
-      <!-- Placeholder module: Dependabot will surface the Dependabot-PR subset of
-           notifications with extra actions. For now it's a "Coming soon" empty-state. -->
+      <!-- Read-only module: lists open Dependabot PRs across accessible repos, grouped by
+           repository, with a merge-readiness pill. Same sync button as Notifications, but no
+           filters, bookmarks, or mark-done. Wired by dependabot.js. -->
       <section id="view-dependabot" class="pane" hidden>
         <header class="toolbar" data-tauri-drag-region>
-          <h1 class="toolbar-title">Dependabot</h1>
+          <h1 class="toolbar-title" id="dependabot-view-title">Dependabot</h1>
+          <div class="toolbar-actions">
+            <span class="sync-status">
+              <span class="status-dot status-dot--pending js-dep-sync-dot"></span>
+              <span class="status-label status-label--pending js-dep-sync-label">Loading…</span>
+            </span>
+            <span class="form-msg js-dep-sync-progress"></span>
+            <button type="button" class="icon-btn js-dep-sync-btn" id="dependabot-sync-btn" title="Sync now" aria-label="Sync now">
+              <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M13.4 7a5.5 5.5 0 10-.5 3.4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M13.6 3.4v3.2h-3.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
         </header>
-        <div class="module-placeholder">
-          <img class="module-placeholder-art" src="/assets/helix-muted.svg" alt="" width="116" height="116" />
-          <p class="module-placeholder-title">Dependabot is coming soon.</p>
-          <p class="module-placeholder-sub">This module will gather your Dependabot pull requests with quick actions to triage them.</p>
+
+        <div class="inbox" id="dependabot">
+          <div class="loader">
+            <span class="spinner" aria-hidden="true"></span>
+            <span>Loading Dependabot pull requests…</span>
+          </div>
         </div>
       </section>
 
