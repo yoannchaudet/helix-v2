@@ -12,7 +12,6 @@ use crate::{auth, dependabot, github, settings, sync, AppState, EventSink};
 use serde::Serialize;
 use tauri::{Manager, State};
 
-/// Concurrency + quota tuning for the background merge-state resolution (mirrors the
 /// Quota tuning for the background merge-state resolution (mirrors the notification
 /// subject-resolution knob in `coordinator::tuning`). Resolution runs serially (see
 /// `resolve_pending_merge_states_core`) to respect GitHub's secondary-rate-limit guidance,

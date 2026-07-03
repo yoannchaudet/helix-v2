@@ -18,7 +18,8 @@ pub const KEY_THEME: &str = "theme";
 /// Release builds keep the PAT in the Keychain and never use this key.
 pub const KEY_DEV_GITHUB_PAT: &str = "dev_github_pat";
 /// Dependabot module: JSON array of the account logins (the user + selected orgs) the search
-/// is scoped to. Unset/empty means "not configured" → callers default to the user alone.
+/// is scoped to. Absent means "never configured" → callers default to the user alone; a stored
+/// empty array is an explicit "no accounts" choice (distinct from absent).
 pub const KEY_DEPENDABOT_OWNERS: &str = "dependabot_owners";
 
 /// Lower bound for the polling interval, to avoid hammering the API.
@@ -69,12 +70,13 @@ pub fn delete_key(conn: &Connection, key: &str) -> rusqlite::Result<()> {
 /// The stored Dependabot owner selection (account logins), or `None` when never configured.
 /// A configured-but-empty selection returns `Some(vec![])` — distinct from unset — so the
 /// command layer can default an *unset* selection to the user alone while honoring an explicit
-/// "no accounts" choice.
+/// "no accounts" choice. A corrupted (unparseable) value is treated as unset so a bad row
+/// can't silently disable syncing.
 pub fn get_dependabot_owners(conn: &Connection) -> rusqlite::Result<Option<Vec<String>>> {
     let Some(raw) = get_string(conn, KEY_DEPENDABOT_OWNERS)? else {
         return Ok(None);
     };
-    Ok(Some(serde_json::from_str(&raw).unwrap_or_default()))
+    Ok(serde_json::from_str(&raw).ok())
 }
 
 /// Persist the Dependabot owner selection as a JSON array of logins.
@@ -168,7 +170,7 @@ mod tests {
     }
 
     #[test]
-    fn dependabot_owners_round_trip_and_empty_is_none() {
+    fn dependabot_owners_round_trip_and_distinguishes_unset_from_empty() {
         let conn = mem_conn();
         // Unset → None (callers apply their own default, e.g. the user alone).
         assert_eq!(get_dependabot_owners(&conn).unwrap(), None);
@@ -183,6 +185,10 @@ mod tests {
         // default only the *unset* case to the user alone).
         set_dependabot_owners(&conn, &[]).unwrap();
         assert_eq!(get_dependabot_owners(&conn).unwrap(), Some(vec![]));
+
+        // A corrupted value reads back as unset (so a bad row can't disable syncing).
+        set_string(&conn, KEY_DEPENDABOT_OWNERS, "not json").unwrap();
+        assert_eq!(get_dependabot_owners(&conn).unwrap(), None);
     }
 
     #[test]
