@@ -13,10 +13,11 @@ use serde::Serialize;
 use tauri::{Manager, State};
 
 /// Concurrency + quota tuning for the background merge-state resolution (mirrors the
-/// notification subject-resolution knobs in `coordinator::tuning`).
+/// Quota tuning for the background merge-state resolution (mirrors the notification
+/// subject-resolution knob in `coordinator::tuning`). Resolution runs serially (see
+/// `resolve_pending_merge_states_core`) to respect GitHub's secondary-rate-limit guidance,
+/// so there is no concurrency knob.
 mod tuning {
-    /// Max concurrent PR merge-state resolution requests.
-    pub const MERGE_STATE_POOL: usize = 8;
     /// Soft reserve: stop resolving before spending below this fraction of any rate bucket,
     /// leaving quota for the next search + the notifications module.
     pub const RATE_RESERVE_FRACTION: f64 = 0.25;
@@ -170,17 +171,15 @@ async fn resolve_pending_merge_states(app: tauri::AppHandle, token: String) {
     resolve_pending_merge_states_core(&state.db, app.clone(), resolve).await;
 }
 
-/// Tauri-free core of the background merge-state resolution: the batching, rate-reserve
-/// budgeting, and per-PR store loop, with the network call injected as `resolve(url)` and
-/// events sent through `sink`. Mirrors `coordinator::resolve_pending_subjects_core` but for
-/// the `dependabot_prs` table. Emits `dependabot:resolved` when anything changed.
+/// Tauri-free core of the background merge-state resolution: the serial, rate-reserve-budgeted
+/// per-PR resolve+store loop, with the network call injected as `resolve(url)` and events sent
+/// through `sink`. Mirrors `coordinator::resolve_pending_subjects_core` but for the
+/// `dependabot_prs` table. Emits `dependabot:resolved` when anything changed.
 async fn resolve_pending_merge_states_core<S, R, Fut>(db: &Db, sink: S, resolve: R)
 where
     S: EventSink,
-    R: Fn(String) -> Fut + Clone + Send + Sync + 'static,
-    Fut: std::future::Future<Output = Result<github::ResolveResult, github::ResolveError>>
-        + Send
-        + 'static,
+    R: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<github::ResolveResult, github::ResolveError>>,
 {
     // Snapshot the work under the lock, then release it before any network I/O.
     let pending = {
@@ -196,7 +195,6 @@ where
         return;
     }
 
-    const POOL: usize = tuning::MERGE_STATE_POOL;
     const RESERVE_FRACTION: f64 = tuning::RATE_RESERVE_FRACTION;
 
     let mut changed = 0usize;
@@ -219,49 +217,46 @@ where
         return;
     }
 
-    for batch in pending.chunks(POOL) {
-        let mut handles = Vec::with_capacity(batch.len());
-        for p in batch {
-            let resolve = resolve.clone();
-            let url = p.pull_url.clone();
-            let id = p.id;
-            handles.push(tauri::async_runtime::spawn(async move {
-                let res = resolve(url).await;
-                (id, res)
-            }));
-        }
-        for h in handles {
-            let Ok((id, res)) = h.await else {
-                continue;
-            };
-            match res {
-                Ok(result) => {
-                    rate.observe(result.rate.clone());
-                    match db.0.lock() {
-                        Ok(conn) => match dependabot::store_merge_state(&conn, id, &result.subject)
-                        {
-                            Ok(()) => changed += 1,
-                            Err(e) => {
-                                eprintln!("helix: storing merge state for PR {id} failed: {e}")
-                            }
-                        },
-                        Err(e) => eprintln!(
-                            "helix: storing merge state for PR {id} failed: database lock poisoned: {e}"
-                        ),
-                    }
+    // Resolve **serially** (one request at a time), per GitHub's secondary-rate-limit
+    // guidance ("make requests serially, not concurrently"): a burst of concurrent PR fetches
+    // is the classic secondary-limit trigger. Real network latency paces the loop; the reserve
+    // check bounds primary-quota spend; and any back-off signal (a 403 / `Retry-After`) stops
+    // the whole pass so we don't hammer into the limit — the rest resolves on a later sync.
+    for p in &pending {
+        match resolve(p.pull_url.clone()).await {
+            Ok(result) => {
+                rate.observe(result.rate.clone());
+                match db.0.lock() {
+                    Ok(conn) => match dependabot::store_merge_state(&conn, p.id, &result.subject) {
+                        Ok(()) => changed += 1,
+                        Err(e) => {
+                            eprintln!("helix: storing merge state for PR {} failed: {e}", p.id)
+                        }
+                    },
+                    Err(e) => eprintln!(
+                        "helix: storing merge state for PR {} failed: database lock poisoned: {e}",
+                        p.id
+                    ),
                 }
-                Err(err) => {
-                    // A failed resolution still spent quota — count it toward the reserve.
-                    rate.observe(err.rate.clone());
+            }
+            Err(err) => {
+                // A failed resolution still spent quota — count it toward the reserve.
+                rate.observe(err.rate.clone());
+                if err.should_back_off() {
                     eprintln!(
-                        "dependabot merge-state resolution failed for PR {id}: {}",
+                        "dependabot merge-state resolution backing off (rate limited): {}",
                         err.error
                     );
+                    break;
                 }
+                eprintln!(
+                    "dependabot merge-state resolution failed for PR {}: {}",
+                    p.id, err.error
+                );
             }
         }
 
-        // Stop once this batch pushed us into the reserve; the rest waits for a later sync.
+        // Stop once we've crossed the reserve; the rest waits for a later sync.
         if rate.below_reserve(RESERVE_FRACTION) {
             break;
         }
@@ -563,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_core_stops_after_a_batch_pushes_into_the_reserve() {
+    fn resolve_core_stops_once_it_crosses_the_reserve() {
         let db = db_with_token();
         let prs: Vec<_> = (0..10)
             .map(|i| pr(i, "octo/repo-a", 100 + i, "Bump"))
@@ -573,7 +568,9 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let c = calls.clone();
 
-        // Every response reports quota at/under the 25% reserve → stop after the first batch.
+        // Resolution is serial and the reserve is checked after each request. The first
+        // response already reports quota at/under the 25% reserve, so the loop stops right
+        // after it — leaving the rest for a later sync.
         tauri::async_runtime::block_on(resolve_pending_merge_states_core(
             &db,
             sink.clone(),
@@ -585,13 +582,48 @@ mod tests {
 
         assert_eq!(
             calls.load(Ordering::SeqCst),
-            tuning::MERGE_STATE_POOL,
-            "only the first batch runs before the reserve stops resolution"
+            1,
+            "serial resolution stops as soon as one request crosses the reserve"
         );
         assert_eq!(
             sink.payload("dependabot:resolved"),
-            Some(serde_json::json!({ "count": 8 }))
+            Some(serde_json::json!({ "count": 1 }))
         );
+    }
+
+    #[test]
+    fn resolve_core_backs_off_on_a_rate_limit_403() {
+        let db = db_with_token();
+        let prs: Vec<_> = (0..5)
+            .map(|i| pr(i, "octo/repo-a", 100 + i, "Bump"))
+            .collect();
+        store(&db, &prs);
+        let sink = RecordingSink::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+
+        // A 403 (secondary rate limit) on the first request must abort the whole pass rather
+        // than keep firing into the limit.
+        tauri::async_runtime::block_on(resolve_pending_merge_states_core(
+            &db,
+            sink.clone(),
+            move |_url| {
+                c.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    Err(ResolveError {
+                        rate: rate("core", 4990, 5000),
+                        error: GitHubError::Forbidden("secondary rate limit".into()),
+                    })
+                }
+            },
+        ));
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a 403 stops the whole resolution pass after the first request"
+        );
+        assert_eq!(sink.count("dependabot:resolved"), 0);
     }
 
     #[test]

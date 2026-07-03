@@ -310,6 +310,26 @@ pub struct ResolveError {
     pub error: GitHubError,
 }
 
+impl ResolveError {
+    /// Whether this failure is GitHub telling us to slow down, so a background resolution
+    /// loop should **stop the whole pass** rather than keep firing into the limit (which only
+    /// prolongs it) — the remaining work is left for a later sync. True when a `Retry-After`
+    /// is present (only ever set on a 429/secondary-limit 403) or the error is a **403 whose
+    /// body mentions a rate limit** (primary "API rate limit exceeded" or secondary "exceeded
+    /// a secondary rate limit"). A *non-rate* 403 (e.g. insufficient scope / SAML) is
+    /// deliberately excluded so it's treated as an ordinary per-row failure and doesn't starve
+    /// the rest of the queue by aborting every pass.
+    pub fn should_back_off(&self) -> bool {
+        if self.rate.retry_after.is_some() {
+            return true;
+        }
+        match &self.error {
+            GitHubError::Forbidden(body) => body.to_lowercase().contains("rate limit"),
+            _ => false,
+        }
+    }
+}
+
 /* -------------------------------- Mutations ------------------------------- */
 
 /// Failure from a thread mutation that still carries the rate-limit snapshot. A failed
@@ -736,6 +756,38 @@ fn next_page_url(headers: &HeaderMap) -> Option<String> {
 mod tests {
     use super::*;
     use reqwest::header::{HeaderMap, HeaderValue};
+
+    #[test]
+    fn resolve_error_backs_off_only_on_rate_limits() {
+        let rl = |retry_after: Option<i64>, err: GitHubError| ResolveError {
+            rate: RateLimit {
+                retry_after,
+                ..RateLimit::default()
+            },
+            error: err,
+        };
+        // Secondary/primary rate-limit 403 bodies → back off.
+        assert!(rl(
+            None,
+            GitHubError::Forbidden("You have exceeded a secondary rate limit".into())
+        )
+        .should_back_off());
+        assert!(rl(
+            None,
+            GitHubError::Forbidden("API rate limit exceeded".into())
+        )
+        .should_back_off());
+        // Any Retry-After → back off, regardless of the error shape.
+        assert!(rl(Some(60), GitHubError::Unauthorized).should_back_off());
+        // A non-rate 403 (scope/SAML) must NOT abort the pass.
+        assert!(!rl(
+            None,
+            GitHubError::Forbidden("Resource not accessible by personal access token".into())
+        )
+        .should_back_off());
+        // Other errors don't back off.
+        assert!(!rl(None, GitHubError::Network("timeout".into())).should_back_off());
+    }
 
     #[test]
     fn repo_identity_splits_repository_url() {
