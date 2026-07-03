@@ -762,7 +762,8 @@ code,
   z-index: 1;
 }
 
-#sync-btn.is-due {
+#sync-btn.is-due,
+#dependabot-sync-btn.is-due {
   background: var(--accent-fill);
   border-color: var(--accent-fill);
   color: var(--on-accent);

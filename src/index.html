@@ -28,8 +28,9 @@
 
       <div class="app-body">
       <!-- =============================== Sidebar =============================== -->
-      <!-- Module-scoped: shown for the Notifications module, hidden for modules without a
-           sidebar (e.g. Dependabot) and while the Settings overlay is open. -->
+      <!-- Module-scoped: each module shows its own sidebar sources (Notifications: smart
+           filters + repositories; Dependabot: repositories only), toggled by data-module.
+           The whole sidebar is hidden while the Settings overlay is open. -->
       <aside class="sidebar">
         <!-- Notifications module sources: smart filters + repositories. -->
         <nav class="sources sidebar-module sidebar-module--notifications" aria-label="Notification views">
