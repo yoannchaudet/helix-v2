@@ -15,7 +15,8 @@ import {
 } from "./js/sync.js";
 import { initSettings, loadSettings, showSettings } from "./js/settings.js";
 import { initInbox, loadInbox } from "./js/inbox.js";
-import { initModules, configureModules } from "./js/modules.js";
+import { initDependabot, onDependabotOpened } from "./js/dependabot.js";
+import { initModules, configureModules, restoreLastModule, getActiveModule } from "./js/modules.js";
 import { initShortcuts } from "./js/shortcuts.js";
 
 /* main.js is the thin orchestrator: it wires each domain module's init on DOMContentLoaded
@@ -42,13 +43,20 @@ window.addEventListener("DOMContentLoaded", () => {
 
   initSidebarResize();
   initInbox();
+  initDependabot();
   initShortcuts();
 
   // Module system: render the title-bar module picker and wire ⌘1/⌘2. Switching modules
-  // dismisses the Settings overlay (modules.js fires onSwitch rather than importing
-  // settings.js, keeping the dependency one-directional).
+  // dismisses the Settings overlay, and opening the Dependabot module loads it (and
+  // staleness-gated auto-syncs). modules.js fires onSwitch rather than importing these
+  // modules, keeping the dependency one-directional.
   initModules();
-  configureModules({ onSwitch: () => showSettings(false) });
+  configureModules({
+    onSwitch: (id) => {
+      showSettings(false);
+      if (id === "dependabot") onDependabotOpened();
+    },
+  });
 
   registerSyncEvents();
   // Sync reloads the inbox after a sync (and after background subject resolution) via this
@@ -65,6 +73,10 @@ window.addEventListener("DOMContentLoaded", () => {
         loadSettings();
         loadSyncStatus();
       }
+      // If we restored into Dependabot before auth resolved, its auth-gated auto-sync was
+      // skipped; now that we're authenticated, run its open behavior (staleness-gated, so
+      // it's a no-op when data is fresh).
+      if (getActiveModule() === "dependabot") onDependabotOpened();
     },
     onSignedOut: () => {
       // A new session must re-prove a successful sync before the status pill goes green
@@ -82,9 +94,15 @@ window.addEventListener("DOMContentLoaded", () => {
   loadAccount().finally(loadInbox);
 
   // The window starts hidden (see tauri.conf.json) to avoid a flash on launch;
-  // reveal it from Rust now that the DOM is built and styled. We do not wait on
+  // reveal it from Rust now that the DOM is built and styled. First restore the last opened
+  // module so we reveal on the right pane rather than flashing the default one — but cap the
+  // wait so a slow/hung persisted read can never keep the window hidden. We do not wait on
   // requestAnimationFrame: a hidden macOS WKWebView never paints, so its rAF
   // callbacks would never fire and the window would stay hidden forever. The Rust
   // safety-net (see lib.rs) reveals the window if this call ever fails.
-  invoke("show_main_window").catch(() => {});
+  Promise.race([restoreLastModule(), new Promise((resolve) => setTimeout(resolve, 500))]).finally(
+    () => {
+      invoke("show_main_window").catch(() => {});
+    },
+  );
 });

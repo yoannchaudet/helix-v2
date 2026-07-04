@@ -71,6 +71,16 @@ impl std::fmt::Display for GitHubError {
 
 impl std::error::Error for GitHubError {}
 
+impl GitHubError {
+    /// Whether this is GitHub telling us we're rate-limited: a **403 Forbidden** whose body
+    /// mentions a rate limit (both the primary "API rate limit exceeded" and the secondary
+    /// "exceeded a secondary rate limit" surface as 403). A non-rate 403 (scope/SAML) returns
+    /// false so it isn't mistaken for throttling.
+    pub fn is_rate_limited(&self) -> bool {
+        matches!(self, GitHubError::Forbidden(body) if body.to_lowercase().contains("rate limit"))
+    }
+}
+
 impl From<GitHubError> for String {
     fn from(e: GitHubError) -> Self {
         e.to_string()
@@ -310,6 +320,20 @@ pub struct ResolveError {
     pub error: GitHubError,
 }
 
+impl ResolveError {
+    /// Whether this failure is GitHub telling us to slow down, so a background resolution
+    /// loop should **stop the whole pass** rather than keep firing into the limit (which only
+    /// prolongs it) — the remaining work is left for a later sync. True when a `Retry-After`
+    /// is present (only ever set on a 429/secondary-limit 403) or the error is a **403 whose
+    /// body mentions a rate limit** (primary "API rate limit exceeded" or secondary "exceeded
+    /// a secondary rate limit"). A *non-rate* 403 (e.g. insufficient scope / SAML) is
+    /// deliberately excluded so it's treated as an ordinary per-row failure and doesn't starve
+    /// the rest of the queue by aborting every pass.
+    pub fn should_back_off(&self) -> bool {
+        self.rate.retry_after.is_some() || self.error.is_rate_limited()
+    }
+}
+
 /* -------------------------------- Mutations ------------------------------- */
 
 /// Failure from a thread mutation that still carries the rate-limit snapshot. A failed
@@ -496,6 +520,247 @@ where
     Ok(FetchOutcome { threads, rate })
 }
 
+/* --------------------------- Dependabot enumeration ----------------------- */
+
+/// Page size for the repo/PR listings behind the Dependabot module (the REST max).
+const DEPENDABOT_PER_PAGE: u32 = 100;
+/// Delay between the (core-REST) requests the Dependabot enumeration makes. Enumerating admin
+/// repos and their open PRs is many small requests; pacing them serially keeps us clear of
+/// GitHub's secondary rate limit (the burst guard) while staying trivially within the core
+/// 5000/hr budget.
+const DEPENDABOT_REQUEST_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// One open Dependabot pull request, flattened to just the fields Helix stores. `pull_url` is
+/// the PR's REST API URL (`.../pulls/{n}`), resolved later to a `mergeable_state` for the
+/// merge-readiness pill (the PR *list* endpoint omits it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependabotPr {
+    pub id: i64,
+    pub number: i64,
+    pub title: String,
+    pub html_url: String,
+    pub author: String,
+    pub repo_full_name: String,
+    pub repo_owner: String,
+    pub repo_name: String,
+    pub pull_url: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Result of a Dependabot fetch across a repo list: the collected PRs, the last response's
+/// `core` rate snapshot, and per-repo outcomes. `complete` is true when every repo was scanned
+/// (so the caller may reconcile-delete stale local rows); it is false if the scan stopped early
+/// (quota reserve / rate-limit) or a repo errored. `ok_repos` / `failed_repos` (by full name)
+/// let the caller reset or increment each repo's failure counter for the drop policy.
+pub struct DependabotFetchOutcome {
+    pub prs: Vec<DependabotPr>,
+    pub rate: RateLimit,
+    pub complete: bool,
+    pub ok_repos: Vec<String>,
+    pub failed_repos: Vec<String>,
+}
+
+/// A pull request as returned by the PR *list* endpoint (no `mergeable_state`; that needs the
+/// single-PR GET, done later during resolution). `url` is the PR's REST API URL.
+#[derive(Debug, Deserialize)]
+struct PullListItem {
+    id: i64,
+    number: i64,
+    title: String,
+    html_url: String,
+    url: String,
+    user: Option<SubjectUser>,
+    created_at: String,
+    updated_at: String,
+}
+
+/// Whether `login` is a Dependabot bot author (`dependabot[bot]`, or the legacy
+/// `dependabot-preview[bot]`).
+pub fn is_dependabot_author(login: &str) -> bool {
+    matches!(login, "dependabot[bot]" | "dependabot-preview[bot]")
+}
+
+/// Soft reserve for the admin enumeration: stop before the `core` bucket dips below this
+/// fraction of its limit, so scanning a very large admin scope can't exhaust the quota other
+/// operations need. Stopping early yields an *incomplete* result (the caller then skips
+/// reconcile-delete), so nothing is lost — the rest resolves on a later sync.
+const CORE_RESERVE_FRACTION: f64 = 0.1;
+
+/// Whether the tracked `core` quota has fallen to/below the reserve. Unknown quota (before the
+/// first response populates the headers) is treated as "not low" so enumeration can start.
+fn core_below_reserve(rate: &RateLimit) -> bool {
+    match (rate.remaining, rate.limit) {
+        (Some(remaining), Some(limit)) if limit > 0 => {
+            (remaining as f64) <= CORE_RESERVE_FRACTION * (limit as f64)
+        }
+        _ => false,
+    }
+}
+
+/// GET a single page and return `(json_body, next_page_url)`, updating `rate` and mapping the
+/// usual auth/forbidden/status/parse failures to [`GitHubError`]. Shared by the repo and PR
+/// list loops below.
+async fn get_page<T: for<'de> serde::Deserialize<'de>>(
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+    what: &'static str,
+    rate: &mut RateLimit,
+) -> Result<(T, Option<String>), GitHubError> {
+    let resp = authed_get(client, url, token)
+        .send()
+        .await
+        .map_err(|e| GitHubError::Network(e.to_string()))?;
+    let status = resp.status();
+    rate.update_from(resp.headers());
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(GitHubError::Unauthorized);
+    }
+    if status == reqwest::StatusCode::FORBIDDEN {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(GitHubError::Forbidden(body.trim().to_string()));
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(GitHubError::Status {
+            status,
+            body: body.trim().to_string(),
+        });
+    }
+    let next = next_page_url(resp.headers());
+    let body: T = resp.json().await.map_err(|e| GitHubError::Parse {
+        what,
+        source: e.to_string(),
+    })?;
+    Ok((body, next))
+}
+
+/// List the open, Dependabot-authored pull requests in one repository (paginated + paced).
+async fn list_open_dependabot_prs(
+    client: &reqwest::Client,
+    token: &str,
+    owner: &str,
+    name: &str,
+    rate: &mut RateLimit,
+) -> Result<Vec<DependabotPr>, GitHubError> {
+    let mut url =
+        format!("{API_BASE}/repos/{owner}/{name}/pulls?state=open&per_page={DEPENDABOT_PER_PAGE}");
+    let mut prs = Vec::new();
+    loop {
+        let (page, next): (Vec<PullListItem>, _) =
+            get_page(client, &url, token, "pull requests", rate).await?;
+        for p in page {
+            let author = p.user.map(|u| u.login).unwrap_or_default();
+            if !is_dependabot_author(&author) {
+                continue;
+            }
+            prs.push(DependabotPr {
+                id: p.id,
+                number: p.number,
+                title: p.title,
+                html_url: p.html_url,
+                author,
+                repo_full_name: format!("{owner}/{name}"),
+                repo_owner: owner.to_string(),
+                repo_name: name.to_string(),
+                pull_url: p.url,
+                created_at: p.created_at,
+                updated_at: p.updated_at,
+            });
+        }
+        match next {
+            Some(next_url) => {
+                url = next_url;
+                tokio::time::sleep(DEPENDABOT_REQUEST_DELAY).await;
+            }
+            None => break,
+        }
+    }
+    Ok(prs)
+}
+
+/// Fetch open Dependabot PRs across the given `repos` (the persistent, notification-sourced
+/// repo list). For each repo, lists its open PRs and keeps the Dependabot-authored ones. Uses
+/// only the core REST API, serial + paced (see `DEPENDABOT_REQUEST_DELAY`), so it avoids
+/// tripping GitHub's secondary rate limit. `on_progress(scanned, found)` reports live progress.
+///
+/// Per-repo results are reported in `ok_repos` (fetched successfully) and `failed_repos` (a
+/// 404 or non-rate 403 — the repo is likely gone or no longer readable), so the caller can
+/// reset/increment each repo's drop counter. Stops early — marking the result **incomplete**
+/// (so the caller won't reconcile-delete) — on the core-quota reserve or a rate-limit; a
+/// per-repo failure is skipped (not fatal). Only a 401 aborts the whole fetch.
+pub async fn fetch_dependabot_prs_for_repos<F>(
+    token: &str,
+    repos: &[(String, String)],
+    on_progress: F,
+) -> Result<DependabotFetchOutcome, GitHubError>
+where
+    F: Fn(usize, usize) + Send,
+{
+    let client = reqwest::Client::new();
+    let mut rate = RateLimit::default();
+    let mut prs: Vec<DependabotPr> = Vec::new();
+    let mut ok_repos: Vec<String> = Vec::new();
+    let mut failed_repos: Vec<String> = Vec::new();
+    let mut scanned = 0usize;
+    let mut complete = true;
+
+    for (owner, name) in repos {
+        // Leave headroom on the core bucket for everything else (notifications, merge-state
+        // resolution); the unscanned repos resolve on a later sync.
+        if core_below_reserve(&rate) {
+            complete = false;
+            break;
+        }
+        match list_open_dependabot_prs(&client, token, owner, name, &mut rate).await {
+            Ok(repo_prs) => {
+                prs.extend(repo_prs);
+                ok_repos.push(format!("{owner}/{name}"));
+            }
+            Err(GitHubError::Unauthorized) => return Err(GitHubError::Unauthorized),
+            // Back off on any rate-limit signal — a 403 whose body says "rate limit", a 429, or
+            // any response carrying `Retry-After` (the header is recorded into `rate` even on an
+            // error). Mirrors `ResolveError::should_back_off`; the unscanned repos resolve on a
+            // later sync. Crucially, this must run *before* the 403 failure branch below so a
+            // rate-limiting 403 isn't miscounted as a per-repo access failure (which would drop
+            // a healthy repo after a few strikes).
+            Err(e)
+                if e.is_rate_limited()
+                    || rate.retry_after.is_some()
+                    || matches!(&e, GitHubError::Status { status, .. } if *status == reqwest::StatusCode::TOO_MANY_REQUESTS) =>
+            {
+                complete = false;
+                break;
+            }
+            // A 404 / non-rate 403 means the repo is gone or no longer readable — record it so
+            // the caller can drop it after a few consecutive failures. Other transient errors
+            // (5xx, network, parse) are skipped without counting toward the drop.
+            Err(e) => {
+                if matches!(e, GitHubError::Forbidden(_))
+                    || matches!(e, GitHubError::Status { status, .. } if status == reqwest::StatusCode::NOT_FOUND)
+                {
+                    failed_repos.push(format!("{owner}/{name}"));
+                } else {
+                    eprintln!("helix: listing PRs for {owner}/{name} failed, skipping: {e}");
+                }
+                complete = false;
+            }
+        }
+        scanned += 1;
+        on_progress(scanned, prs.len());
+        tokio::time::sleep(DEPENDABOT_REQUEST_DELAY).await;
+    }
+
+    Ok(DependabotFetchOutcome {
+        prs,
+        rate,
+        complete,
+        ok_repos,
+        failed_repos,
+    })
+}
+
 /// Apply the standard GitHub headers (auth, accept, pinned API version, user-agent) to a
 /// request builder. Shared by every verb so the discipline in `AGENT.md` is applied once.
 fn authed(builder: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
@@ -545,6 +810,48 @@ fn next_page_url(headers: &HeaderMap) -> Option<String> {
 mod tests {
     use super::*;
     use reqwest::header::{HeaderMap, HeaderValue};
+
+    #[test]
+    fn resolve_error_backs_off_only_on_rate_limits() {
+        let rl = |retry_after: Option<i64>, err: GitHubError| ResolveError {
+            rate: RateLimit {
+                retry_after,
+                ..RateLimit::default()
+            },
+            error: err,
+        };
+        // Secondary/primary rate-limit 403 bodies → back off.
+        assert!(rl(
+            None,
+            GitHubError::Forbidden("You have exceeded a secondary rate limit".into())
+        )
+        .should_back_off());
+        assert!(rl(
+            None,
+            GitHubError::Forbidden("API rate limit exceeded".into())
+        )
+        .should_back_off());
+        // Any Retry-After → back off, regardless of the error shape.
+        assert!(rl(Some(60), GitHubError::Unauthorized).should_back_off());
+        // A non-rate 403 (scope/SAML) must NOT abort the pass.
+        assert!(!rl(
+            None,
+            GitHubError::Forbidden("Resource not accessible by personal access token".into())
+        )
+        .should_back_off());
+        // Other errors don't back off.
+        assert!(!rl(None, GitHubError::Network("timeout".into())).should_back_off());
+    }
+
+    #[test]
+    fn is_dependabot_author_matches_bot_logins() {
+        assert!(is_dependabot_author("dependabot[bot]"));
+        assert!(is_dependabot_author("dependabot-preview[bot]"));
+        // A human or another bot is not Dependabot.
+        assert!(!is_dependabot_author("octocat"));
+        assert!(!is_dependabot_author("renovate[bot]"));
+        assert!(!is_dependabot_author("dependabot")); // not a bot login
+    }
 
     #[test]
     fn github_error_display_matches_user_facing_messages() {

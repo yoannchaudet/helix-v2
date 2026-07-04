@@ -9,6 +9,8 @@
 mod auth;
 mod coordinator;
 mod db;
+mod dependabot;
+mod dependabot_coordinator;
 mod github;
 mod settings;
 mod sync;
@@ -26,6 +28,22 @@ pub(crate) struct AppState {
     /// Last window size persisted to SQLite, cached to skip redundant writes while a
     /// resize drag emits a stream of events.
     last_window_size: std::sync::Mutex<Option<(u32, u32)>>,
+}
+
+/// Sink for the UI lifecycle/progress events the sync orchestration emits. Abstracting this
+/// behind a trait (rather than calling `AppHandle::emit` directly) lets the Tauri-free
+/// `*_core` functions in `coordinator`/`dependabot` run against a recording fake in tests —
+/// no Tauri runtime, no real `AppHandle` — while production emits through the real handle.
+/// Shared here (rather than in one domain module) so every domain can reuse it.
+pub(crate) trait EventSink {
+    fn emit(&self, event: &str, payload: serde_json::Value);
+}
+
+impl EventSink for tauri::AppHandle {
+    fn emit(&self, event: &str, payload: serde_json::Value) {
+        // Emission is best-effort (a closed event channel must never fail a sync).
+        let _ = Emitter::emit(self, event, payload);
+    }
 }
 
 /// Snapshot of the local storage, returned to the frontend.
@@ -198,6 +216,21 @@ fn set_theme(
     Ok(())
 }
 
+/// Read the last top-level module the user had open (`notifications` / `dependabot`), or
+/// null if none has been recorded yet. Used to restore the previous module on launch.
+#[tauri::command]
+fn get_last_module(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+    settings::get_string(&conn, settings::KEY_LAST_MODULE).map_err(|e| e.to_string())
+}
+
+/// Persist the currently open top-level module so it can be restored on the next launch.
+#[tauri::command]
+fn set_last_module(module_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+    settings::set_string(&conn, settings::KEY_LAST_MODULE, &module_id).map_err(|e| e.to_string())
+}
+
 /// Reveal the main window. The window starts hidden (see `tauri.conf.json`) so the
 /// frontend can paint its shell before we show it, avoiding a white flash on launch.
 /// Driven from Rust because Tauri v2's `withGlobalTauri` does not expose the `window`
@@ -357,13 +390,17 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
         .download_and_install(
             |chunk, total| {
                 downloaded += chunk as u64;
-                let _ = app.emit("update:progress", UpdateProgress { downloaded, total });
+                let _ = Emitter::emit(
+                    &app,
+                    "update:progress",
+                    UpdateProgress { downloaded, total },
+                );
             },
             || {},
         )
         .await
         .map_err(|e| e.to_string())?;
-    let _ = app.emit("update:installed", ());
+    let _ = Emitter::emit(&app, "update:installed", ());
     // Relaunch into the freshly installed bundle. `restart` diverges (never returns).
     app.restart();
 }
@@ -492,7 +529,7 @@ pub fn run() {
         .on_menu_event(|app, event| {
             // The "Keyboard Shortcuts" item opens the in-app cheatsheet (see shortcuts.js).
             if event.id().as_ref() == "shortcuts" {
-                let _ = app.emit("menu:shortcuts", ());
+                let _ = Emitter::emit(app, "menu:shortcuts", ());
             }
         })
         .on_window_event(|window, event| {
@@ -575,12 +612,17 @@ pub fn run() {
             get_settings,
             save_settings,
             set_theme,
+            get_last_module,
+            set_last_module,
             coordinator::sync_now,
             coordinator::sync_status,
             coordinator::list_inbox,
             coordinator::list_bookmarks,
             coordinator::set_bookmark,
             coordinator::mark_threads_done,
+            dependabot_coordinator::sync_dependabot,
+            dependabot_coordinator::list_dependabot,
+            dependabot_coordinator::dependabot_status,
             show_main_window,
             get_start_at_login,
             set_start_at_login,

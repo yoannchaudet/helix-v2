@@ -1,0 +1,439 @@
+import { invoke, listen } from "./api.js";
+import { $, html, toast, announce } from "./dom.js";
+import { STATES } from "./constants.js";
+import { relTime } from "./format.js";
+import { filterDependabotGroups, totalPrs } from "./dependabot-model.js";
+import { repoSection } from "./dependabot-view.js";
+import { sourceButton } from "./ui.js";
+import { isAuthenticated } from "./account.js";
+import { isMenuOpen } from "./menu.js";
+import { isShortcutsOpen } from "./shortcuts.js";
+
+/* The Dependabot module: a read-only list of open Dependabot PRs grouped by repository, its
+ * repo-only sidebar refinement, keyboard navigation, and its own sync flow. Pure row/section
+ * HTML lives in `dependabot-view.js`; the pure repo pipeline in `dependabot-model.js`; this
+ * module owns all state and DOM wiring. Deliberately trimmed vs. the inbox: no smart filters,
+ * no type pills, no bookmarks, no mark-done.
+ *
+ * Data is offline-first: `loadDependabot` reads the cached PRs from SQLite (`list_dependabot`)
+ * and GitHub is only contacted on a sync (`sync_dependabot`). Auto-sync on module open is
+ * staleness-gated (see `onDependabotOpened`) so repeated opens don't re-scan every time. */
+
+/** By-repo PR groups from the backend (`{ full_name, total, prs }[]`). */
+let depGroups = [];
+/** Optional repository refinement: a `full_name`, or null for "all repositories". */
+let activeRepo = null;
+/** True while a sync is in flight; gates stale `dependabot:progress` events. */
+let syncing = false;
+/** Set when a sync is requested while one is already running (e.g. the account scope changed
+ *  mid-sync), so exactly one follow-up runs with the latest scope. */
+let pendingSync = false;
+/** Epoch ms of the last successful sync this session (0 = never). Drives the staleness
+ *  gate for auto-sync-on-open and the status label. */
+let lastSyncAt = 0;
+/** Resolves once the persisted last-sync time has been read (or the read failed). The
+ *  auto-sync staleness gate awaits it so a restart doesn't re-scan a still-fresh sync. */
+let statusLoaded = Promise.resolve();
+
+/** Auto-sync-on-open only fires if we've never synced this session or it's been at least
+ *  this long since the last sync — so repeated opens don't re-scan the repo list every time. */
+const AUTO_SYNC_STALE_MS = 5 * 60 * 1000;
+
+const REPO_ICON = `<svg viewBox="0 0 16 16" width="15" height="15"><path d="M3 2.5h7.5L13 5v8.5H3z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M5 6h4M5 8.5h6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>`;
+// Matches the notifications "All" smart-filter icon for cross-module consistency.
+const ALL_ICON = `<svg viewBox="0 0 16 16" width="15" height="15"><circle cx="8" cy="8" r="5.25" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M5.5 8l1.6 1.7L10.6 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+/* -------------------------------- Rendering ------------------------------- */
+
+/** The groups to show: the active repo refinement (if any), recency-sorted. */
+function visibleGroups() {
+  return filterDependabotGroups(depGroups, activeRepo);
+}
+
+function emptyDependabot() {
+  if (!isAuthenticated()) {
+    return html`<div class="inbox-empty">
+      <p>Connect your GitHub account to see your Dependabot pull requests.</p>
+    </div>`;
+  }
+  return html`<div class="inbox-empty">
+    <img class="inbox-empty-art" src="/assets/helix-muted.svg" alt="" width="116" height="116" />
+    <p class="inbox-empty-title">No open Dependabot pull requests.</p>
+    <p class="inbox-empty-sub">
+      Repositories appear here as they show up in your notifications, so sync
+      <span class="inbox-empty-hint">Notifications</span> to populate the list — then their open
+      Dependabot PRs are collected here.
+    </p>
+  </div>`;
+}
+
+/** Snapshot the focused PR row id so a re-render can restore focus (the list re-renders
+ *  wholesale on refine/sync, which would otherwise drop focus to <body>). */
+function captureFocus() {
+  const active = document.activeElement;
+  const list = $("#dependabot");
+  if (!active || !list || !list.contains(active)) return null;
+  const row = active.closest(".n-row");
+  return row?.dataset.prId ?? null;
+}
+
+/** Restore focus to a PR row by id after a re-render. Returns true if it landed. */
+function applyFocus(prId, { preventScroll = false } = {}) {
+  if (prId == null) return false;
+  const safe = String(prId).replace(/["\\]/g, "\\$&");
+  const open = $("#dependabot")?.querySelector(`.n-row[data-pr-id="${safe}"] .n-open[tabindex]`);
+  if (!open) return false;
+  open.focus({ preventScroll });
+  return true;
+}
+
+/** Render the central PR list for the active repo refinement. */
+function renderList() {
+  const list = $("#dependabot");
+  if (!list) return;
+  const preserved = captureFocus();
+  const groups = visibleGroups();
+  if (!groups.length) {
+    list.innerHTML = emptyDependabot();
+    return;
+  }
+  list.innerHTML = groups.map(repoSection).join("");
+  if (preserved != null && !applyFocus(preserved, { preventScroll: true })) {
+    list.querySelector(".n-open[tabindex]")?.focus({ preventScroll: true });
+  }
+}
+
+/** Render the repo-only sidebar for the Dependabot module (counts + active highlight). */
+function renderSidebar() {
+  const filterList = $("#dependabot-filter-list");
+  if (filterList) {
+    // "All" mirrors the notifications smart filter: total open PRs, active when no repo is
+    // refined, and clicking it clears any repo refinement.
+    filterList.innerHTML = sourceButton({
+      icon: ALL_ICON,
+      label: "All",
+      attrs: html`data-filter="all"`,
+      active: activeRepo == null,
+      count: depGroups.length ? String(totalPrs(depGroups)) : "",
+    });
+    filterList.querySelector('[data-filter="all"]')?.addEventListener("click", clearRepo);
+  }
+
+  const repoList = $("#dependabot-repo-list");
+  if (!repoList) return;
+  if (!depGroups.length) {
+    repoList.innerHTML = html`<li class="source-empty">No repositories yet.</li>`;
+    return;
+  }
+  // Same recency order as the main list so the sidebar matches the view.
+  const ordered = filterDependabotGroups(depGroups, null);
+  repoList.innerHTML = ordered
+    .map((g) =>
+      sourceButton({
+        icon: REPO_ICON,
+        label: g.full_name,
+        labelTitle: g.full_name,
+        className: "repo-source",
+        attrs: html`data-repo="${g.full_name}"`,
+        active: g.full_name === activeRepo,
+        count: g.prs.length ? String(g.prs.length) : "",
+      }),
+    )
+    .join("");
+  for (const btn of repoList.querySelectorAll(".repo-source")) {
+    btn.addEventListener("click", () => selectRepo(btn.dataset.repo));
+  }
+  for (const btn of repoList.querySelectorAll(".source[data-repo]")) {
+    const active = btn.dataset.repo === activeRepo;
+    btn.classList.toggle("source--active", active);
+    if (active) btn.setAttribute("aria-current", "true");
+    else btn.removeAttribute("aria-current");
+  }
+}
+
+/** Update the toolbar breadcrumb to reflect the active repo refinement. */
+function renderTitle() {
+  const title = $("#dependabot-view-title");
+  if (!title) return;
+  if (activeRepo != null) {
+    title.innerHTML = html`Dependabot<span class="crumb-sep" aria-hidden="true">›</span><span class="crumb-repo">${activeRepo}</span>`;
+    title.setAttribute("aria-label", `Dependabot, repository ${activeRepo}`);
+  } else {
+    title.textContent = "Dependabot";
+    title.removeAttribute("aria-label");
+  }
+}
+
+/** Announce the current view to assistive tech (the visual heading change isn't announced). */
+function announceView() {
+  const count = totalPrs(visibleGroups());
+  const noun = count === 1 ? "pull request" : "pull requests";
+  const where = activeRepo != null ? `Dependabot, repository ${activeRepo}` : "Dependabot";
+  announce(`${where}, ${count} ${noun}.`);
+}
+
+/** Toggle the repository refinement: select it, or clear it if already active. */
+function selectRepo(fullName, kbd = false) {
+  activeRepo = activeRepo === fullName ? null : fullName;
+  renderTitle();
+  renderSidebar();
+  renderList();
+  if (kbd) $("#dependabot").querySelector(".n-row")?.querySelector(".n-open[tabindex]")?.focus();
+  announceView();
+}
+
+/** Clear any repository refinement (the sidebar "All" entry). No-op if already cleared. */
+function clearRepo() {
+  if (activeRepo == null) return;
+  activeRepo = null;
+  renderTitle();
+  renderSidebar();
+  renderList();
+  announceView();
+}
+
+/* --------------------------------- Loading -------------------------------- */
+
+/** Load the cached Dependabot PRs from SQLite and render (offline-first; no network). */
+export async function loadDependabot() {
+  try {
+    depGroups = await invoke("list_dependabot");
+    // Drop a repo refinement whose repository is no longer present.
+    if (activeRepo != null && !depGroups.some((g) => g.full_name === activeRepo)) {
+      activeRepo = null;
+    }
+    renderTitle();
+    renderSidebar();
+    renderList();
+  } catch (err) {
+    $("#dependabot").innerHTML = html`<pre class="error-detail">${err}</pre>`;
+  }
+}
+
+/* -------------------------------- Interactions ---------------------------- */
+
+/** Open a PR in the default browser via the backend. */
+function openPr(url) {
+  if (!url) return;
+  invoke("open_url", { url }).catch((err) => {
+    console.error(`failed to open ${url}: ${err}`);
+    toast("Couldn't open link", "error");
+  });
+}
+
+/** Left-click an openable PR row → open it in the browser. */
+function onListClick(e) {
+  if (e.detail > 1) return; // ignore the second click of a double-click
+  const el = e.target instanceof Element ? e.target : e.target?.parentElement;
+  const open = el?.closest(".n-open");
+  if (open?.dataset.url) openPr(open.dataset.url);
+}
+
+/** Enter on a focused PR row → open it (links activate on Enter, not Space). */
+function onListKeydown(e) {
+  if (e.key !== "Enter") return;
+  const open = e.target.closest?.(".n-open");
+  if (!open?.dataset.url) return;
+  e.preventDefault();
+  openPr(open.dataset.url);
+}
+
+/* ------------------------- Keyboard command model ------------------------- */
+
+/** All PR rows currently in the DOM, in visual order. */
+function rows() {
+  return [...$("#dependabot").querySelectorAll(".n-row")];
+}
+
+/** The row the keyboard cursor is on, or null. */
+function activeRow() {
+  const el = document.activeElement;
+  return el instanceof HTMLElement ? el.closest("#dependabot .n-row") : null;
+}
+
+/** Move the keyboard cursor by `delta` rows (clamped); enter at an end from outside. */
+function moveActiveRow(delta) {
+  const all = rows();
+  if (!all.length) return;
+  const current = activeRow();
+  const at = current ? all.indexOf(current) : -1;
+  const next =
+    at === -1
+      ? delta > 0
+        ? 0
+        : all.length - 1
+      : Math.min(all.length - 1, Math.max(0, at + delta));
+  all[next].querySelector(".n-open[tabindex]")?.focus();
+}
+
+/** Global triage keydown: active only on the Dependabot pane, no modifier, not while typing
+ *  or while a menu/overlay owns the keyboard. j/k navigate, Enter opens (handled on the row),
+ *  r syncs. */
+function onCommandKeydown(e) {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const t = e.target;
+  if (t instanceof HTMLElement && (t.matches("input, textarea, select") || t.isContentEditable)) {
+    return;
+  }
+  if (isMenuOpen() || isShortcutsOpen()) return;
+  if ($("#view-dependabot")?.hidden) return;
+
+  switch (e.key) {
+    case "j":
+    case "ArrowDown":
+      e.preventDefault();
+      moveActiveRow(1);
+      return;
+    case "k":
+    case "ArrowUp":
+      e.preventDefault();
+      moveActiveRow(-1);
+      return;
+    case "r":
+      e.preventDefault();
+      syncDependabot();
+      return;
+  }
+}
+
+/* ---------------------------- Sync status + flow -------------------------- */
+
+function setDepStatus(state, text) {
+  const dot = $(".js-dep-sync-dot");
+  if (dot) {
+    for (const s of STATES) dot.classList.remove(`status-dot--${s}`);
+    dot.classList.add(`status-dot--${state}`);
+  }
+  const label = $(".js-dep-sync-label");
+  if (label) {
+    for (const s of STATES) label.classList.remove(`status-label--${s}`);
+    label.classList.add(`status-label--${state}`);
+    label.textContent = text;
+  }
+}
+
+function setDepProgress(text, kind = "") {
+  const el = $(".js-dep-sync-progress");
+  if (el) {
+    el.className = `form-msg js-dep-sync-progress${kind ? ` form-msg--${kind}` : ""}`;
+    el.textContent = text;
+  }
+}
+
+function setDepBusy(busy) {
+  const btn = $("#dependabot-sync-btn");
+  if (btn) {
+    btn.disabled = busy;
+    btn.classList.toggle("is-due", busy);
+  }
+}
+
+/** Reflect the idle status label from `lastSyncAt` (neutral; green is only shown transiently
+ *  right after a sync succeeds). */
+function renderIdleStatus() {
+  if (lastSyncAt) setDepStatus("neutral", `Synced ${relTime(new Date(lastSyncAt).toISOString())}`);
+  else setDepStatus("pending", "Not synced yet");
+}
+
+/** Run a Dependabot sync: scan the notification-sourced repo list, store, and reload. Manages
+ *  its own status chrome (independent of the Notifications sync). If a sync is already in
+ *  flight (e.g. auto-sync + a manual click), queue exactly one follow-up. `syncing` stays true
+ *  until the `finally` block so re-entrancy is reliably gated across the whole flow. */
+export async function syncDependabot() {
+  if (!isAuthenticated()) {
+    setDepProgress("Connect a GitHub token to sync Dependabot.", "error");
+    return;
+  }
+  if (syncing) {
+    pendingSync = true;
+    return;
+  }
+  setDepBusy(true);
+  syncing = true;
+  setDepStatus("pending", "Syncing…");
+  setDepProgress("Starting…");
+  try {
+    const result = await invoke("sync_dependabot");
+    lastSyncAt = Date.now();
+    const removed = result.removed ?? 0;
+    const msg = `Found ${result.count} PR${result.count === 1 ? "" : "s"}`;
+    const detail = removed > 0 ? `${msg}, removed ${removed}.` : `${msg}.`;
+    if (result.complete === false) {
+      // Some repos couldn't be read (e.g. a 404 from a repo the token lacks PR access to) or
+      // the scan stopped on the quota reserve. Surface it as a neutral note, not an error.
+      setDepProgress(`${detail} Some repositories were skipped — check token access.`, "");
+    } else {
+      setDepProgress(detail, "success");
+    }
+    setDepStatus("success", "Synced just now");
+    await loadDependabot();
+  } catch (err) {
+    setDepStatus("error", "Error");
+    // GitHub's raw rate-limit 403 body is noisy; show a short, actionable message instead.
+    const raw = String(err);
+    const friendly = /rate limit/i.test(raw)
+      ? "GitHub is rate-limiting requests right now. Wait a few minutes, then sync again."
+      : raw;
+    setDepProgress(friendly, "error");
+  } finally {
+    // Only now clear the in-flight flag — kept true through the UI updates + loadDependabot
+    // above so a quick `r`/re-trigger can't start a concurrent sync.
+    syncing = false;
+    setDepBusy(false);
+    // A trigger arrived mid-sync — run it now.
+    if (pendingSync) {
+      pendingSync = false;
+      syncDependabot();
+    }
+  }
+}
+
+/** Called by main.js when the Dependabot module becomes active: render cached PRs, then
+ *  auto-sync if stale (never synced this session, or older than the staleness window). */
+export async function onDependabotOpened() {
+  loadDependabot();
+  if (!isAuthenticated()) return;
+  // Wait for the persisted last-sync time to load before the staleness gate, so restoring into
+  // the Dependabot module doesn't re-scan when a recent sync (from a previous run) is still
+  // fresh — otherwise `lastSyncAt` would still be 0 here and we'd auto-sync every launch.
+  await statusLoaded;
+  if (!lastSyncAt || Date.now() - lastSyncAt > AUTO_SYNC_STALE_MS) {
+    syncDependabot();
+  }
+}
+
+/* ---------------------------------- Init --------------------------------- */
+
+/** Wire the Dependabot module's DOM listeners + sync events. Call once on DOMContentLoaded. */
+export function initDependabot() {
+  const list = $("#dependabot");
+  if (list) {
+    list.addEventListener("click", onListClick);
+    list.addEventListener("keydown", onListKeydown);
+  }
+  document.addEventListener("keydown", onCommandKeydown);
+  $("#dependabot-sync-btn")?.addEventListener("click", syncDependabot);
+
+  // Seed the last-sync time from persisted state so the "Synced …" label and the auto-sync
+  // staleness gate survive app restarts. Best-effort: fall back to the neutral idle label.
+  statusLoaded = invoke("dependabot_status")
+    .then((status) => {
+      const ts = status?.last_sync_at ? Date.parse(status.last_sync_at) : NaN;
+      // Never move the clock backwards: a sync may have completed (setting lastSyncAt to
+      // Date.now()) before this persisted read resolves.
+      if (!Number.isNaN(ts)) lastSyncAt = Math.max(lastSyncAt, ts);
+      renderIdleStatus();
+    })
+    .catch(() => renderIdleStatus());
+
+  // Live progress during a sync (repos scanned / Dependabot PRs found).
+  listen("dependabot:progress", (event) => {
+    if (!syncing) return;
+    const { found } = event.payload ?? {};
+    setDepProgress(`Scanning repositories… (${found ?? 0} found)`);
+  });
+  // Merge-readiness pills resolve in the background after a sync; reload once they land.
+  listen("dependabot:resolved", () => {
+    loadDependabot();
+  });
+}

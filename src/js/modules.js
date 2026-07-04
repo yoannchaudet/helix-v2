@@ -1,4 +1,5 @@
 import { $, html } from "./dom.js";
+import { invoke } from "./api.js";
 import { isShortcutsOpen } from "./shortcuts.js";
 import { closeMenu } from "./menu.js";
 import { MODULES, DEFAULT_MODULE_ID, isModuleId, moduleAt } from "./modules-model.js";
@@ -13,12 +14,16 @@ import { MODULES, DEFAULT_MODULE_ID, isModuleId, moduleAt } from "./modules-mode
  * Switching modules dismisses that overlay (wired via the `onSwitch` hook from main.js, so
  * this module never imports settings.js and we avoid a circular dependency). */
 
-/** The active module id (resets to the default each launch; not persisted). */
+/** The active module id. Defaults to `DEFAULT_MODULE_ID`; `restoreLastModule()` reinstates
+ *  the previously opened module on launch. */
 let activeModuleId = DEFAULT_MODULE_ID;
 
 /** Cross-module hooks, set by main.js to avoid import cycles. `onSwitch(id)` fires after a
  *  module becomes active (used to dismiss the Settings overlay). */
 const hooks = { onSwitch: null };
+
+/** Serializes `set_last_module` writes so rapid switches persist in switch order. */
+let persistChain = Promise.resolve();
 
 /** Wire cross-module reactions without importing their modules (avoids cycles). */
 export function configureModules(overrides) {
@@ -74,6 +79,24 @@ export function switchModule(id) {
   hooks.onSwitch?.(id);
   showActiveModulePane();
   renderPickerState();
+  // Persist the choice so the next launch reopens this module. Writes are chained (not just
+  // fire-and-forget) so a slow earlier write can't land after a later one and restore a stale
+  // module on the next launch. A failed write just means we fall back to the default.
+  persistChain = persistChain
+    .catch(() => {})
+    .then(() => invoke("set_last_module", { moduleId: id }).catch(() => {}));
+}
+
+/** Restore the last opened module from persisted state. Call once on startup, before the
+ *  window is shown, so we don't flash the default module first. No-op if nothing was saved
+ *  or the saved id is unknown/already the default. */
+export async function restoreLastModule() {
+  try {
+    const id = await invoke("get_last_module");
+    if (isModuleId(id) && id !== activeModuleId) switchModule(id);
+  } catch {
+    /* fall back to the default module */
+  }
 }
 
 /** Render the picker buttons into `#module-picker` and wire clicks + the ⌘N shortcuts.

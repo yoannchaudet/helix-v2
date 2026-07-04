@@ -29,6 +29,10 @@ apple-native-keyring-store = { version = "1", features = ["keychain"] }
 reqwest = { version = "0.13", features = ["json"] }
 # Launch-at-login toggle (LaunchAgent on macOS). Used in both dev and release.
 tauri-plugin-autostart = "2"
+# Async timer only: paces the Dependabot module's serial core-REST enumeration (repo + PR
+# listings) so bursts don't trip a secondary rate limit (Tauri's runtime is already tokio;
+# this just lets us `sleep`).
+tokio = { version = "1", features = ["time"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri-plugin-updater = "2.10.1"

@@ -10,39 +10,22 @@
 
 use crate::db::Db;
 use crate::sync::SyncStatus;
-use crate::{auth, github, sync, AppState};
+use crate::{auth, github, sync, AppState, EventSink};
 use serde::Serialize;
-use tauri::{Emitter, Manager, State};
-
-/// Sink for the UI lifecycle/progress events the orchestration emits. Abstracting this
-/// behind a trait (rather than calling `AppHandle::emit` directly) lets the Tauri-free
-/// `*_core` functions below run against a recording fake in tests — no Tauri runtime, no
-/// real `AppHandle` — while production keeps emitting through the real handle.
-pub(crate) trait EventSink {
-    fn emit(&self, event: &str, payload: serde_json::Value);
-}
-
-impl EventSink for tauri::AppHandle {
-    fn emit(&self, event: &str, payload: serde_json::Value) {
-        // Emission is best-effort in the original code (`let _ = app.emit(...)`); a closed
-        // event channel must never fail a sync.
-        let _ = Emitter::emit(self, event, payload);
-    }
-}
+use tauri::{Manager, State};
 
 /// Concurrency and quota tuning for background GitHub work. Centralized here so the knobs
 /// are easy to find and adjust without hunting through the command handlers.
 mod tuning {
-    /// Max concurrent requests when resolving notification subjects in the background.
-    pub const SUBJECT_RESOLUTION_POOL: usize = 8;
     /// Max concurrent `DELETE /notifications/threads/{id}` requests when marking
-    /// notifications done.
+    /// notifications done. Mark-done is a bounded, user-initiated batch (not the automatic,
+    /// potentially large background fan-out that subject resolution is), so a small pool is
+    /// fine here; background subject resolution instead runs serially (see
+    /// `resolve_pending_subjects_core`) to respect GitHub's secondary-rate-limit guidance.
     pub const MUTATION_POOL: usize = 8;
-    /// Soft reserve for background subject resolution: stop before it eats below this
-    /// fraction of any rate-limit bucket, leaving quota for the list fetch + mark-done.
-    /// The check runs after each batch of up to `SUBJECT_RESOLUTION_POOL` concurrent
-    /// requests, so a single batch can dip up to that many requests past the line before
-    /// we stop (immaterial against the thousands-wide core budget; not a hard floor).
+    /// Soft reserve for background subject resolution: stop before it eats below this fraction
+    /// of any rate-limit bucket, leaving quota for the list fetch + mark-done. Checked after
+    /// each (serial) resolution request; the deferred subjects resolve on a later sync.
     pub const RATE_RESERVE_FRACTION: f64 = 0.25;
 }
 
@@ -205,17 +188,16 @@ async fn resolve_pending_subjects(app: tauri::AppHandle, token: String) {
     resolve_pending_subjects_core(&state.db, app.clone(), resolve).await;
 }
 
-/// Tauri-free core of [`resolve_pending_subjects`]: the batching, rate-reserve budgeting, and
-/// per-subject store loop, with the network call injected as `resolve(url)` and events sent
-/// through `sink`. This is where #98's rate-limit-reserve and partial-failure paths live, so
-/// keeping it free of `AppHandle`/`github::` lets tests drive them with a fake resolver.
+/// Tauri-free core of [`resolve_pending_subjects`]: the serial rate-reserve-budgeted
+/// per-subject resolve+store loop, with the network call injected as `resolve(url)` and
+/// events sent through `sink`. This is where #98's rate-limit-reserve and partial-failure
+/// paths (and the secondary-rate-limit back-off) live, so keeping it free of
+/// `AppHandle`/`github::` lets tests drive them with a fake resolver.
 async fn resolve_pending_subjects_core<S, R, Fut>(db: &Db, sink: S, resolve: R)
 where
     S: EventSink,
-    R: Fn(String) -> Fut + Clone + Send + Sync + 'static,
-    Fut: std::future::Future<Output = Result<github::ResolveResult, github::ResolveError>>
-        + Send
-        + 'static,
+    R: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<github::ResolveResult, github::ResolveError>>,
 {
     // Snapshot the work under the lock, then release it before any network I/O.
     let pending = {
@@ -231,7 +213,6 @@ where
         return;
     }
 
-    const POOL: usize = tuning::SUBJECT_RESOLUTION_POOL;
     const RESERVE_FRACTION: f64 = tuning::RATE_RESERVE_FRACTION;
 
     let mut changed = 0usize;
@@ -259,47 +240,49 @@ where
         return;
     }
 
-    for batch in pending.chunks(POOL) {
-        let mut handles = Vec::with_capacity(batch.len());
-        for p in batch {
-            let resolve = resolve.clone();
-            let url = p.subject_url.clone();
-            let thread_id = p.thread_id.clone();
-            handles.push(tauri::async_runtime::spawn(async move {
-                let res = resolve(url).await;
-                (thread_id, res)
-            }));
-        }
-        for h in handles {
-            let Ok((thread_id, res)) = h.await else {
-                continue;
-            };
-            match res {
-                Ok(result) => {
-                    rate.observe(result.rate.clone());
-                    match db.0.lock() {
-                        Ok(conn) => {
-                            match sync::store_resolved_subject(&conn, &thread_id, &result.subject) {
-                                Ok(()) => changed += 1,
-                                Err(e) => eprintln!(
-                                    "helix: storing resolved subject for {thread_id} failed: {e}"
-                                ),
-                            }
+    // Resolve **serially** (one request at a time), per GitHub's secondary-rate-limit guidance
+    // ("make requests serially, not concurrently"): a burst of concurrent subject fetches is
+    // the classic secondary-limit trigger. Real network latency paces the loop; the reserve
+    // check bounds primary-quota spend; and any back-off signal (a 403 / `Retry-After`) stops
+    // the whole pass so we don't hammer into the limit — the rest resolves on a later sync.
+    for p in &pending {
+        match resolve(p.subject_url.clone()).await {
+            Ok(result) => {
+                rate.observe(result.rate.clone());
+                match db.0.lock() {
+                    Ok(conn) => {
+                        match sync::store_resolved_subject(&conn, &p.thread_id, &result.subject) {
+                            Ok(()) => changed += 1,
+                            Err(e) => eprintln!(
+                                "helix: storing resolved subject for {} failed: {e}",
+                                p.thread_id
+                            ),
                         }
-                        Err(e) => eprintln!(
-                            "helix: storing resolved subject for {thread_id} failed: database lock poisoned: {e}"
-                        ),
                     }
+                    Err(e) => eprintln!(
+                        "helix: storing resolved subject for {} failed: database lock poisoned: {e}",
+                        p.thread_id
+                    ),
                 }
-                Err(err) => {
-                    // A failed resolution still spent quota — count it toward the reserve.
-                    rate.observe(err.rate.clone());
-                    eprintln!("subject resolution failed for {thread_id}: {}", err.error);
+            }
+            Err(err) => {
+                // A failed resolution still spent quota — count it toward the reserve.
+                rate.observe(err.rate.clone());
+                if err.should_back_off() {
+                    eprintln!(
+                        "subject resolution backing off (rate limited): {}",
+                        err.error
+                    );
+                    break;
                 }
+                eprintln!(
+                    "subject resolution failed for {}: {}",
+                    p.thread_id, err.error
+                );
             }
         }
 
-        // Stop once this batch pushed us into the reserve; the rest waits for a later sync.
+        // Stop once we've crossed the reserve; the rest waits for a later sync.
         if rate.below_reserve(RESERVE_FRACTION) {
             break;
         }
@@ -916,9 +899,8 @@ mod tests {
     }
 
     #[test]
-    fn resolve_core_stops_after_a_batch_pushes_into_the_reserve() {
+    fn resolve_core_stops_once_it_crosses_the_reserve() {
         let db = db_with_token();
-        // More than one pool's worth (POOL = 8) so there is a second batch to skip.
         let threads: Vec<_> = (0..10)
             .map(|i| thread(&format!("{i}"), 100, "octo/repo-a", "T"))
             .collect();
@@ -927,8 +909,9 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let c = calls.clone();
 
-        // Each response reports quota already at/under the 25% reserve, so after the first
-        // batch the loop must stop and leave the rest for a later sync.
+        // Resolution is serial and the reserve is checked after each request. The first
+        // response already reports quota at/under the 25% reserve, so the loop stops right
+        // after it — leaving the remaining subjects for a later sync.
         tauri::async_runtime::block_on(resolve_pending_subjects_core(
             &db,
             sink.clone(),
@@ -940,12 +923,12 @@ mod tests {
 
         assert_eq!(
             calls.load(Ordering::SeqCst),
-            tuning::SUBJECT_RESOLUTION_POOL,
-            "only the first batch runs before the reserve stops resolution"
+            1,
+            "serial resolution stops as soon as one request crosses the reserve"
         );
         assert_eq!(
             sink.payload("subjects:resolved"),
-            Some(serde_json::json!({ "count": 8 }))
+            Some(serde_json::json!({ "count": 1 }))
         );
     }
 
@@ -1033,5 +1016,40 @@ mod tests {
         let pending = sync::subjects_needing_resolution(&conn).unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].thread_id, "bad-2");
+    }
+
+    #[test]
+    fn resolve_core_backs_off_on_a_rate_limit_403() {
+        let db = db_with_token();
+        let threads: Vec<_> = (0..5)
+            .map(|i| thread(&format!("{i}"), 100, "octo/repo-a", "T"))
+            .collect();
+        store(&db, &threads);
+        let sink = RecordingSink::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+
+        // The first request comes back 403 (a secondary rate limit) — resolution must abort
+        // the whole pass immediately rather than keep firing into the limit.
+        tauri::async_runtime::block_on(resolve_pending_subjects_core(
+            &db,
+            sink.clone(),
+            move |_url| {
+                c.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    Err(ResolveError {
+                        rate: rate("core", 4990, 5000),
+                        error: GitHubError::Forbidden("secondary rate limit".into()),
+                    })
+                }
+            },
+        ));
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a 403 stops the whole resolution pass after the first request"
+        );
+        assert_eq!(sink.count("subjects:resolved"), 0);
     }
 }
