@@ -330,13 +330,13 @@ export function registerSyncEvents() {
   // The resolution pass finished (drained, hit the rate reserve, or backed off) — this is the
   // true end of the sync. Leave the resolving phase: flip the pill to "Synced", re-enable the
   // controls, and restart the poll countdown from here. Any still-pending subjects (deferred
-  // under the reserve) resolve on a later sync.
+  // under the reserve) resolve on a later sync. No inbox reload here — `subjects:resolved`
+  // already reloads it whenever anything actually changed, so reloading again would be redundant.
   listen("subjects:resolution-done", () => {
     if (!resolving) return;
     resolving = false;
     setSyncBusy(false);
     loadSyncStatus();
-    onInboxStale?.();
     resetPollCountdown();
   });
 }

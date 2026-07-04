@@ -33,6 +33,8 @@ export function installTauriMock(fixtures) {
     listeners.get(name).add(cb);
     return Promise.resolve(() => listeners.get(name)?.delete(cb));
   };
+  // Test hook: let specs drive backend events directly (e.g. finish a withheld resolution pass).
+  window.__mockEmit = emit;
 
   const countAll = () => state.inbox.reduce((sum, g) => sum + g.notifications.length, 0);
 
@@ -122,9 +124,12 @@ export function installTauriMock(fixtures) {
       // resolves nothing — but the lifecycle events still fire so the app leaves the
       // "Syncing…" (resolving) phase. A macrotask defers them until after the app's
       // `await invoke(...)` continuation, modelling the real (post-return) ordering.
+      //
+      // With `fixtures.manualResolution`, the `-done` event is withheld so a test can observe
+      // the "busy through resolution" phase and then fire it via `window.__mockEmit(...)`.
       setTimeout(() => {
         emit("subjects:resolution-started", null);
-        emit("subjects:resolution-done", { changed: 0 });
+        if (!fixtures.manualResolution) emit("subjects:resolution-done", { changed: 0 });
       }, 0);
       return { count: countAll(), removed: 0 };
     },

@@ -27,10 +27,11 @@ mod tuning {
     /// of any rate-limit bucket, leaving quota for the list fetch + mark-done. Checked after
     /// each (serial) resolution request; the deferred subjects resolve on a later sync.
     pub const RATE_RESERVE_FRACTION: f64 = 0.25;
-    /// Per-request timeout for background subject-resolution calls. Bounds each request so a
-    /// hung connection can't stall the whole pass — which the frontend now waits on before it
-    /// reports the sync complete (see `subjects:resolution-done`). A timed-out request is a
-    /// normal per-subject failure: it's logged and retried on a later sync.
+    /// Per-request timeout for background subject-resolution calls, enforced at the call site
+    /// (see `resolve_pending_subjects`). Bounds each request so a hung connection can't stall
+    /// the whole pass — which the frontend now waits on before it reports the sync complete
+    /// (see `subjects:resolution-done`). A timed-out request is a normal per-subject failure:
+    /// it's logged and retried on a later sync.
     pub const RESOLVE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 }
 
@@ -184,17 +185,28 @@ where
 /// DB lock is never held across network I/O. Emits `subjects:resolved` when anything changed.
 async fn resolve_pending_subjects(app: tauri::AppHandle, token: String) {
     let state = app.state::<AppState>();
-    // A per-request timeout bounds each subject fetch so a hung connection can't leave the
-    // pass (and therefore the sync's "resolving" phase) running forever. Falls back to the
-    // default client if the builder ever fails.
-    let client = reqwest::Client::builder()
-        .timeout(tuning::RESOLVE_REQUEST_TIMEOUT)
-        .build()
-        .unwrap_or_default();
+    let client = reqwest::Client::new();
     let resolve = move |url: String| {
         let client = client.clone();
         let token = token.clone();
-        async move { github::resolve_subject(&client, &url, &token).await }
+        // Bound each subject fetch at the call site with `tokio::time::timeout` so a hung
+        // connection can't stall the pass (and leave the UI stuck in the resolving phase),
+        // regardless of how the client was built. A timeout is a normal per-subject failure:
+        // it's logged and the subject is retried on a later sync.
+        async move {
+            match tokio::time::timeout(
+                tuning::RESOLVE_REQUEST_TIMEOUT,
+                github::resolve_subject(&client, &url, &token),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(github::ResolveError {
+                    rate: github::RateLimit::default(),
+                    error: github::GitHubError::Network("subject resolution timed out".into()),
+                }),
+            }
+        }
     };
     resolve_pending_subjects_core(&state.db, app.clone(), resolve).await;
 }
