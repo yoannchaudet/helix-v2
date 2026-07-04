@@ -114,6 +114,39 @@ function emptyInbox() {
  *  Shape: { threadId, part } | { selector }. Consumed (cleared) by the next renderInbox. */
 let pendingInboxFocus = null;
 
+/* Row hover is driven by a JS-managed class instead of the CSS `:hover` pseudo. In the macOS
+ * WKWebView, a wholesale re-render (background subject resolution replaces rows) under a
+ * stationary cursor leaves `:hover` stuck on the new node — its `mouseout` never fires — so the
+ * row's action controls stay visible after the cursor leaves. Tracking the hovered row/header
+ * ourselves via delegated listeners on the stable `#inbox` container avoids that: the class is
+ * cleared on every render and only (re)applied on real pointer movement. */
+let hoverRow = null;
+let hoverHeader = null;
+
+/** Move the `n-row--hover` marker to `row` (or clear it when null). */
+function setHoverRow(row) {
+  if (hoverRow === row) return;
+  hoverRow?.classList.remove("n-row--hover");
+  hoverRow = row;
+  hoverRow?.classList.add("n-row--hover");
+}
+
+/** Move the `repo-header--hover` marker to `header` (or clear it when null). */
+function setHoverHeader(header) {
+  if (hoverHeader === header) return;
+  hoverHeader?.classList.remove("repo-header--hover");
+  hoverHeader = header;
+  hoverHeader?.classList.add("repo-header--hover");
+}
+
+/** Forget the hovered row/header, removing their marker classes. Safe both when the nodes are
+ *  about to be replaced (renderInbox) and when the pointer simply leaves the list (mouseleave),
+ *  where the live nodes survive and must actually lose the class. */
+function clearHover() {
+  setHoverRow(null);
+  setHoverHeader(null);
+}
+
 /** Snapshot the inbox's current focus so a re-render can restore it. Returns null when
  *  focus isn't inside the inbox (so background re-renders never steal focus). */
 function captureInboxFocus() {
@@ -189,6 +222,9 @@ function renderInbox() {
   const focusTarget = pendingInboxFocus ?? preserved;
   pendingInboxFocus = null;
   const groups = filteredGroups();
+  // The rows/headers we tracked for hover are about to be replaced — drop the markers so a
+  // background re-render under a stationary cursor can't leave controls stuck-visible.
+  clearHover();
   // The toolbar "mark all as done" only makes sense when the active filter shows something.
   const markAll = $("#mark-all-done-btn");
   if (markAll) markAll.disabled = !groups.length;
@@ -806,6 +842,18 @@ export function initInbox() {
   // A mouse interaction clears the keyboard-selection ring so it doesn't linger for pointer
   // users (keyboard navigation re-applies it via focusRow).
   $("#inbox").addEventListener("mousedown", clearKbdFocus);
+  // Row/header hover is tracked here (delegated) rather than via CSS `:hover` — see the
+  // hoverRow/hoverHeader note above for why. `mouseover` bubbles, so one listener covers every
+  // row; moving off all rows (onto a header/gap) or out of the list clears the markers.
+  $("#inbox").addEventListener("mouseover", (e) => {
+    const el = e.target instanceof Element ? e.target : null;
+    setHoverRow(el?.closest(".n-row") ?? null);
+    setHoverHeader(el?.closest(".repo-header") ?? null);
+  });
+  $("#inbox").addEventListener("mouseleave", clearHover);
+  // If the window loses focus while a row is hovered, the WebView may never deliver the
+  // mouseleave — clear the marker so controls don't linger while the app is inactive.
+  window.addEventListener("blur", clearHover);
   // Power-user triage shortcuts (j/k/d/e/c/r/1–6) — global so filter/sync keys work from
   // anywhere on the notifications pane, not just when a row has focus.
   document.addEventListener("keydown", onCommandKeydown);

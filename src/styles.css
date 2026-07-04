@@ -917,9 +917,16 @@ code,
   pointer-events: none;
 }
 
-.n-row:hover .n-done,
-.n-row:hover .n-bookmark,
-.repo-header:hover .repo-done,
+/* Row action controls (bookmark / mark-as-done) are revealed on hover via a JS-managed class
+   (`.n-row--hover` / `.repo-header--hover`), NOT the CSS `:hover` pseudo. In the macOS WKWebView
+   a wholesale re-render (e.g. background subject resolution replacing rows under a stationary
+   cursor) leaves `:hover` stuck on the freshly-inserted node — its `mouseout` never fires — so
+   the controls stay visible after the cursor leaves. Delegated mouseover/leave listeners on the
+   stable `#inbox` container (see inbox.js) don't have that bug: the class is dropped on every
+   re-render and only re-applied on real pointer movement. */
+.n-row--hover .n-done,
+.n-row--hover .n-bookmark,
+.repo-header--hover .repo-done,
 .n-done:focus-visible,
 .n-bookmark:focus-visible,
 .repo-done:focus-visible {
@@ -975,7 +982,7 @@ code,
   box-shadow: inset 3px 0 0 0 var(--accent);
 }
 
-.n-row--new.n-row--openable:hover {
+.n-row--new.n-row--openable.n-row--hover {
   background: rgba(var(--accent-rgb), 0.22);
 }
 
@@ -989,12 +996,14 @@ code,
 }
 
 /* Rows with a resolved web URL are clickable; give them a clear, on-brand hover
-   highlight (matching the context-menu / active-source treatment). */
+   highlight (matching the context-menu / active-source treatment). Uses the JS-managed
+   `.n-row--hover` class (see the row-controls note above) so it can't get stuck after a
+   background re-render in the macOS WKWebView. */
 .n-row--openable {
   transition: background var(--duration-fast) ease;
 }
 
-.n-row--openable:hover {
+.n-row--openable.n-row--hover {
   background: var(--accent-tint);
 }
 
