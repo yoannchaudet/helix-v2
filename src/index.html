@@ -46,6 +46,9 @@
         <!-- Dependabot module sources: repositories only (no smart filters). Rendered by
              dependabot.js (renderSidebar). -->
         <nav class="sources sidebar-module sidebar-module--dependabot" aria-label="Dependabot views">
+          <!-- The "All" entry (total open PRs) is rendered by dependabot.js (renderSidebar). -->
+          <ul class="source-list" id="dependabot-filter-list"></ul>
+
           <p class="source-group-label">Repositories</p>
           <ul class="source-list" id="dependabot-repo-list">
             <li class="source-empty">No repositories yet.</li>

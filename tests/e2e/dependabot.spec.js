@@ -40,6 +40,11 @@ test("shows a merge-readiness pill and no bookmark/done controls", async ({ page
 test("the sidebar lists repositories and refines the list", async ({ page }) => {
   await openDependabot(page);
 
+  // "All" shows the total open PR count and is active by default.
+  const all = page.locator('#dependabot-filter-list [data-filter="all"]');
+  await expect(all).toHaveAttribute("aria-current", "true");
+  await expect(all.locator(".source-count")).toHaveText("3");
+
   const repoSources = page.locator("#dependabot-repo-list .repo-source");
   await expect(repoSources).toHaveCount(2);
 
@@ -51,8 +56,16 @@ test("the sidebar lists repositories and refines the list", async ({ page }) => 
   await expect(
     page.locator('#dependabot-repo-list .repo-source[data-repo="octo/hello"]'),
   ).toHaveAttribute("aria-current", "true");
+  // Refining a repo moves the active highlight off "All".
+  await expect(all).not.toHaveAttribute("aria-current", "true");
 
-  // Click again to clear the refinement → both repos back.
+  // Clicking "All" clears the refinement → both repos back and "All" active again.
+  await all.click();
+  await expect(page.locator("#dependabot .repo-section")).toHaveCount(2);
+  await expect(all).toHaveAttribute("aria-current", "true");
+
+  // Toggling a repo off (clicking it twice) also returns to the full list.
+  await page.locator('#dependabot-repo-list .repo-source[data-repo="octo/hello"]').click();
   await page.locator('#dependabot-repo-list .repo-source[data-repo="octo/hello"]').click();
   await expect(page.locator("#dependabot .repo-section")).toHaveCount(2);
 });

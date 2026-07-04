@@ -37,6 +37,8 @@ let lastSyncAt = 0;
 const AUTO_SYNC_STALE_MS = 5 * 60 * 1000;
 
 const REPO_ICON = `<svg viewBox="0 0 16 16" width="15" height="15"><path d="M3 2.5h7.5L13 5v8.5H3z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M5 6h4M5 8.5h6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>`;
+// Matches the notifications "All" smart-filter icon for cross-module consistency.
+const ALL_ICON = `<svg viewBox="0 0 16 16" width="15" height="15"><circle cx="8" cy="8" r="5.25" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M5.5 8l1.6 1.7L10.6 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
 /* -------------------------------- Rendering ------------------------------- */
 
@@ -100,6 +102,20 @@ function renderList() {
 
 /** Render the repo-only sidebar for the Dependabot module (counts + active highlight). */
 function renderSidebar() {
+  const filterList = $("#dependabot-filter-list");
+  if (filterList) {
+    // "All" mirrors the notifications smart filter: total open PRs, active when no repo is
+    // refined, and clicking it clears any repo refinement.
+    filterList.innerHTML = sourceButton({
+      icon: ALL_ICON,
+      label: "All",
+      attrs: html`data-filter="all"`,
+      active: activeRepo == null,
+      count: depGroups.length ? String(totalPrs(depGroups)) : "",
+    });
+    filterList.querySelector('[data-filter="all"]')?.addEventListener("click", clearRepo);
+  }
+
   const repoList = $("#dependabot-repo-list");
   if (!repoList) return;
   if (!depGroups.length) {
@@ -160,6 +176,16 @@ function selectRepo(fullName, kbd = false) {
   renderSidebar();
   renderList();
   if (kbd) $("#dependabot").querySelector(".n-row")?.querySelector(".n-open[tabindex]")?.focus();
+  announceView();
+}
+
+/** Clear any repository refinement (the sidebar "All" entry). No-op if already cleared. */
+function clearRepo() {
+  if (activeRepo == null) return;
+  activeRepo = null;
+  renderTitle();
+  renderSidebar();
+  renderList();
   announceView();
 }
 
