@@ -151,14 +151,15 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE notifications ADD COLUMN subject_mergeable_state TEXT;
     ALTER TABLE bookmarks ADD COLUMN subject_mergeable_state TEXT;
     "#,
-    // v10 — the Dependabot module's local store: open Dependabot PRs from the Search API,
-    // cached so the module reads offline-first (like notifications) and GitHub is only hit on
-    // an explicit/auto sync. Self-contained (repo identity denormalized from the search
-    // result's `repository_url`; no FK to `repos`, which is keyed on GitHub repo id the
-    // search doesn't return). `mergeable_state`/`resolved_at` back the merge-readiness pill,
-    // resolved lazily per PR (search omits it) with the same smart-cache + rate-reserve
-    // discipline as notification subjects. Rows the search no longer returns (merged/closed)
-    // are reconciled away on the next sync.
+    // v10 — the Dependabot module's local store: open Dependabot PRs (gathered by enumerating
+    // the repos the user admins and listing each one's open PRs — no search API), cached so
+    // the module reads offline-first (like notifications) and GitHub is only hit on an
+    // explicit/auto sync. Self-contained (repo identity denormalized as owner/name; no FK to
+    // `repos`, which is keyed on the GitHub repo id these listings don't surface here).
+    // `mergeable_state`/`resolved_at` back the merge-readiness pill, resolved lazily per PR
+    // (the PR list omits it) with the same smart-cache + rate-reserve discipline as
+    // notification subjects. Rows no longer returned (merged/closed) are reconciled away on
+    // the next complete sync.
     r#"
     CREATE TABLE IF NOT EXISTS dependabot_prs (
         id              INTEGER PRIMARY KEY,

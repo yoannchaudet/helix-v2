@@ -1,13 +1,15 @@
-//! Dependabot module data layer: persist the open Dependabot PRs fetched from the Search
-//! API and read them back grouped by repository.
+//! Dependabot module data layer: persist the open Dependabot PRs and read them back grouped
+//! by repository.
 //!
 //! Mirrors `sync.rs` for its own domain (see `docs/design.md` — SQLite is the source of
-//! truth). `store_prs` upserts the current search results and reconciles away rows that
-//! disappeared upstream (a PR that merged/closed no longer matches `is:open`, so it's
-//! deleted). The module reads offline-first via `list_by_repo`; GitHub is only contacted on
-//! a sync. Merge-readiness (`mergeable_state`) is resolved lazily per PR — the Search API
-//! omits it — with the same smart-cache (`prs_needing_merge_state`) + rate-reserve discipline
-//! used for notification subjects.
+//! truth). PRs are gathered by `github::fetch_admin_dependabot_prs` (enumerate the repos the
+//! user admins, then list each one's open Dependabot PRs — no search API). `store_prs` upserts
+//! the current results and, when the fetch was complete, reconciles away rows that disappeared
+//! upstream (a PR that merged/closed no longer appears, so it's deleted). The module reads
+//! offline-first via `list_by_repo`; GitHub is only contacted on a sync. Merge-readiness
+//! (`mergeable_state`) is resolved lazily per PR — the PR list omits it — with the same
+//! smart-cache (`prs_needing_merge_state`) + rate-reserve discipline used for notification
+//! subjects.
 
 use rusqlite::{params, Connection};
 use serde::Serialize;
@@ -23,17 +25,17 @@ pub struct StoreOutcome {
     pub removed: usize,
 }
 
-/// Upsert the Dependabot PRs from a search and (optionally) reconcile local state.
+/// Upsert the Dependabot PRs from a fetch and (optionally) reconcile local state.
 ///
 /// Existing rows are updated in place, but the resolution columns (`mergeable_state`,
 /// `resolved_at`) are intentionally left untouched — they are populated separately by
-/// `store_merge_state`. When `reconcile` is true (the search returned the **complete** result
-/// set), any locally-stored PR absent from `prs` was merged/closed (or became inaccessible)
-/// and is deleted, so the module never shows a stale PR. When false (the search was
-/// incomplete/capped — see `DependabotSearchOutcome::complete`), removals are **skipped** so
-/// we never drop a PR that simply fell outside a partial result window. Stale rows are
-/// identified by the exact set of fetched ids (not a timestamp watermark) so reconciliation
-/// is correct even for two syncs in one tick.
+/// `store_merge_state`. When `reconcile` is true (the fetch returned the **complete** result
+/// set — see `DependabotFetchOutcome::complete`), any locally-stored PR absent from `prs` was
+/// merged/closed (or became inaccessible) and is deleted, so the module never shows a stale
+/// PR. When false (the enumeration stopped early on the quota reserve), removals are
+/// **skipped** so we never drop a PR outside the partial window. Stale rows are identified by
+/// the exact set of fetched ids (not a timestamp watermark) so reconciliation is correct even
+/// for two syncs in one tick.
 pub fn store_prs(
     conn: &mut Connection,
     prs: &[DependabotPr],

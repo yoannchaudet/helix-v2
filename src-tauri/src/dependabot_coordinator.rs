@@ -60,7 +60,8 @@ pub struct OwnerOption {
 
 /// Whether `login` is a syntactically valid GitHub account login (1–39 chars, alphanumeric or
 /// hyphen, not starting/ending with a hyphen). Used to sanitize the owner selection before it
-/// is stored and interpolated into the search query, since the command is IPC-exposed.
+/// is stored and interpolated into REST paths (e.g. `/orgs/{owner}/repos`), since the command
+/// is IPC-exposed.
 fn is_valid_login(login: &str) -> bool {
     let bytes = login.as_bytes();
     !login.is_empty()
@@ -75,8 +76,8 @@ fn is_valid_login(login: &str) -> bool {
 /// Resolve the effective owner scope: the stored selection, or — when never configured — the
 /// authenticated user alone. Returns `(self_login, owners)`. Empty/invalid logins are filtered
 /// out, so `owners` is empty only when the user explicitly saved an empty selection (or the
-/// login cache is missing, in which case the module degrades to "nothing selected" rather than
-/// issuing a malformed `user:` query).
+/// login cache is missing) — in which case `sync_dependabot` makes no network requests and
+/// just clears the cache.
 fn resolve_owners(conn: &rusqlite::Connection) -> Result<(String, Vec<String>), String> {
     let self_login = settings::get_string(conn, settings::KEY_GITHUB_LOGIN)
         .map_err(|e| e.to_string())?
@@ -163,13 +164,14 @@ pub fn set_dependabot_owners(
     settings::set_dependabot_owners(&conn, &owners).map_err(|e| e.to_string())
 }
 
-/// Search GitHub for open Dependabot PRs and store them locally, emitting progress events.
+/// Fetch open Dependabot PRs (in the repos the user admins within the selected accounts) and
+/// store them locally, emitting progress events.
 ///
-/// The search is scoped to the selected accounts (the user + chosen orgs; defaults to the user
-/// alone). Emits `dependabot:started`, `dependabot:progress` ({ page, fetched }), and
-/// `dependabot:done` / `dependabot:error`. The search runs without holding the DB lock;
-/// storage happens in a single transaction afterwards. Merge-readiness is then resolved in
-/// the background (emitting `dependabot:resolved`) so the sync returns immediately.
+/// Scoped to the selected accounts (the user + chosen orgs; defaults to the user alone). Emits
+/// `dependabot:started`, `dependabot:progress` ({ scanned, found }), and `dependabot:done` /
+/// `dependabot:error`. The enumeration runs without holding the DB lock; storage happens in a
+/// single transaction afterwards. Merge-readiness is then resolved in the background (emitting
+/// `dependabot:resolved`) so the sync returns immediately.
 #[tauri::command]
 pub async fn sync_dependabot(
     app: tauri::AppHandle,

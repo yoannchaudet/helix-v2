@@ -395,7 +395,11 @@ async function closeAccountsPicker() {
   document.removeEventListener("keydown", onPickerKeydown, true);
   const btn = $("#dependabot-accounts-btn");
   btn?.setAttribute("aria-expanded", "false");
-  btn?.focus();
+  // Only restore focus to the trigger while the module is still visible. If the picker was
+  // dismissed by switching modules (or a window blur), the button is about to be/hidden, so
+  // focusing it would strand focus on a hidden element (the WKWebView gotcha modules.js
+  // avoids for the context menu).
+  if (!$("#view-dependabot")?.hidden) btn?.focus();
 
   const owners = [...selection];
   if (ownersKey(owners) === baseline) return; // unchanged → nothing to do
