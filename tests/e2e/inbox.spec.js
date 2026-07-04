@@ -137,6 +137,34 @@ test("row hover is class-driven and clears when the pointer leaves", async ({ pa
   await expect(row).not.toHaveClass(/n-row--hover/);
 });
 
+test("a mouseover sweeps stray hover markers off other rows (WKWebView re-render defense)", async ({
+  page,
+}) => {
+  await openApp(page);
+
+  // Simulate the WKWebView failure mode: a re-render storm leaves the hover marker stuck on
+  // several live rows (mouseout/mouseover dropped or mis-targeted during innerHTML swaps).
+  await page.evaluate(() => {
+    for (const el of document.querySelectorAll("#inbox .n-row")) el.classList.add("n-row--hover");
+  });
+  await expect(page.locator("#inbox .n-row--hover")).toHaveCount(3);
+
+  // Any pointer movement over the list must collapse it back to exactly the row under the
+  // cursor — so the stuck controls hide as soon as the user moves the mouse.
+  await page.locator('.n-row[data-thread-id="t1"]').hover();
+  await expect(page.locator("#inbox .n-row--hover")).toHaveCount(1);
+  await expect(page.locator('.n-row[data-thread-id="t1"]')).toHaveClass(/n-row--hover/);
+
+  // A stray appearing on ANOTHER row while t1 is already hovered must also be swept by the next
+  // mouseover within t1 (regression guard: no early-return may skip the sweep).
+  await page.evaluate(() => {
+    document.querySelector('.n-row[data-thread-id="t2"]').classList.add("n-row--hover");
+  });
+  await page.locator('.n-row[data-thread-id="t1"] .n-title').hover();
+  await expect(page.locator("#inbox .n-row--hover")).toHaveCount(1);
+  await expect(page.locator('.n-row[data-thread-id="t1"]')).toHaveClass(/n-row--hover/);
+});
+
 test("marking a single row done removes it and decrements the count", async ({ page }) => {
   await openApp(page);
 
