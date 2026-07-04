@@ -1,5 +1,5 @@
 import { invoke, listen } from "./api.js";
-import { $, $$, html, rawHtml, toast, announce } from "./dom.js";
+import { $, html, toast, announce } from "./dom.js";
 import { STATES } from "./constants.js";
 import { relTime } from "./format.js";
 import { filterDependabotGroups, totalPrs } from "./dependabot-model.js";
@@ -56,9 +56,9 @@ function emptyDependabot() {
     <img class="inbox-empty-art" src="/assets/helix-muted.svg" alt="" width="116" height="116" />
     <p class="inbox-empty-title">No open Dependabot pull requests.</p>
     <p class="inbox-empty-sub">
-      Open Dependabot PRs in repositories you <strong>admin</strong> (across your selected
-      accounts) show up here. Use <span class="inbox-empty-hint">Choose accounts</span> in the
-      toolbar to pick your user and orgs.
+      Repositories appear here as they show up in your notifications, so sync
+      <span class="inbox-empty-hint">Notifications</span> to populate the list — then their open
+      Dependabot PRs are collected here.
     </p>
   </div>`;
 }
@@ -359,144 +359,6 @@ export async function syncDependabot() {
   }
 }
 
-/* ------------------------------ Accounts picker --------------------------- */
-
-/* A small popover (anchored under the toolbar "Choose accounts" button) letting the user
- * scope the Dependabot search to their own account + selected orgs. Toggling updates a local
- * selection; closing the popover persists it (`set_dependabot_owners`) and re-syncs if it
- * changed. Self-contained rather than reusing the action-oriented context menu, since this is
- * a multi-select that must stay open across toggles. */
-
-/** The open picker element, or null. */
-let pickerEl = null;
-/** The selection being edited (a Set of logins) while the picker is open. */
-let pickerSelection = null;
-/** Order-insensitive signature of the selection when the picker opened, so we only persist +
- *  re-sync when the *set* actually changed (not merely toggled and restored). */
-let pickerBaseline = "";
-/** Guards against overlapping opens while `list_dependabot_owners` is in flight. */
-let pickerOpening = false;
-
-/** Order-insensitive, case-insensitive signature of an owner list. */
-function ownersKey(owners) {
-  return [...owners]
-    .map((o) => o.toLowerCase())
-    .sort()
-    .join(",");
-}
-
-function pickerOpen() {
-  return pickerEl != null;
-}
-
-/** Persist + re-sync only if the selection changed, then tear down the popover. */
-async function closeAccountsPicker() {
-  if (!pickerEl) return;
-  const el = pickerEl;
-  const selection = pickerSelection;
-  const baseline = pickerBaseline;
-  pickerEl = null;
-  pickerSelection = null;
-  el.remove();
-  document.removeEventListener("mousedown", onPickerOutside, true);
-  document.removeEventListener("keydown", onPickerKeydown, true);
-  const btn = $("#dependabot-accounts-btn");
-  btn?.setAttribute("aria-expanded", "false");
-  // Only restore focus to the trigger while the module is still visible. If the picker was
-  // dismissed by switching modules (or a window blur), the button is about to be/hidden, so
-  // focusing it would strand focus on a hidden element (the WKWebView gotcha modules.js
-  // avoids for the context menu).
-  if (!$("#view-dependabot")?.hidden) btn?.focus();
-
-  const owners = [...selection];
-  if (ownersKey(owners) === baseline) return; // unchanged → nothing to do
-  try {
-    await invoke("set_dependabot_owners", { owners });
-    await syncDependabot();
-  } catch (err) {
-    setDepProgress(String(err), "error");
-  }
-}
-
-function onPickerOutside(e) {
-  const t = e.target;
-  if (pickerEl && !pickerEl.contains(t) && !t.closest?.("#dependabot-accounts-btn")) {
-    closeAccountsPicker();
-  }
-}
-
-function onPickerKeydown(e) {
-  if (e.key === "Escape") {
-    e.preventDefault();
-    closeAccountsPicker();
-  }
-}
-
-/** Open the accounts picker: fetch the user + their orgs, render checkboxes reflecting the
- *  current selection, and wire toggles. */
-async function openAccountsPicker() {
-  if (pickerOpen()) {
-    closeAccountsPicker();
-    return;
-  }
-  if (pickerOpening) return; // a fetch is already in flight
-  const btn = $("#dependabot-accounts-btn");
-  if (!btn) return;
-  pickerOpening = true;
-  let options;
-  try {
-    options = await invoke("list_dependabot_owners");
-  } catch (err) {
-    setDepProgress(String(err), "error");
-    return;
-  } finally {
-    pickerOpening = false;
-  }
-  // Bail if dismissed/reopened while awaiting, or the module was left.
-  if (pickerOpen() || $("#view-dependabot")?.hidden) return;
-
-  pickerSelection = new Set(options.filter((o) => o.selected).map((o) => o.login));
-  pickerBaseline = ownersKey(pickerSelection);
-
-  const rows = options
-    .map((o) => {
-      const tag = o.is_org ? "org" : "you";
-      return html`<label class="accounts-row">
-        <input type="checkbox" class="accounts-check" data-login="${o.login}"${o.selected ? " checked" : ""} />
-        <span class="accounts-login">${o.login}</span>
-        <span class="accounts-tag">${tag}</span>
-      </label>`;
-    })
-    .join("");
-  const panel = document.createElement("div");
-  panel.className = "accounts-popover";
-  panel.setAttribute("role", "group");
-  panel.setAttribute("aria-label", "Choose accounts to track");
-  panel.innerHTML = html`<p class="accounts-title">Track Dependabot PRs from</p>
-    <div class="accounts-list">${rawHtml(rows)}</div>
-    <p class="accounts-note">Changes apply on close.</p>`;
-  document.body.appendChild(panel);
-
-  // Anchor under the button, right-aligned so it doesn't overflow the window edge.
-  const r = btn.getBoundingClientRect();
-  panel.style.top = `${Math.round(r.bottom + 4)}px`;
-  const width = panel.offsetWidth || 240;
-  panel.style.left = `${Math.round(Math.max(8, r.right - width))}px`;
-
-  for (const cb of panel.querySelectorAll(".accounts-check")) {
-    cb.addEventListener("change", () => {
-      if (cb.checked) pickerSelection.add(cb.dataset.login);
-      else pickerSelection.delete(cb.dataset.login);
-    });
-  }
-
-  pickerEl = panel;
-  btn.setAttribute("aria-expanded", "true");
-  document.addEventListener("mousedown", onPickerOutside, true);
-  document.addEventListener("keydown", onPickerKeydown, true);
-  panel.querySelector(".accounts-check")?.focus();
-}
-
 /** Called by main.js when the Dependabot module becomes active: render cached PRs, then
  *  auto-sync if stale (never synced this session, or older than the staleness window). */
 export function onDependabotOpened() {
@@ -518,12 +380,6 @@ export function initDependabot() {
   }
   document.addEventListener("keydown", onCommandKeydown);
   $("#dependabot-sync-btn")?.addEventListener("click", syncDependabot);
-  $("#dependabot-accounts-btn")?.addEventListener("click", openAccountsPicker);
-  // Close the picker (persisting any change) if the window loses focus, mirroring the
-  // context menu's dismissal.
-  window.addEventListener("blur", () => {
-    if (pickerOpen()) closeAccountsPicker();
-  });
   renderIdleStatus();
 
   // Live progress during a sync (repos scanned / Dependabot PRs found).

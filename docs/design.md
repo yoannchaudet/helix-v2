@@ -401,17 +401,17 @@ module's **sidebar + content** split:
   by `get_settings`.
 - **Recommended token scopes** (document for the user):
   - Classic PAT: `notifications` (read/modify the inbox). Add `repo` to resolve subjects
-    in **private** repositories. For the **Dependabot** module, add `read:org` so the
-    account picker can list your org memberships (private-repo PRs also need `repo`).
+    in **private** repositories; the **Dependabot** module also needs it to read PRs in
+    private repos.
   - Fine-grained PAT alternative: read access to **Notifications**, plus
     Issues/Pull-requests read on the relevant repos for subject resolution. The
-    **Dependabot** module additionally reads **Pull requests** (for the PR list +
-    merge-readiness), repository **Administration/Metadata** (to detect which repos you
-    admin), and **Organization** membership (to list orgs in the account picker).
-- The Dependabot module does **not** use the search API. It enumerates the repos you
-  **admin** within the accounts you select (your user + chosen orgs) and lists each one's open
-  Dependabot PRs — all via the core REST API, paced serially to stay under secondary rate
-  limits.
+    **Dependabot** module additionally reads **Pull requests** on those repos.
+- The Dependabot module does **not** use the search API and has no account/repo picker. Its
+  repo list is built lazily "for free" from the notifications Helix already fetches (every repo
+  seen in a notification is remembered in `dependabot_repos`, which — unlike `repos` — is not
+  pruned when notifications clear). Each sync lists those repos' open Dependabot PRs via the
+  core REST API, paced serially. A repo that consistently 404s/403s (renamed/deleted/access
+  revoked) is dropped after a few tries.
 - All GitHub traffic is HTTPS to `api.github.com`.
 
 ## 9. Status & deferred work

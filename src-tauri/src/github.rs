@@ -126,59 +126,6 @@ pub async fn fetch_user(token: &str) -> Result<GitHubUser, GitHubError> {
     })
 }
 
-/// One organization the authenticated user belongs to (just the login Helix needs).
-#[derive(Debug, Deserialize)]
-struct OrgResponse {
-    login: String,
-}
-
-/// List the organizations the authenticated user is a member of (`GET /user/orgs`,
-/// Link-paginated). Used by the Dependabot module's account picker so the user can scope the
-/// search to their user + selected orgs. Note: classic PATs need `read:org` for the complete
-/// membership list (public-only otherwise); fine-grained tokens need org membership read.
-pub async fn fetch_orgs(token: &str) -> Result<Vec<String>, GitHubError> {
-    let client = reqwest::Client::new();
-    let mut url = format!("{API_BASE}/user/orgs?per_page=100");
-    let mut orgs: Vec<String> = Vec::new();
-
-    loop {
-        let resp = authed_get(&client, &url, token)
-            .send()
-            .await
-            .map_err(|e| GitHubError::Network(e.to_string()))?;
-
-        let status = resp.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(GitHubError::Unauthorized);
-        }
-        if status == reqwest::StatusCode::FORBIDDEN {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(GitHubError::Forbidden(body.trim().to_string()));
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(GitHubError::Status {
-                status,
-                body: body.trim().to_string(),
-            });
-        }
-
-        let next = next_page_url(resp.headers());
-        let page: Vec<OrgResponse> = resp.json().await.map_err(|e| GitHubError::Parse {
-            what: "organizations",
-            source: e.to_string(),
-        })?;
-        orgs.extend(page.into_iter().map(|o| o.login));
-
-        match next {
-            Some(next_url) => url = next_url,
-            None => break,
-        }
-    }
-
-    Ok(orgs)
-}
-
 /* ------------------------------ Notifications ------------------------------ */
 
 /// A notification thread (subset of the `Thread` schema Helix stores).
@@ -601,34 +548,17 @@ pub struct DependabotPr {
     pub updated_at: String,
 }
 
-/// Result of a full Dependabot fetch: the collected PRs plus the last response's rate-limit
-/// snapshot (the `core` bucket). `complete` is true when the enumeration finished normally, so
-/// the caller may reconcile-delete stale local rows; it is only ever false if a future variant
-/// returns partial results.
+/// Result of a Dependabot fetch across a repo list: the collected PRs, the last response's
+/// `core` rate snapshot, and per-repo outcomes. `complete` is true when every repo was scanned
+/// (so the caller may reconcile-delete stale local rows); it is false if the scan stopped early
+/// (quota reserve / rate-limit) or a repo errored. `ok_repos` / `failed_repos` (by full name)
+/// let the caller reset or increment each repo's failure counter for the drop policy.
 pub struct DependabotFetchOutcome {
     pub prs: Vec<DependabotPr>,
     pub rate: RateLimit,
     pub complete: bool,
-}
-
-/// A repository as returned by the repo-list endpoints, with the authenticated user's
-/// permissions (present on authenticated responses). Only the fields we need are deserialized.
-#[derive(Debug, Deserialize)]
-struct RepoListItem {
-    name: String,
-    owner: RepoOwnerLogin,
-    permissions: Option<RepoPermissions>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RepoOwnerLogin {
-    login: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct RepoPermissions {
-    #[serde(default)]
-    admin: bool,
+    pub ok_repos: Vec<String>,
+    pub failed_repos: Vec<String>,
 }
 
 /// A pull request as returned by the PR *list* endpoint (no `mergeable_state`; that needs the
@@ -706,42 +636,6 @@ async fn get_page<T: for<'de> serde::Deserialize<'de>>(
     Ok((body, next))
 }
 
-/// List the repositories in `owner` where the authenticated user is an **admin**, following
-/// `Link` pagination. Uses `/user/repos?affiliation=owner` for the user's own account and
-/// `/orgs/{owner}/repos` for an org; both include the authed user's `permissions`. Requests
-/// are paced (see `DEPENDABOT_REQUEST_DELAY`).
-async fn list_admin_repos(
-    client: &reqwest::Client,
-    token: &str,
-    owner: &str,
-    self_login: &str,
-    rate: &mut RateLimit,
-) -> Result<Vec<(String, String)>, GitHubError> {
-    let mut url = if owner.eq_ignore_ascii_case(self_login) {
-        format!("{API_BASE}/user/repos?affiliation=owner&per_page={DEPENDABOT_PER_PAGE}")
-    } else {
-        format!("{API_BASE}/orgs/{owner}/repos?per_page={DEPENDABOT_PER_PAGE}")
-    };
-    let mut repos = Vec::new();
-    loop {
-        let (page, next): (Vec<RepoListItem>, _) =
-            get_page(client, &url, token, "repositories", rate).await?;
-        for r in page {
-            if r.permissions.map(|p| p.admin).unwrap_or(false) {
-                repos.push((r.owner.login, r.name));
-            }
-        }
-        match next {
-            Some(next_url) => {
-                url = next_url;
-                tokio::time::sleep(DEPENDABOT_REQUEST_DELAY).await;
-            }
-            None => break,
-        }
-    }
-    Ok(repos)
-}
-
 /// List the open, Dependabot-authored pull requests in one repository (paginated + paced).
 async fn list_open_dependabot_prs(
     client: &reqwest::Client,
@@ -786,18 +680,19 @@ async fn list_open_dependabot_prs(
     Ok(prs)
 }
 
-/// Fetch open Dependabot PRs across the repos the user **admins** within the selected owners.
+/// Fetch open Dependabot PRs across the given `repos` (the persistent, notification-sourced
+/// repo list). For each repo, lists its open PRs and keeps the Dependabot-authored ones. Uses
+/// only the core REST API, serial + paced (see `DEPENDABOT_REQUEST_DELAY`), so it avoids the
+/// search secondary rate limit. `on_progress(scanned, found)` reports live progress.
 ///
-/// For each owner, lists its repos and keeps those with `permissions.admin`, then lists each
-/// such repo's open Dependabot-authored PRs. This uses only the core REST API (no search), so
-/// — paced serially (see `DEPENDABOT_REQUEST_DELAY`) — it avoids the search secondary rate
-/// limit entirely. `on_progress` is invoked as repos are scanned with `(repos_scanned,
-/// prs_found_so_far)`. Callers must pass a non-empty `owners`. The result is always `complete`
-/// (a full enumeration), so the caller may reconcile-delete stale local rows.
-pub async fn fetch_admin_dependabot_prs<F>(
+/// Per-repo results are reported in `ok_repos` (fetched successfully) and `failed_repos` (a
+/// 404 or non-rate 403 — the repo is likely gone or no longer readable), so the caller can
+/// reset/increment each repo's drop counter. Stops early — marking the result **incomplete**
+/// (so the caller won't reconcile-delete) — on the core-quota reserve or a rate-limit; a
+/// per-repo failure is skipped (not fatal). Only a 401 aborts the whole fetch.
+pub async fn fetch_dependabot_prs_for_repos<F>(
     token: &str,
-    owners: &[String],
-    self_login: &str,
+    repos: &[(String, String)],
     on_progress: F,
 ) -> Result<DependabotFetchOutcome, GitHubError>
 where
@@ -805,58 +700,40 @@ where
 {
     let client = reqwest::Client::new();
     let mut rate = RateLimit::default();
-    // A single problematic owner/repo (a 404, a transient 5xx, …) must not sink the whole
-    // sync. We skip it, log it, and mark the result incomplete so the caller won't
-    // reconcile-delete (a skipped repo's cached PRs are kept until a later clean sync). Only a
-    // genuine auth failure (401) or a rate-limit is treated specially.
+    let mut prs: Vec<DependabotPr> = Vec::new();
+    let mut ok_repos: Vec<String> = Vec::new();
+    let mut failed_repos: Vec<String> = Vec::new();
+    let mut scanned = 0usize;
     let mut complete = true;
 
-    // 1. Collect the admin repos across the selected owners (de-duplicated).
-    let mut admin_repos: Vec<(String, String)> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for owner in owners {
-        let repos = match list_admin_repos(&client, token, owner, self_login, &mut rate).await {
-            Ok(repos) => repos,
-            Err(GitHubError::Unauthorized) => return Err(GitHubError::Unauthorized),
-            Err(e) if e.is_rate_limited() => {
-                complete = false;
-                break;
-            }
-            Err(e) => {
-                eprintln!("helix: listing repos for {owner} failed, skipping: {e}");
-                complete = false;
-                continue;
-            }
-        };
-        for (o, n) in repos {
-            if seen.insert((o.to_lowercase(), n.to_lowercase())) {
-                admin_repos.push((o, n));
-            }
-        }
-        tokio::time::sleep(DEPENDABOT_REQUEST_DELAY).await;
-    }
-
-    // 2. List each admin repo's open Dependabot PRs. Stop early (marking the result
-    //    incomplete, so the caller won't reconcile-delete) if we approach the core-quota
-    //    reserve or GitHub starts rate-limiting — the rest resolves on a later sync.
-    let mut prs: Vec<DependabotPr> = Vec::new();
-    let mut scanned = 0usize;
-    for (owner, name) in &admin_repos {
+    for (owner, name) in repos {
+        // Leave headroom on the core bucket for everything else (notifications, merge-state
+        // resolution); the unscanned repos resolve on a later sync.
         if core_below_reserve(&rate) {
             complete = false;
             break;
         }
         match list_open_dependabot_prs(&client, token, owner, name, &mut rate).await {
-            Ok(repo_prs) => prs.extend(repo_prs),
+            Ok(repo_prs) => {
+                prs.extend(repo_prs);
+                ok_repos.push(format!("{owner}/{name}"));
+            }
             Err(GitHubError::Unauthorized) => return Err(GitHubError::Unauthorized),
             Err(e) if e.is_rate_limited() => {
                 complete = false;
                 break;
             }
-            // A per-repo failure (e.g. a 404 on a repo we can list but not read PRs for, or a
-            // transient error) — skip this repo rather than failing the whole sync.
+            // A 404 / non-rate 403 means the repo is gone or no longer readable — record it so
+            // the caller can drop it after a few consecutive failures. Other transient errors
+            // (5xx, network, parse) are skipped without counting toward the drop.
             Err(e) => {
-                eprintln!("helix: listing PRs for {owner}/{name} failed, skipping: {e}");
+                if matches!(e, GitHubError::Forbidden(_))
+                    || matches!(e, GitHubError::Status { status, .. } if status == reqwest::StatusCode::NOT_FOUND)
+                {
+                    failed_repos.push(format!("{owner}/{name}"));
+                } else {
+                    eprintln!("helix: listing PRs for {owner}/{name} failed, skipping: {e}");
+                }
                 complete = false;
             }
         }
@@ -869,6 +746,8 @@ where
         prs,
         rate,
         complete,
+        ok_repos,
+        failed_repos,
     })
 }
 

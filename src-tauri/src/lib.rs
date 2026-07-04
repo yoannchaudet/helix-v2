@@ -605,8 +605,6 @@ pub fn run() {
             coordinator::mark_threads_done,
             dependabot_coordinator::sync_dependabot,
             dependabot_coordinator::list_dependabot,
-            dependabot_coordinator::list_dependabot_owners,
-            dependabot_coordinator::set_dependabot_owners,
             show_main_window,
             get_start_at_login,
             set_start_at_login,

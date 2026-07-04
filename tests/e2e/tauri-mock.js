@@ -99,17 +99,6 @@ export function installTauriMock(fixtures) {
     },
     sync_now: () => ({ count: countAll(), removed: 0 }),
     list_dependabot: () => JSON.parse(JSON.stringify(state.dependabot)),
-    list_dependabot_owners: () => {
-      const selected = new Set(state.dependabotOwners ?? [state.auth.login]);
-      const owners = [{ login: state.auth.login, is_org: false }].concat(
-        (fixtures.orgs ?? []).map((login) => ({ login, is_org: true })),
-      );
-      return owners.map((o) => ({ ...o, selected: selected.has(o.login) }));
-    },
-    set_dependabot_owners: ({ owners }) => {
-      state.dependabotOwners = [...owners];
-      return null;
-    },
     sync_dependabot: () => ({
       count: state.dependabot.reduce((sum, g) => sum + g.prs.length, 0),
       removed: 0,
@@ -165,7 +154,6 @@ export function defaultFixtures() {
     },
     appVersion: "0.1.0",
     updaterEnabled: false,
-    orgs: ["acme", "globex"],
     dependabot: [
       {
         full_name: "octo/hello",

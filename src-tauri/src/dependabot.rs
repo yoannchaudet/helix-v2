@@ -2,16 +2,16 @@
 //! by repository.
 //!
 //! Mirrors `sync.rs` for its own domain (see `docs/design.md` — SQLite is the source of
-//! truth). PRs are gathered by `github::fetch_admin_dependabot_prs` (enumerate the repos the
-//! user admins, then list each one's open Dependabot PRs — no search API). `store_prs` upserts
-//! the current results and, when the fetch was complete, reconciles away rows that disappeared
-//! upstream (a PR that merged/closed no longer appears, so it's deleted). The module reads
-//! offline-first via `list_by_repo`; GitHub is only contacted on a sync. Merge-readiness
-//! (`mergeable_state`) is resolved lazily per PR — the PR list omits it — with the same
-//! smart-cache (`prs_needing_merge_state`) + rate-reserve discipline used for notification
-//! subjects.
+//! truth). The repo list (`dependabot_repos`) is fed from the notifications Helix fetches
+//! (`sync::store_notifications` records every seen repo); `github::fetch_dependabot_prs_for_repos`
+//! then lists each repo's open Dependabot PRs — no search API. `store_prs` upserts the current
+//! results and, when the fetch was complete, reconciles away rows that disappeared upstream (a
+//! PR that merged/closed no longer appears, so it's deleted). The module reads offline-first
+//! via `list_by_repo`; GitHub is only contacted on a sync. Merge-readiness (`mergeable_state`)
+//! is resolved lazily per PR — the PR list omits it — with the same smart-cache
+//! (`prs_needing_merge_state`) + rate-reserve discipline used for notification subjects.
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
 use crate::github::{DependabotPr, ResolvedSubject};
@@ -226,23 +226,91 @@ pub fn store_merge_state(
     Ok(())
 }
 
-/// Delete cached PRs whose repository owner is not in `owners` — i.e. prune the cache to the
-/// currently-selected accounts. Runs on every sync so PRs from a now-deselected owner (or
-/// left over from an earlier, broader scope) are dropped even when the search comes back
-/// incomplete (which suppresses the normal reconcile). An empty `owners` clears everything.
-/// Returns the number of rows removed.
-pub fn prune_to_owners(conn: &Connection, owners: &[String]) -> rusqlite::Result<usize> {
-    if owners.is_empty() {
-        return conn.execute("DELETE FROM dependabot_prs", []);
-    }
-    // Compare case-insensitively: GitHub logins are case-insensitive, so a casing difference
-    // between a stored `repo_owner` and the selected login must not prune an in-scope PR.
-    let placeholders = std::iter::repeat_n("?", owners.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!("DELETE FROM dependabot_prs WHERE LOWER(repo_owner) NOT IN ({placeholders})");
-    let lowered: Vec<String> = owners.iter().map(|o| o.to_lowercase()).collect();
-    conn.execute(&sql, rusqlite::params_from_iter(lowered.iter()))
+/// Consecutive access failures (404 / non-rate 403) after which a repo is dropped from the
+/// list — it has become inaccessible (renamed, deleted, or access revoked), so we stop
+/// scanning it. Reset to 0 on any successful fetch.
+pub const REPO_DROP_THRESHOLD: i64 = 3;
+
+/// A repository to scan for open Dependabot PRs (from `dependabot_repos`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependabotRepo {
+    pub full_name: String,
+    pub owner: String,
+    pub name: String,
+}
+
+/// Record a repository seen in a notification fetch, so the Dependabot module can scan it for
+/// open Dependabot PRs. Idempotent (`INSERT OR IGNORE`) — an existing row (and its
+/// `fail_count`) is left untouched. Called from `sync::store_notifications`.
+pub fn observe_repo(
+    conn: &Connection,
+    full_name: &str,
+    owner: &str,
+    name: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO dependabot_repos (repo_full_name, owner, name, added_at)
+         VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
+        params![full_name, owner, name],
+    )?;
+    Ok(())
+}
+
+/// The repositories to scan, ordered by full name for a stable pass.
+pub fn list_repos(conn: &Connection) -> rusqlite::Result<Vec<DependabotRepo>> {
+    let mut stmt = conn.prepare(
+        "SELECT repo_full_name, owner, name FROM dependabot_repos ORDER BY repo_full_name ASC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(DependabotRepo {
+            full_name: r.get(0)?,
+            owner: r.get(1)?,
+            name: r.get(2)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Mark a repo's scan as successful: reset its failure counter and stamp `last_synced_at`.
+pub fn record_repo_success(conn: &Connection, full_name: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE dependabot_repos
+         SET fail_count = 0, last_synced_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+         WHERE repo_full_name = ?1",
+        params![full_name],
+    )?;
+    Ok(())
+}
+
+/// Record an access failure for a repo and report whether it has now failed enough consecutive
+/// times to be dropped (see `REPO_DROP_THRESHOLD`).
+pub fn record_repo_failure(conn: &Connection, full_name: &str) -> rusqlite::Result<bool> {
+    conn.execute(
+        "UPDATE dependabot_repos SET fail_count = fail_count + 1 WHERE repo_full_name = ?1",
+        params![full_name],
+    )?;
+    let count: i64 = conn
+        .query_row(
+            "SELECT fail_count FROM dependabot_repos WHERE repo_full_name = ?1",
+            params![full_name],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+    Ok(count >= REPO_DROP_THRESHOLD)
+}
+
+/// Drop a repo from the scan list and delete its cached PRs (it's become inaccessible).
+pub fn drop_repo(conn: &Connection, full_name: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM dependabot_prs WHERE repo_full_name = ?1",
+        params![full_name],
+    )?;
+    conn.execute(
+        "DELETE FROM dependabot_repos WHERE repo_full_name = ?1",
+        params![full_name],
+    )?;
+    Ok(())
 }
 
 /// Count stored Dependabot PRs (helper, also used by tests).
@@ -350,33 +418,79 @@ mod tests {
     }
 
     #[test]
-    fn prune_to_owners_keeps_only_selected_owners() {
+    fn observe_repo_is_idempotent_and_list_repos_is_sorted() {
+        let conn = mem_conn();
+        observe_repo(&conn, "octo/repo-b", "octo", "repo-b").unwrap();
+        observe_repo(&conn, "octo/repo-a", "octo", "repo-a").unwrap();
+        // A second observe of an existing repo is a no-op (doesn't reset state).
+        record_repo_failure(&conn, "octo/repo-a").unwrap();
+        observe_repo(&conn, "octo/repo-a", "octo", "repo-a").unwrap();
+
+        let repos: Vec<String> = list_repos(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.full_name)
+            .collect();
+        assert_eq!(repos, vec!["octo/repo-a", "octo/repo-b"]);
+        // The failure count survived the re-observe.
+        let fc: i64 = conn
+            .query_row(
+                "SELECT fail_count FROM dependabot_repos WHERE repo_full_name = 'octo/repo-a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fc, 1);
+    }
+
+    #[test]
+    fn repo_failures_drop_at_threshold_and_success_resets() {
+        let conn = mem_conn();
+        observe_repo(&conn, "octo/repo-a", "octo", "repo-a").unwrap();
+
+        // Below the threshold → not dropped.
+        for _ in 0..(REPO_DROP_THRESHOLD - 1) {
+            assert!(!record_repo_failure(&conn, "octo/repo-a").unwrap());
+        }
+        // A success resets the counter, so it takes the full threshold again to drop.
+        record_repo_success(&conn, "octo/repo-a").unwrap();
+        for _ in 0..(REPO_DROP_THRESHOLD - 1) {
+            assert!(!record_repo_failure(&conn, "octo/repo-a").unwrap());
+        }
+        // The threshold-th consecutive failure signals a drop.
+        assert!(record_repo_failure(&conn, "octo/repo-a").unwrap());
+    }
+
+    #[test]
+    fn drop_repo_removes_the_repo_and_its_prs() {
         let mut conn = mem_conn();
+        observe_repo(&conn, "octo/repo-a", "octo", "repo-a").unwrap();
+        observe_repo(&conn, "octo/repo-b", "octo", "repo-b").unwrap();
         store_prs(
             &mut conn,
             &[
                 pr(1, "octo/repo-a", 10, "Bump a"),
-                pr(2, "acme/widgets", 11, "Bump b"),
-                pr(3, "other/thing", 12, "Bump c"),
+                pr(2, "octo/repo-b", 11, "Bump b"),
             ],
             true,
         )
         .unwrap();
 
-        // Keep octo + acme; drop other.
-        let removed = prune_to_owners(&conn, &["octo".into(), "acme".into()]).unwrap();
-        assert_eq!(removed, 1);
-        let owners: Vec<i64> = list_by_repo(&conn)
+        drop_repo(&conn, "octo/repo-a").unwrap();
+
+        let repos: Vec<String> = list_repos(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.full_name)
+            .collect();
+        assert_eq!(repos, vec!["octo/repo-b"]);
+        // repo-a's PR is gone; repo-b's remains.
+        let ids: Vec<i64> = list_by_repo(&conn)
             .unwrap()
             .into_iter()
             .flat_map(|g| g.prs.into_iter().map(|p| p.id))
             .collect();
-        assert_eq!(owners, vec![2, 1]); // acme/widgets, then octo/repo-a (repo name order)
-
-        // Empty owner set clears everything.
-        let removed = prune_to_owners(&conn, &[]).unwrap();
-        assert_eq!(removed, 2);
-        assert_eq!(count(&conn).unwrap(), 0);
+        assert_eq!(ids, vec![2]);
     }
 
     #[test]

@@ -17,10 +17,6 @@ pub const KEY_THEME: &str = "theme";
 /// Dev-only: the PAT stored *unencrypted* in SQLite for debug builds (see `auth.rs`).
 /// Release builds keep the PAT in the Keychain and never use this key.
 pub const KEY_DEV_GITHUB_PAT: &str = "dev_github_pat";
-/// Dependabot module: JSON array of the account logins (the user + selected orgs) the search
-/// is scoped to. Absent means "never configured" → callers default to the user alone; a stored
-/// empty array is an explicit "no accounts" choice (distinct from absent).
-pub const KEY_DEPENDABOT_OWNERS: &str = "dependabot_owners";
 
 /// Lower bound for the polling interval, to avoid hammering the API.
 pub const MIN_POLL_INTERVAL_S: i64 = 10;
@@ -65,24 +61,6 @@ pub fn set_string(conn: &Connection, key: &str, value: &str) -> rusqlite::Result
 pub fn delete_key(conn: &Connection, key: &str) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM settings WHERE key = ?1", [key])?;
     Ok(())
-}
-
-/// The stored Dependabot owner selection (account logins), or `None` when never configured.
-/// A configured-but-empty selection returns `Some(vec![])` — distinct from unset — so the
-/// command layer can default an *unset* selection to the user alone while honoring an explicit
-/// "no accounts" choice. A corrupted (unparseable) value is treated as unset so a bad row
-/// can't silently disable syncing.
-pub fn get_dependabot_owners(conn: &Connection) -> rusqlite::Result<Option<Vec<String>>> {
-    let Some(raw) = get_string(conn, KEY_DEPENDABOT_OWNERS)? else {
-        return Ok(None);
-    };
-    Ok(serde_json::from_str(&raw).ok())
-}
-
-/// Persist the Dependabot owner selection as a JSON array of logins.
-pub fn set_dependabot_owners(conn: &Connection, owners: &[String]) -> rusqlite::Result<()> {
-    let json = serde_json::to_string(owners).unwrap_or_else(|_| "[]".to_string());
-    set_string(conn, KEY_DEPENDABOT_OWNERS, &json)
 }
 
 /// Current polling interval (seconds) from `sync_state`.
@@ -167,28 +145,6 @@ mod tests {
         assert_eq!(get_poll_interval(&conn).unwrap(), 60); // seeded default
         set_poll_interval(&conn, 120).unwrap();
         assert_eq!(get_poll_interval(&conn).unwrap(), 120);
-    }
-
-    #[test]
-    fn dependabot_owners_round_trip_and_distinguishes_unset_from_empty() {
-        let conn = mem_conn();
-        // Unset → None (callers apply their own default, e.g. the user alone).
-        assert_eq!(get_dependabot_owners(&conn).unwrap(), None);
-
-        set_dependabot_owners(&conn, &["octocat".into(), "acme".into()]).unwrap();
-        assert_eq!(
-            get_dependabot_owners(&conn).unwrap(),
-            Some(vec!["octocat".to_string(), "acme".to_string()])
-        );
-
-        // A configured-but-empty selection is distinct from unset (so the command layer can
-        // default only the *unset* case to the user alone).
-        set_dependabot_owners(&conn, &[]).unwrap();
-        assert_eq!(get_dependabot_owners(&conn).unwrap(), Some(vec![]));
-
-        // A corrupted value reads back as unset (so a bad row can't disable syncing).
-        set_string(&conn, KEY_DEPENDABOT_OWNERS, "not json").unwrap();
-        assert_eq!(get_dependabot_owners(&conn).unwrap(), None);
     }
 
     #[test]

@@ -180,6 +180,22 @@ const MIGRATIONS: &[&str] = &[
 
     CREATE INDEX idx_dependabot_prs_repo ON dependabot_prs(repo_full_name);
     "#,
+    // v11 — the Dependabot module's repo list, built lazily from the notifications Helix
+    // already fetches (store_notifications inserts every seen repo here). Unlike the `repos`
+    // table — which is pruned when a repo's notifications clear — this persists, so the set of
+    // repos we scan for open Dependabot PRs accumulates "for free" over time. `fail_count`
+    // tracks consecutive access failures (404 / non-rate 403) so a repo that becomes
+    // inaccessible is dropped after a few tries.
+    r#"
+    CREATE TABLE IF NOT EXISTS dependabot_repos (
+        repo_full_name TEXT PRIMARY KEY,
+        owner          TEXT NOT NULL,
+        name           TEXT NOT NULL,
+        added_at       TEXT NOT NULL,
+        fail_count     INTEGER NOT NULL DEFAULT 0,
+        last_synced_at TEXT
+    );
+    "#,
 ];
 
 /// Open the database at `db_path`, apply any pending migrations, and return the
@@ -250,6 +266,7 @@ mod tests {
         let tables = table_names(&conn).unwrap();
         for expected in [
             "dependabot_prs",
+            "dependabot_repos",
             "done_tombstones",
             "notifications",
             "rate_limits",
