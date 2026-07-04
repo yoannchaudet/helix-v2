@@ -216,6 +216,21 @@ fn set_theme(
     Ok(())
 }
 
+/// Read the last top-level module the user had open (`notifications` / `dependabot`), or
+/// null if none has been recorded yet. Used to restore the previous module on launch.
+#[tauri::command]
+fn get_last_module(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+    settings::get_string(&conn, settings::KEY_LAST_MODULE).map_err(|e| e.to_string())
+}
+
+/// Persist the currently open top-level module so it can be restored on the next launch.
+#[tauri::command]
+fn set_last_module(module_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+    settings::set_string(&conn, settings::KEY_LAST_MODULE, &module_id).map_err(|e| e.to_string())
+}
+
 /// Reveal the main window. The window starts hidden (see `tauri.conf.json`) so the
 /// frontend can paint its shell before we show it, avoiding a white flash on launch.
 /// Driven from Rust because Tauri v2's `withGlobalTauri` does not expose the `window`
@@ -597,6 +612,8 @@ pub fn run() {
             get_settings,
             save_settings,
             set_theme,
+            get_last_module,
+            set_last_module,
             coordinator::sync_now,
             coordinator::sync_status,
             coordinator::list_inbox,
@@ -605,6 +622,7 @@ pub fn run() {
             coordinator::mark_threads_done,
             dependabot_coordinator::sync_dependabot,
             dependabot_coordinator::list_dependabot,
+            dependabot_coordinator::dependabot_status,
             show_main_window,
             get_start_at_login,
             set_start_at_login,

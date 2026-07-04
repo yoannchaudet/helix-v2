@@ -14,6 +14,12 @@ pub const KEY_WINDOW_WIDTH: &str = "window_width";
 pub const KEY_WINDOW_HEIGHT: &str = "window_height";
 /// Appearance preference: `system` (default), `light`, or `dark`.
 pub const KEY_THEME: &str = "theme";
+/// The Dependabot module's last successful sync time (ISO-8601 UTC). Persisted so the
+/// "Synced …" label and the auto-sync staleness gate survive app restarts.
+pub const KEY_DEPENDABOT_LAST_SYNC: &str = "dependabot_last_sync_at";
+/// The last top-level module the user had open (`notifications` / `dependabot`), restored on
+/// the next launch.
+pub const KEY_LAST_MODULE: &str = "last_module";
 /// Dev-only: the PAT stored *unencrypted* in SQLite for debug builds (see `auth.rs`).
 /// Release builds keep the PAT in the Keychain and never use this key.
 pub const KEY_DEV_GITHUB_PAT: &str = "dev_github_pat";
@@ -53,6 +59,18 @@ pub fn set_string(conn: &Connection, key: &str, value: &str) -> rusqlite::Result
         "INSERT INTO settings (key, value) VALUES (?1, ?2) \
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         (key, value),
+    )?;
+    Ok(())
+}
+
+/// Store the current UTC time (ISO-8601, matching the rest of the schema) as a string
+/// setting. Computed in SQLite so it's consistent with the other `strftime` timestamps.
+pub fn set_timestamp_now(conn: &Connection, key: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO settings (key, value) \
+         VALUES (?1, strftime('%Y-%m-%dT%H:%M:%SZ','now')) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [key],
     )?;
     Ok(())
 }
@@ -180,5 +198,30 @@ mod tests {
         assert!(!is_valid_theme("solarized"));
         set_string(&conn, KEY_THEME, "solarized").unwrap();
         assert_eq!(get_theme(&conn).unwrap(), "system");
+    }
+
+    #[test]
+    fn timestamp_now_stamps_iso_and_overwrites() {
+        let conn = mem_conn();
+        assert_eq!(get_string(&conn, KEY_DEPENDABOT_LAST_SYNC).unwrap(), None);
+
+        set_timestamp_now(&conn, KEY_DEPENDABOT_LAST_SYNC).unwrap();
+        let first = get_string(&conn, KEY_DEPENDABOT_LAST_SYNC)
+            .unwrap()
+            .expect("timestamp should be stored");
+        // ISO-8601 UTC shape: 2024-01-02T03:04:05Z.
+        assert_eq!(first.len(), 20);
+        assert!(first.ends_with('Z'));
+        assert!(first.contains('T'));
+
+        // Overwrites on a subsequent call (ON CONFLICT DO UPDATE).
+        set_string(&conn, KEY_DEPENDABOT_LAST_SYNC, "sentinel").unwrap();
+        set_timestamp_now(&conn, KEY_DEPENDABOT_LAST_SYNC).unwrap();
+        assert_ne!(
+            get_string(&conn, KEY_DEPENDABOT_LAST_SYNC)
+                .unwrap()
+                .unwrap(),
+            "sentinel"
+        );
     }
 }

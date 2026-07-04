@@ -412,6 +412,11 @@ module's **sidebar + content** split:
   `repos` — is not pruned when notifications clear). Each sync lists those repos' open
   Dependabot PRs via the core REST API, paced serially. A repo that consistently 404s/403s
   (renamed/deleted/access revoked) is dropped after a few tries.
+- The Dependabot module's **last successful sync time** is persisted (settings key
+  `dependabot_last_sync_at`) so the "Synced …" label and the auto-sync staleness gate survive
+  restarts — distinct from the notifications sync time in `sync_state`.
+- The **last opened module** is persisted (settings key `last_module`) and restored on the next
+  launch, before the window is revealed, so we don't flash the default module first.
 - All GitHub traffic is HTTPS to `api.github.com`.
 
 ## 9. Status & deferred work

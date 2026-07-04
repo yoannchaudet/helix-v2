@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { openApp } from "./tauri-mock.js";
+import { openApp, defaultFixtures, installTauriMock } from "./tauri-mock.js";
 
 /* The module system: the Lightroom-style title-bar picker, ⌘1/⌘2 jumps, and the
  * Settings-overlay interplay. */
@@ -94,4 +94,18 @@ test("closing Settings returns to the active (non-default) module", async ({ pag
   await expect(page.locator("#view-settings")).toBeHidden();
   await expect(page.locator("#view-dependabot")).toBeVisible();
   await expect(page.locator("#view-notifications")).toBeHidden();
+});
+
+test("the last opened module is restored on launch", async ({ page }) => {
+  // Seed persisted state as if Dependabot was open when the app last closed. We can't use
+  // openApp's helper here because it waits on the (now hidden) notifications inbox pane.
+  await page.addInitScript(installTauriMock, { ...defaultFixtures(), lastModule: "dependabot" });
+  await page.goto("/");
+
+  await expect(page.locator("#view-dependabot")).toBeVisible();
+  await expect(page.locator("#view-notifications")).toBeHidden();
+  await expect(page.locator('.module-tab[data-module="dependabot"]')).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
 });

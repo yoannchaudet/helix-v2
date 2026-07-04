@@ -17,6 +17,8 @@ export function installTauriMock(fixtures) {
     theme: fixtures.settings.theme,
     inbox: JSON.parse(JSON.stringify(fixtures.inbox)),
     dependabot: JSON.parse(JSON.stringify(fixtures.dependabot ?? [])),
+    dependabotLastSync: fixtures.dependabotLastSync ?? null,
+    lastModule: fixtures.lastModule ?? null,
   };
   window.__TAURI_CALLS__ = [];
 
@@ -50,6 +52,11 @@ export function installTauriMock(fixtures) {
     },
     set_theme: ({ theme }) => {
       state.theme = theme;
+      return null;
+    },
+    get_last_module: () => state.lastModule ?? null,
+    set_last_module: ({ moduleId }) => {
+      state.lastModule = moduleId;
       return null;
     },
 
@@ -99,6 +106,7 @@ export function installTauriMock(fixtures) {
     },
     sync_now: () => ({ count: countAll(), removed: 0 }),
     list_dependabot: () => JSON.parse(JSON.stringify(state.dependabot)),
+    dependabot_status: () => ({ last_sync_at: state.dependabotLastSync ?? null }),
     sync_dependabot: () => ({
       count: state.dependabot.reduce((sum, g) => sum + g.prs.length, 0),
       removed: 0,

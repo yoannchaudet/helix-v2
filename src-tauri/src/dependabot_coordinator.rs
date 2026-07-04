@@ -8,7 +8,7 @@
 //! or Keychain I/O — each pass takes it only briefly to snapshot work or record results.
 
 use crate::db::Db;
-use crate::{auth, dependabot, github, sync, AppState, EventSink};
+use crate::{auth, dependabot, github, settings, sync, AppState, EventSink};
 use serde::Serialize;
 use tauri::{Manager, State};
 
@@ -60,6 +60,23 @@ pub fn list_dependabot(
 ) -> Result<Vec<dependabot::DependabotRepoGroup>, String> {
     let conn = state.db.0.lock().map_err(|e| e.to_string())?;
     dependabot::list_by_repo(&conn).map_err(|e| e.to_string())
+}
+
+/// Persisted Dependabot module status, surfaced to the UI on load.
+#[derive(Debug, Clone, Serialize)]
+pub struct DependabotStatus {
+    /// ISO-8601 UTC time of the last successful sync, or null if never synced. Drives the
+    /// "Synced …" label and the auto-sync staleness gate across app restarts.
+    last_sync_at: Option<String>,
+}
+
+/// Read the Dependabot module's persisted status (last successful sync time).
+#[tauri::command]
+pub fn dependabot_status(state: State<'_, AppState>) -> Result<DependabotStatus, String> {
+    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+    let last_sync_at = settings::get_string(&conn, settings::KEY_DEPENDABOT_LAST_SYNC)
+        .map_err(|e| e.to_string())?;
+    Ok(DependabotStatus { last_sync_at })
 }
 
 /// Fetch open Dependabot PRs across the notification-sourced repo list and store them locally,
@@ -189,6 +206,12 @@ where
             }
         }
         Ok::<(), rusqlite::Error>(())
+    });
+
+    // Persist the last successful sync time so the "Synced …" label and the auto-sync
+    // staleness gate survive app restarts (best-effort — never fails the sync).
+    best_effort(&db.0, "recording the Dependabot sync time", |conn| {
+        settings::set_timestamp_now(conn, settings::KEY_DEPENDABOT_LAST_SYNC)
     });
 
     let result = DependabotSyncResult {
@@ -497,6 +520,14 @@ mod tests {
         assert_eq!(
             sink.payload("dependabot:progress"),
             Some(serde_json::json!({ "scanned": 1, "found": 2 }))
+        );
+
+        // A successful sync persists the last-sync time so it survives restarts.
+        let conn = db.0.lock().unwrap();
+        let stamped = settings::get_string(&conn, settings::KEY_DEPENDABOT_LAST_SYNC).unwrap();
+        assert!(
+            stamped.is_some_and(|s| s.ends_with('Z')),
+            "sync should stamp an ISO timestamp"
         );
     }
 

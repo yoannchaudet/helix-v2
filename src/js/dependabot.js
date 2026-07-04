@@ -380,7 +380,18 @@ export function initDependabot() {
   }
   document.addEventListener("keydown", onCommandKeydown);
   $("#dependabot-sync-btn")?.addEventListener("click", syncDependabot);
-  renderIdleStatus();
+
+  // Seed the last-sync time from persisted state so the "Synced …" label and the auto-sync
+  // staleness gate survive app restarts. Best-effort: fall back to the neutral idle label.
+  invoke("dependabot_status")
+    .then((status) => {
+      const ts = status?.last_sync_at ? Date.parse(status.last_sync_at) : NaN;
+      // Never move the clock backwards: a sync may have completed (setting lastSyncAt to
+      // Date.now()) before this persisted read resolves.
+      if (!Number.isNaN(ts)) lastSyncAt = Math.max(lastSyncAt, ts);
+      renderIdleStatus();
+    })
+    .catch(() => renderIdleStatus());
 
   // Live progress during a sync (repos scanned / Dependabot PRs found).
   listen("dependabot:progress", (event) => {
