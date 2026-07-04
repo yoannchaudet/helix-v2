@@ -314,6 +314,53 @@ test("a bookmark survives marking the thread done", async ({ page }) => {
   await expect(page.locator('.n-row[data-thread-id="t2"] button.n-done')).toHaveCount(0);
 });
 
+test("focus restoration never lands on a mark-as-done control (unresolved survivors)", async ({
+  page,
+}) => {
+  const fx = defaultFixtures();
+  // One repo: an openable (resolved) row plus an unresolved row with no URL (not openable, no
+  // `.n-open[tabindex]`). Marking the openable one done leaves the unresolved row as the focus
+  // survivor — focus must NOT fall onto its `.n-done` (that reveals the stray check).
+  fx.inbox = [
+    {
+      repo_id: 1,
+      full_name: "octo/hello",
+      private: false,
+      notifications: [
+        {
+          thread_id: "open1",
+          subject_type: "PullRequest",
+          subject_title: "Openable",
+          subject_number: 1,
+          subject_state: "open",
+          subject_html_url: "https://github.com/octo/hello/pull/1",
+          reason: "mention",
+          updated_at: "2026-06-27T10:00:00Z",
+        },
+        {
+          thread_id: "await1",
+          subject_type: "Issue",
+          subject_title: "Unresolved",
+          reason: "mention",
+          updated_at: "2026-06-27T09:00:00Z",
+        },
+      ],
+    },
+  ];
+  await openApp(page, fx);
+
+  await page.locator('.n-row[data-thread-id="open1"]').hover();
+  await page.locator('.n-row[data-thread-id="open1"] .n-done').click();
+
+  // The openable row is gone; the survivor is unresolved. Focus should park on the inbox
+  // container, never a mark-as-done button.
+  await expect(page.locator('.n-row[data-thread-id="open1"]')).toHaveCount(0);
+  const activeIsDone = await page.evaluate(
+    () => document.activeElement?.classList.contains("n-done") ?? false,
+  );
+  expect(activeIsDone).toBe(false);
+});
+
 test("marking done in the Bookmarks filter keeps focus on the same row", async ({ page }) => {
   await openApp(page);
 

@@ -887,8 +887,12 @@ code,
   /* Inert while hidden so a click on the reserved (transparent) slot never marks a row
      done — it's only revealed + clickable on hover or keyboard focus. */
   pointer-events: none;
+  /* NOTE: no `opacity` transition. `renderInbox` clears the hover marker and then immediately
+     replaces the list `innerHTML`; with an opacity fade the control was still mid-fade (~opacity
+     1) when its row was destroyed, and the macOS WKWebView left those pixels "burned in" as a
+     stray control. Hiding instantly means there's nothing visible to ghost. Only color/background
+     (hover feedback) animate. */
   transition:
-    opacity var(--duration-fast) ease,
     color var(--duration-fast) ease,
     background var(--duration-fast) ease;
 }
@@ -976,36 +980,31 @@ code,
   display: flex;
   align-items: center;
   border-bottom: 1px solid var(--hairline);
-  /* Anchor + isolate the `.n-row--awaiting` stripe overlay. `isolation: isolate` makes the row
-     its own stacking context so the `z-index: -1` `::before` paints ABOVE the row's own
-     background (e.g. the `--new` tint) rather than behind it. */
-  position: relative;
-  isolation: isolate;
 }
 
 /* Pulled but not yet resolved (a PR/Issue with no state pill): a faint diagonal stripe so the
-   user can tell the row's state is still loading. Painted as a `::before` overlay (behind the
-   row's text/controls via `z-index: -1`, above any row background) so it layers cleanly over
-   the `--new` tint and the hover highlight without fighting their `background` rules. It clears
-   itself once background subject resolution fills in the state. */
-.n-row--awaiting::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  pointer-events: none;
-  background: repeating-linear-gradient(-45deg, transparent 0 7px, var(--row-stripe) 7px 14px);
+   user can tell the row's state is still loading. Painted as the row's own `background-image`
+   (NOT a `::before`/`isolation` overlay — that created a compositing layer WebKit failed to
+   repaint when the row re-rendered during a sync, leaving stray controls "burned in"). The row
+   background *colors* below use `background-color` so they compose with this stripe. */
+.n-row--awaiting {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    transparent 0 7px,
+    var(--row-stripe) 7px 14px
+  );
 }
 
 /* New or changed since the last sync: a subtle accent tint + left edge so they're easy
-   to spot. Cleared on the next sync. Uses accent vars so it tracks light/dark mode. */
+   to spot. Cleared on the next sync. Uses accent vars so it tracks light/dark mode.
+   `background-color` (not the `background` shorthand) so it composes with the awaiting stripe. */
 .n-row--new {
-  background: var(--accent-tint);
+  background-color: var(--accent-tint);
   box-shadow: inset 3px 0 0 0 var(--accent);
 }
 
 .n-row--new.n-row--openable.n-row--hover {
-  background: rgba(var(--accent-rgb), 0.22);
+  background-color: rgba(var(--accent-rgb), 0.22);
 }
 
 .n-open {
@@ -1022,11 +1021,11 @@ code,
    `.n-row--hover` class (see the row-controls note above) so it can't get stuck after a
    background re-render in the macOS WKWebView. */
 .n-row--openable {
-  transition: background var(--duration-fast) ease;
+  transition: background-color var(--duration-fast) ease;
 }
 
 .n-row--openable.n-row--hover {
-  background: var(--accent-tint);
+  background-color: var(--accent-tint);
 }
 
 .n-row--openable .n-open {

@@ -177,10 +177,13 @@ function applyInboxFocus(target, { preventScroll = false } = {}) {
   const safeId = String(target.threadId).replace(/["\\]/g, "\\$&");
   const row = inbox.querySelector(`.n-row[data-thread-id="${safeId}"]`);
   if (!row) return false;
-  // Prefer the part the user was on; fall back to whichever focusable the row has.
+  // Prefer the part the user was on. Never fall back to the mark-as-done control for a
+  // non-"done" target: focusing a `.n-done` reveals it via `:focus-visible`, and during the
+  // background subject-resolution re-render storm that leaves stray mark-as-done checks on
+  // unresolved rows (which have no openable `.n-open[tabindex]` to catch focus instead).
   const done = row.querySelector(".n-done");
   const open = row.querySelector(".n-open[tabindex]");
-  const el = target.part === "done" ? done || open : open || done;
+  const el = target.part === "done" ? done || open : open;
   if (!el) return false;
   el.focus({ preventScroll });
   return true;
@@ -245,10 +248,18 @@ function renderInbox() {
   if (focusTarget) {
     const preventScroll = focusTarget === preserved;
     const landed = applyInboxFocus(focusTarget, { preventScroll });
-    // The intended row is gone (e.g. removed by a background reconcile) — keep the user in
-    // the list on the first row rather than dropping focus to <body>.
+    // The intended row is gone (e.g. removed by a background reconcile) — keep the user in the
+    // list without landing on a row *control*. Focusing a `.n-done` here would reveal it via
+    // `:focus-visible`, and during the background re-render storm that leaves stray mark-as-done
+    // checks on unresolved rows. Prefer an openable row; otherwise park on the inbox container.
     if (!landed) {
-      inbox.querySelector(".n-open[tabindex], .n-done")?.focus({ preventScroll });
+      const open = inbox.querySelector(".n-open[tabindex]");
+      if (open) {
+        open.focus({ preventScroll });
+      } else {
+        inbox.tabIndex = -1;
+        inbox.focus({ preventScroll });
+      }
     }
   }
 }
