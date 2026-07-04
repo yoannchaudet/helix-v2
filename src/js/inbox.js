@@ -117,34 +117,33 @@ let pendingInboxFocus = null;
 /* Row hover is driven by a JS-managed class instead of the CSS `:hover` pseudo. In the macOS
  * WKWebView, a wholesale re-render (background subject resolution replaces rows) under a
  * stationary cursor leaves `:hover` stuck on the new node — its `mouseout` never fires — so the
- * row's action controls stay visible after the cursor leaves. Tracking the hovered row/header
- * ourselves via delegated listeners on the stable `#inbox` container avoids that: the class is
- * cleared on every render and only (re)applied on real pointer movement. */
-let hoverRow = null;
-let hoverHeader = null;
+ * row's action controls stay visible after the cursor leaves. We instead mark the hovered
+ * row/header with a class via delegated listeners on the stable `#inbox` container.
+ *
+ * State lives in the DOM (the class itself), never a JS reference: during the re-render storm
+ * while subjects resolve, the WKWebView can deliver `mouseover`s whose target is about to be (or
+ * already) detached, so a tracked reference goes stale while live rows keep the class — and they
+ * accumulate. Instead, every `mouseover` (and each render/leave/blur/scroll) SWEEPS the class off
+ * the live DOM and then marks only the row/header currently under the cursor. This guarantees at
+ * most one marked row at any time and self-heals on any pointer movement. */
 
-/** Move the `n-row--hover` marker to `row` (or clear it when null). */
-function setHoverRow(row) {
-  if (hoverRow === row) return;
-  hoverRow?.classList.remove("n-row--hover");
-  hoverRow = row;
-  hoverRow?.classList.add("n-row--hover");
-}
-
-/** Move the `repo-header--hover` marker to `header` (or clear it when null). */
-function setHoverHeader(header) {
-  if (hoverHeader === header) return;
-  hoverHeader?.classList.remove("repo-header--hover");
-  hoverHeader = header;
-  hoverHeader?.classList.add("repo-header--hover");
-}
-
-/** Forget the hovered row/header, removing their marker classes. Safe both when the nodes are
- *  about to be replaced (renderInbox) and when the pointer simply leaves the list (mouseleave),
- *  where the live nodes survive and must actually lose the class. */
+/** Remove the hover marker from every row/header that still carries it. The single source of
+ *  truth for clearing — sweeps the live DOM so no stray marker can survive (a tracked reference
+ *  would miss rows marked via a mouseover whose target was detached mid-re-render). */
 function clearHover() {
-  setHoverRow(null);
-  setHoverHeader(null);
+  const inbox = $("#inbox");
+  if (!inbox) return;
+  for (const el of inbox.querySelectorAll(".n-row--hover")) el.classList.remove("n-row--hover");
+  for (const el of inbox.querySelectorAll(".repo-header--hover")) {
+    el.classList.remove("repo-header--hover");
+  }
+}
+
+/** Mark exactly the row + header under the cursor as hovered, clearing everything else first. */
+function setHover(row, header) {
+  clearHover();
+  row?.classList.add("n-row--hover");
+  header?.classList.add("repo-header--hover");
 }
 
 /** Snapshot the inbox's current focus so a re-render can restore it. Returns null when
@@ -846,11 +845,15 @@ export function initInbox() {
   // hoverRow/hoverHeader note above for why. `mouseover` bubbles, so one listener covers every
   // row; moving off all rows (onto a header/gap) or out of the list clears the markers.
   $("#inbox").addEventListener("mouseover", (e) => {
-    const el = e.target instanceof Element ? e.target : null;
-    setHoverRow(el?.closest(".n-row") ?? null);
-    setHoverHeader(el?.closest(".repo-header") ?? null);
+    // Normalize a text-node target (some WebViews target text nodes) to its element parent.
+    const el = e.target instanceof Element ? e.target : (e.target?.parentElement ?? null);
+    setHover(el?.closest(".n-row") ?? null, el?.closest(".repo-header") ?? null);
   });
   $("#inbox").addEventListener("mouseleave", clearHover);
+  // Scrolling the list under a stationary cursor fires no mouseover in the WKWebView, so a
+  // marked row would keep its controls as it scrolls away. Clear on scroll; the next pointer
+  // move re-marks the row actually under the cursor.
+  $("#inbox").addEventListener("scroll", clearHover, { passive: true });
   // If the window loses focus while a row is hovered, the WebView may never deliver the
   // mouseleave — clear the marker so controls don't linger while the app is inactive.
   window.addEventListener("blur", clearHover);
