@@ -31,6 +31,9 @@ let pendingSync = false;
 /** Epoch ms of the last successful sync this session (0 = never). Drives the staleness
  *  gate for auto-sync-on-open and the status label. */
 let lastSyncAt = 0;
+/** Resolves once the persisted last-sync time has been read (or the read failed). The
+ *  auto-sync staleness gate awaits it so a restart doesn't re-scan a still-fresh sync. */
+let statusLoaded = Promise.resolve();
 
 /** Auto-sync-on-open only fires if we've never synced this session or it's been at least
  *  this long since the last sync — so repeated opens don't re-scan the repo list every time. */
@@ -387,9 +390,13 @@ export async function syncDependabot() {
 
 /** Called by main.js when the Dependabot module becomes active: render cached PRs, then
  *  auto-sync if stale (never synced this session, or older than the staleness window). */
-export function onDependabotOpened() {
+export async function onDependabotOpened() {
   loadDependabot();
   if (!isAuthenticated()) return;
+  // Wait for the persisted last-sync time to load before the staleness gate, so restoring into
+  // the Dependabot module doesn't re-scan when a recent sync (from a previous run) is still
+  // fresh — otherwise `lastSyncAt` would still be 0 here and we'd auto-sync every launch.
+  await statusLoaded;
   if (!lastSyncAt || Date.now() - lastSyncAt > AUTO_SYNC_STALE_MS) {
     syncDependabot();
   }
@@ -409,7 +416,7 @@ export function initDependabot() {
 
   // Seed the last-sync time from persisted state so the "Synced …" label and the auto-sync
   // staleness gate survive app restarts. Best-effort: fall back to the neutral idle label.
-  invoke("dependabot_status")
+  statusLoaded = invoke("dependabot_status")
     .then((status) => {
       const ts = status?.last_sync_at ? Date.parse(status.last_sync_at) : NaN;
       // Never move the clock backwards: a sync may have completed (setting lastSyncAt to

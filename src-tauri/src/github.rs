@@ -719,7 +719,17 @@ where
                 ok_repos.push(format!("{owner}/{name}"));
             }
             Err(GitHubError::Unauthorized) => return Err(GitHubError::Unauthorized),
-            Err(e) if e.is_rate_limited() => {
+            // Back off on any rate-limit signal — a 403 whose body says "rate limit", a 429, or
+            // any response carrying `Retry-After` (the header is recorded into `rate` even on an
+            // error). Mirrors `ResolveError::should_back_off`; the unscanned repos resolve on a
+            // later sync. Crucially, this must run *before* the 403 failure branch below so a
+            // rate-limiting 403 isn't miscounted as a per-repo access failure (which would drop
+            // a healthy repo after a few strikes).
+            Err(e)
+                if e.is_rate_limited()
+                    || rate.retry_after.is_some()
+                    || matches!(&e, GitHubError::Status { status, .. } if *status == reqwest::StatusCode::TOO_MANY_REQUESTS) =>
+            {
                 complete = false;
                 break;
             }
