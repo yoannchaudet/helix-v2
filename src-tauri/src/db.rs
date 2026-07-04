@@ -151,9 +151,9 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE notifications ADD COLUMN subject_mergeable_state TEXT;
     ALTER TABLE bookmarks ADD COLUMN subject_mergeable_state TEXT;
     "#,
-    // v10 — the Dependabot module's local store: open Dependabot PRs (gathered by enumerating
-    // the repos the user admins and listing each one's open PRs — no search API), cached so
-    // the module reads offline-first (like notifications) and GitHub is only hit on an
+    // v10 — the Dependabot module's local store: open Dependabot PRs (gathered by listing open
+    // PRs for the notification-sourced repo list in `dependabot_repos` — no search API), cached
+    // so the module reads offline-first (like notifications) and GitHub is only hit on an
     // explicit/auto sync. Self-contained (repo identity denormalized as owner/name; no FK to
     // `repos`, which is keyed on the GitHub repo id these listings don't surface here).
     // `mergeable_state`/`resolved_at` back the merge-readiness pill, resolved lazily per PR

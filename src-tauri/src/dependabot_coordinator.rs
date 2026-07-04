@@ -1,7 +1,7 @@
 //! Tauri command layer for the Dependabot module, built on the `dependabot` data layer.
 //! Mirrors `coordinator.rs` for its own domain: thin `#[tauri::command]` wrappers delegate
 //! to Tauri-free `*_core` functions that take `&Db`, an [`EventSink`], and the network op as
-//! an injected closure, so the search/store and background merge-state resolution can be
+//! an injected closure, so the fetch/store and background merge-state resolution can be
 //! tested without a Tauri runtime or real HTTP.
 //!
 //! SQLite lock discipline (same as `coordinator`): the DB lock is never held across network
@@ -18,7 +18,7 @@ use tauri::{Manager, State};
 /// so there is no concurrency knob.
 mod tuning {
     /// Soft reserve: stop resolving before spending below this fraction of any rate bucket,
-    /// leaving quota for the next search + the notifications module.
+    /// leaving quota for the next fetch + the notifications module.
     pub const RATE_RESERVE_FRACTION: f64 = 0.25;
 }
 
@@ -345,7 +345,7 @@ where
 mod tests {
     //! Orchestration tests for the Dependabot coordinator — same shape as
     //! `coordinator::tests`: in-memory SQLite + a recording `EventSink` + injected fake
-    //! search/resolve closures, so the search/store and merge-state-resolution flows (incl.
+    //! fetch/resolve closures, so the fetch/store and merge-state-resolution flows (incl.
     //! partial-failure and rate-reserve paths) are covered without Tauri or real HTTP.
     //! Gated on `debug_assertions` because the connected path reads the PAT from SQLite only
     //! in debug builds (release reads the Keychain).
@@ -543,7 +543,7 @@ mod tests {
         );
         let sink = RecordingSink::default();
 
-        // Next search returns only #1 → #2 is reconciled away.
+        // Next fetch returns only #1 → #2 is reconciled away.
         let (result, _) = tauri::async_runtime::block_on(sync_dependabot_core(
             &db,
             sink.clone(),
@@ -585,12 +585,12 @@ mod tests {
             }));
 
         assert!(result.unwrap_err().contains("Not connected"));
-        assert!(!called, "search must not run when no token is stored");
+        assert!(!called, "fetch must not run when no token is stored");
         assert!(sink.names().is_empty());
     }
 
     #[test]
-    fn sync_core_search_error_emits_error() {
+    fn sync_core_fetch_error_emits_error() {
         let db = db_with_token();
         let sink = RecordingSink::default();
 

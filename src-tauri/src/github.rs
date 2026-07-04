@@ -682,8 +682,8 @@ async fn list_open_dependabot_prs(
 
 /// Fetch open Dependabot PRs across the given `repos` (the persistent, notification-sourced
 /// repo list). For each repo, lists its open PRs and keeps the Dependabot-authored ones. Uses
-/// only the core REST API, serial + paced (see `DEPENDABOT_REQUEST_DELAY`), so it avoids the
-/// search secondary rate limit. `on_progress(scanned, found)` reports live progress.
+/// only the core REST API, serial + paced (see `DEPENDABOT_REQUEST_DELAY`), so it avoids
+/// tripping GitHub's secondary rate limit. `on_progress(scanned, found)` reports live progress.
 ///
 /// Per-repo results are reported in `ok_repos` (fetched successfully) and `failed_repos` (a
 /// 404 or non-rate 403 — the repo is likely gone or no longer readable), so the caller can

@@ -3,13 +3,14 @@
 //!
 //! Mirrors `sync.rs` for its own domain (see `docs/design.md` — SQLite is the source of
 //! truth). The repo list (`dependabot_repos`) is fed from the notifications Helix fetches
-//! (`sync::store_notifications` records every seen repo); `github::fetch_dependabot_prs_for_repos`
-//! then lists each repo's open Dependabot PRs — no search API. `store_prs` upserts the current
-//! results and, when the fetch was complete, reconciles away rows that disappeared upstream (a
-//! PR that merged/closed no longer appears, so it's deleted). The module reads offline-first
-//! via `list_by_repo`; GitHub is only contacted on a sync. Merge-readiness (`mergeable_state`)
-//! is resolved lazily per PR — the PR list omits it — with the same smart-cache
-//! (`prs_needing_merge_state`) + rate-reserve discipline used for notification subjects.
+//! (`sync::store_resolved_subject` records a repo once it has a Dependabot-authored
+//! notification); `github::fetch_dependabot_prs_for_repos` then lists each repo's open
+//! Dependabot PRs — no search API. `store_prs` upserts the current results and, when the fetch
+//! was complete, reconciles away rows that disappeared upstream (a PR that merged/closed no
+//! longer appears, so it's deleted). The module reads offline-first via `list_by_repo`; GitHub
+//! is only contacted on a sync. Merge-readiness (`mergeable_state`) is resolved lazily per PR —
+//! the PR list omits it — with the same smart-cache (`prs_needing_merge_state`) + rate-reserve
+//! discipline used for notification subjects.
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
@@ -19,7 +20,7 @@ use crate::github::{DependabotPr, ResolvedSubject};
 /// Outcome of a store + reconcile pass (mirrors `sync::StoreOutcome`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StoreOutcome {
-    /// PRs upserted from the latest search.
+    /// PRs upserted from the latest fetch.
     pub stored: usize,
     /// Local PRs removed because they were no longer returned (merged/closed/inaccessible).
     pub removed: usize,
@@ -92,8 +93,8 @@ pub fn store_prs(
         stored += 1;
     }
 
-    // Reconcile: delete any local PR not present in this search — but only for a complete
-    // search, so an incomplete/capped result never drops PRs outside its window.
+    // Reconcile: delete any local PR not present in this fetch — but only for a complete
+    // fetch, so an incomplete/capped result never drops PRs outside its window.
     let removed = if reconcile {
         tx.execute(
             "DELETE FROM dependabot_prs
@@ -118,7 +119,7 @@ pub struct DependabotPrView {
     pub author: String,
     pub updated_at: String,
     /// GitHub's rolled-up `mergeable_state` (clean/blocked/dirty/…), driving the
-    /// merge-readiness pill. Null until first resolved (the Search API omits it).
+    /// merge-readiness pill. Null until first resolved (the PR list endpoint omits it).
     pub mergeable_state: Option<String>,
 }
 
@@ -210,7 +211,7 @@ pub fn prs_needing_merge_state(conn: &Connection) -> rusqlite::Result<Vec<Pendin
 
 /// Persist a PR's resolved `mergeable_state` and stamp `resolved_at` so the smart cache can
 /// skip the row until its `updated_at` changes again. Only the merge state is stored — the
-/// other resolved fields (number, author, html_url) already come from the search result.
+/// other resolved fields (number, author, html_url) already come from the PR list result.
 pub fn store_merge_state(
     conn: &Connection,
     id: i64,
@@ -395,7 +396,7 @@ mod tests {
         )
         .unwrap();
 
-        // Second (complete) search returns only #1 (say #2 was merged) plus a new #3.
+        // Second (complete) fetch returns only #1 (say #2 was merged) plus a new #3.
         let out = store_prs(
             &mut conn,
             &[
@@ -494,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_search_upserts_without_reconciling() {
+    fn incomplete_fetch_upserts_without_reconciling() {
         let mut conn = mem_conn();
         store_prs(
             &mut conn,
@@ -506,7 +507,7 @@ mod tests {
         )
         .unwrap();
 
-        // An incomplete (capped/timed-out) search returns only #1 — #2 must NOT be dropped,
+        // An incomplete (capped/timed-out) fetch returns only #1 — #2 must NOT be dropped,
         // since it may simply have fallen outside the partial window.
         let out = store_prs(&mut conn, &[pr(1, "octo/repo-a", 10, "Bump a")], false).unwrap();
         assert_eq!(out.stored, 1);
@@ -514,7 +515,7 @@ mod tests {
         assert_eq!(
             count(&conn).unwrap(),
             2,
-            "no rows dropped from an incomplete search"
+            "no rows dropped from an incomplete fetch"
         );
     }
 
