@@ -21,6 +21,16 @@ export function isCleanupCandidate(n) {
   return false;
 }
 
+/** A notification that's been pulled but has no subject-state pill yet: a Pull Request or Issue
+ *  with no `subject_state`. Background subject resolution fills this in shortly after a sync;
+ *  other subject types (Discussion, Release, …) never get a state pill, so they're never
+ *  "awaiting". Keyed on the *absence* of a state (not `resolved_at` freshness) so a row that
+ *  already shows a pill is never re-striped — this is purely the "state unknown / still loading"
+ *  cue. Drives a subtle striped-row background. */
+export function isAwaitingState(n) {
+  return (n.subject_type === "PullRequest" || n.subject_type === "Issue") && !n.subject_state;
+}
+
 /** Smart filters: predicate over a notification + the human label for the toolbar. */
 export const FILTERS = {
   all: { label: "All", match: () => true },

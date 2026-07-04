@@ -42,6 +42,16 @@ test("renders the inbox grouped by repo with sidebar counts", async ({ page }) =
   await expect(page.locator(".repo-name").first()).toHaveText("acme/widgets");
 });
 
+test("an unresolved PR/Issue row shows the awaiting-state stripe cue", async ({ page }) => {
+  const fx = defaultFixtures();
+  // Simulate a row pulled but not yet resolved (no subject_state); its neighbor stays resolved.
+  fx.inbox[0].notifications[0].subject_state = null;
+  await openApp(page, fx);
+
+  await expect(page.locator('.n-row[data-thread-id="t1"]')).toHaveClass(/n-row--awaiting/);
+  await expect(page.locator('.n-row[data-thread-id="t2"]')).not.toHaveClass(/n-row--awaiting/);
+});
+
 test("selecting a smart filter narrows the list and updates the title", async ({ page }) => {
   await openApp(page);
 

@@ -1,7 +1,7 @@
 import { html, rawHtml } from "./dom.js";
 import { relTime } from "./format.js";
 import { pill, iconButton } from "./ui.js";
-import { TYPE_FILTERS } from "./inbox-model.js";
+import { TYPE_FILTERS, isAwaitingState } from "./inbox-model.js";
 
 /* Pure HTML templating for the inbox: given a notification (or repo group), return the
  * markup string. No DOM access, no module state — so these are unit-testable and the
@@ -99,7 +99,9 @@ export function notificationRow(n) {
   const author = n.subject_author ? authorTag(n.subject_author) : "";
   const bookmarked = !!n.bookmarked;
   const done = !!n.is_done;
-  const cls = `n-row${url ? " n-row--openable" : ""}${isNew}${bookmarked ? " n-row--bookmarked" : ""}${done ? " n-row--done" : ""}`;
+  // A PR/Issue whose state hasn't resolved yet gets a subtle striped cue (unless it's done).
+  const awaiting = !done && isAwaitingState(n) ? " n-row--awaiting" : "";
+  const cls = `n-row${url ? " n-row--openable" : ""}${isNew}${awaiting}${bookmarked ? " n-row--bookmarked" : ""}${done ? " n-row--done" : ""}`;
   const openAttrs = url ? html` data-url="${url}" role="link" tabindex="0"` : "";
   // A done thread (only ever shown in Bookmarks) has no mark-as-done button; render an inert
   // spacer (NOT an .n-done, so it never reveals on hover or handles clicks) to keep the

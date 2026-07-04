@@ -5,6 +5,7 @@ import {
   FILTERS,
   EMPTY_SUBTITLES,
   isCleanupCandidate,
+  isAwaitingState,
   repoMatches,
   latestUpdatedAt,
   sortReposByRecency,
@@ -14,6 +15,26 @@ import {
   typeMatch,
   filterGroupsByType,
 } from "../src/js/inbox-model.js";
+
+/* ------------------------------ isAwaitingState ------------------------------ */
+// A PR/Issue pulled but not yet resolved (no subject_state) drives the striped "loading" cue.
+
+test("isAwaitingState: PR/Issue without a subject_state is awaiting", () => {
+  assert.equal(isAwaitingState({ subject_type: "PullRequest" }), true);
+  assert.equal(isAwaitingState({ subject_type: "PullRequest", subject_state: null }), true);
+  assert.equal(isAwaitingState({ subject_type: "Issue", subject_state: "" }), true);
+});
+
+test("isAwaitingState: a resolved PR/Issue (has a state) is not awaiting", () => {
+  assert.equal(isAwaitingState({ subject_type: "PullRequest", subject_state: "open" }), false);
+  assert.equal(isAwaitingState({ subject_type: "Issue", subject_state: "closed" }), false);
+});
+
+test("isAwaitingState: non-PR/Issue subjects never await (no state pill expected)", () => {
+  assert.equal(isAwaitingState({ subject_type: "Discussion" }), false);
+  assert.equal(isAwaitingState({ subject_type: "Release", subject_state: null }), false);
+  assert.equal(isAwaitingState({ subject_type: "Commit" }), false);
+});
 
 /* ------------------------------ isCleanupCandidate ------------------------------ */
 // The fragile rule (design.md §6): only merged/closed PRs and closed issues that are

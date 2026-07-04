@@ -40,6 +40,9 @@
   /* Derived / role tokens (all themeable via the channels + solids above). */
   --hairline: rgba(var(--text-rgb), 0.08);
   --hover: rgba(var(--text-rgb), 0.05);
+  /* Faint diagonal stripe for a row whose subject state is still loading (see `.n-row--awaiting`).
+     Built on `--text-rgb` so it adapts to light/dark like the other hairline tints. */
+  --row-stripe: rgba(var(--text-rgb), 0.05);
   --surface-hover: #f3f4f8;
   --field-bg: #ffffff;
   --focus-ring: rgba(var(--accent-rgb), 0.35);
@@ -973,6 +976,25 @@ code,
   display: flex;
   align-items: center;
   border-bottom: 1px solid var(--hairline);
+  /* Anchor + isolate the `.n-row--awaiting` stripe overlay. `isolation: isolate` makes the row
+     its own stacking context so the `z-index: -1` `::before` paints ABOVE the row's own
+     background (e.g. the `--new` tint) rather than behind it. */
+  position: relative;
+  isolation: isolate;
+}
+
+/* Pulled but not yet resolved (a PR/Issue with no state pill): a faint diagonal stripe so the
+   user can tell the row's state is still loading. Painted as a `::before` overlay (behind the
+   row's text/controls via `z-index: -1`, above any row background) so it layers cleanly over
+   the `--new` tint and the hover highlight without fighting their `background` rules. It clears
+   itself once background subject resolution fills in the state. */
+.n-row--awaiting::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: repeating-linear-gradient(-45deg, transparent 0 7px, var(--row-stripe) 7px 14px);
 }
 
 /* New or changed since the last sync: a subtle accent tint + left edge so they're easy
