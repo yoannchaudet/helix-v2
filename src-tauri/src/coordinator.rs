@@ -27,6 +27,11 @@ mod tuning {
     /// of any rate-limit bucket, leaving quota for the list fetch + mark-done. Checked after
     /// each (serial) resolution request; the deferred subjects resolve on a later sync.
     pub const RATE_RESERVE_FRACTION: f64 = 0.25;
+    /// Per-request timeout for background subject-resolution calls. Bounds each request so a
+    /// hung connection can't stall the whole pass — which the frontend now waits on before it
+    /// reports the sync complete (see `subjects:resolution-done`). A timed-out request is a
+    /// normal per-subject failure: it's logged and retried on a later sync.
+    pub const RESOLVE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 }
 
 /// Take the DB lock and run a best-effort write, logging (rather than surfacing) either a
@@ -179,7 +184,13 @@ where
 /// DB lock is never held across network I/O. Emits `subjects:resolved` when anything changed.
 async fn resolve_pending_subjects(app: tauri::AppHandle, token: String) {
     let state = app.state::<AppState>();
-    let client = reqwest::Client::new();
+    // A per-request timeout bounds each subject fetch so a hung connection can't leave the
+    // pass (and therefore the sync's "resolving" phase) running forever. Falls back to the
+    // default client if the builder ever fails.
+    let client = reqwest::Client::builder()
+        .timeout(tuning::RESOLVE_REQUEST_TIMEOUT)
+        .build()
+        .unwrap_or_default();
     let resolve = move |url: String| {
         let client = client.clone();
         let token = token.clone();
@@ -188,29 +199,50 @@ async fn resolve_pending_subjects(app: tauri::AppHandle, token: String) {
     resolve_pending_subjects_core(&state.db, app.clone(), resolve).await;
 }
 
-/// Tauri-free core of [`resolve_pending_subjects`]: the serial rate-reserve-budgeted
-/// per-subject resolve+store loop, with the network call injected as `resolve(url)` and
-/// events sent through `sink`. This is where #98's rate-limit-reserve and partial-failure
-/// paths (and the secondary-rate-limit back-off) live, so keeping it free of
-/// `AppHandle`/`github::` lets tests drive them with a fake resolver.
+/// Tauri-free core of [`resolve_pending_subjects`]: emits a `subjects:resolution-started` /
+/// `subjects:resolution-done` pair around one resolution pass (so the frontend can treat
+/// resolution as the tail of the sync and only report "synced" once the pass finishes), plus
+/// `subjects:resolved` when anything changed. `subjects:resolution-done` is emitted on **every**
+/// pass — including the no-pending, already-below-reserve, and back-off cases — so the frontend
+/// gate can never get stuck. The actual work lives in [`run_resolution_pass`].
 async fn resolve_pending_subjects_core<S, R, Fut>(db: &Db, sink: S, resolve: R)
 where
     S: EventSink,
     R: Fn(String) -> Fut,
     Fut: std::future::Future<Output = Result<github::ResolveResult, github::ResolveError>>,
 {
+    sink.emit("subjects:resolution-started", serde_json::Value::Null);
+    let changed = run_resolution_pass(db, &resolve).await;
+    if changed > 0 {
+        sink.emit("subjects:resolved", serde_json::json!({ "count": changed }));
+    }
+    sink.emit(
+        "subjects:resolution-done",
+        serde_json::json!({ "changed": changed }),
+    );
+}
+
+/// One serial, rate-reserve-budgeted subject-resolution pass. Returns the number of subjects
+/// whose state changed and was stored. Kept free of `AppHandle`/`github::` (the network call is
+/// injected as `resolve(url)`) so tests can drive #98's rate-limit-reserve, partial-failure, and
+/// secondary-rate-limit back-off paths with a fake resolver.
+async fn run_resolution_pass<R, Fut>(db: &Db, resolve: &R) -> usize
+where
+    R: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<github::ResolveResult, github::ResolveError>>,
+{
     // Snapshot the work under the lock, then release it before any network I/O.
     let pending = {
         let Ok(conn) = db.0.lock() else {
-            return;
+            return 0;
         };
         match sync::subjects_needing_resolution(&conn) {
             Ok(p) => p,
-            Err(_) => return,
+            Err(_) => return 0,
         }
     };
     if pending.is_empty() {
-        return;
+        return 0;
     }
 
     const RESERVE_FRACTION: f64 = tuning::RATE_RESERVE_FRACTION;
@@ -237,7 +269,7 @@ where
     }
     // Already low on quota? Don't start — leave every subject for a future sync.
     if rate.below_reserve(RESERVE_FRACTION) {
-        return;
+        return 0;
     }
 
     // Resolve **serially** (one request at a time), per GitHub's secondary-rate-limit guidance
@@ -291,9 +323,7 @@ where
     // Persist the post-resolution quota so Settings shows the true per-bucket usage.
     best_effort(&db.0, "persisting rate limits", |conn| rate.persist(conn));
 
-    if changed > 0 {
-        sink.emit("subjects:resolved", serde_json::json!({ "count": changed }));
-    }
+    changed
 }
 
 /// Read the current sync status (last sync, status/error, rate limit, stored count).
@@ -893,9 +923,36 @@ mod tests {
             sink.payload("subjects:resolved"),
             Some(serde_json::json!({ "count": 2 }))
         );
+        // The started/done lifecycle pair brackets the pass (the frontend gates the "synced"
+        // status on `subjects:resolution-done`).
+        assert_eq!(sink.count("subjects:resolution-started"), 1);
+        assert_eq!(
+            sink.payload("subjects:resolution-done"),
+            Some(serde_json::json!({ "changed": 2 }))
+        );
         // Both rows resolved, so none still need resolution.
         let conn = db.0.lock().unwrap();
         assert!(sync::subjects_needing_resolution(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn resolve_core_emits_done_even_with_no_pending() {
+        let db = db_with_token();
+        let sink = RecordingSink::default();
+
+        tauri::async_runtime::block_on(resolve_pending_subjects_core(
+            &db,
+            sink.clone(),
+            |_url| async move { Ok(ok_subject(4990)) },
+        ));
+
+        // No work, but the lifecycle pair must still fire so the frontend gate never sticks.
+        assert_eq!(sink.count("subjects:resolved"), 0);
+        assert_eq!(sink.count("subjects:resolution-started"), 1);
+        assert_eq!(
+            sink.payload("subjects:resolution-done"),
+            Some(serde_json::json!({ "changed": 0 }))
+        );
     }
 
     #[test]

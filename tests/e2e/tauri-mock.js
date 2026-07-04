@@ -22,6 +22,18 @@ export function installTauriMock(fixtures) {
   };
   window.__TAURI_CALLS__ = [];
 
+  // Minimal event bus mirroring Tauri's listen/emit. Handlers can `emit(name, payload)` to
+  // drive the app's event-driven flows (e.g. the subject-resolution lifecycle after a sync).
+  const listeners = new Map();
+  const emit = (name, payload) => {
+    for (const cb of listeners.get(name) ?? []) cb({ payload });
+  };
+  const listen = (name, cb) => {
+    if (!listeners.has(name)) listeners.set(name, new Set());
+    listeners.get(name).add(cb);
+    return Promise.resolve(() => listeners.get(name)?.delete(cb));
+  };
+
   const countAll = () => state.inbox.reduce((sum, g) => sum + g.notifications.length, 0);
 
   const handlers = {
@@ -104,7 +116,18 @@ export function installTauriMock(fixtures) {
       }
       return null;
     },
-    sync_now: () => ({ count: countAll(), removed: 0 }),
+    sync_now: () => {
+      // Mirror the backend: the list sync returns immediately, then a background subject
+      // resolution pass runs and reports completion. No pending subjects in the mock, so it
+      // resolves nothing — but the lifecycle events still fire so the app leaves the
+      // "Syncing…" (resolving) phase. A macrotask defers them until after the app's
+      // `await invoke(...)` continuation, modelling the real (post-return) ordering.
+      setTimeout(() => {
+        emit("subjects:resolution-started", null);
+        emit("subjects:resolution-done", { changed: 0 });
+      }, 0);
+      return { count: countAll(), removed: 0 };
+    },
     list_dependabot: () => JSON.parse(JSON.stringify(state.dependabot)),
     dependabot_status: () => ({ last_sync_at: state.dependabotLastSync ?? null }),
     sync_dependabot: () => ({
@@ -135,9 +158,8 @@ export function installTauriMock(fixtures) {
           : Promise.reject(new Error(`unmocked Tauri command: ${cmd}`));
       },
     },
-    // The app subscribes to backend events but never depends on one firing during these
-    // tests, so listen is a no-op returning the usual unlisten function.
-    event: { listen: () => Promise.resolve(() => {}) },
+    // Event bus backing the app's listen()/emit() flows (see the top of this fn).
+    event: { listen: (name, cb) => listen(name, cb) },
   };
 }
 

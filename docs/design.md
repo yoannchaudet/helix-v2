@@ -54,10 +54,13 @@ reconciles with GitHub over the network.
   `get_settings` / `save_settings`, `open_url`). Owns all GitHub I/O, SQLite, and Keychain
   access.
 - **IPC:** UI → core via `invoke(command, args)`; core → UI via emitted events. The core
-  emits `sync:started` / `sync:progress` / `sync:done` / `sync:error` around a sync and
-  `subjects:resolved` when background subject resolution updates rows; the UI currently
-  reacts to `sync:progress` (live progress) and `subjects:resolved` (re-render), and reads
-  sync status via `sync_status`.
+  emits `sync:started` / `sync:progress` / `sync:done` / `sync:error` around the notifications
+  list fetch, then `subjects:resolution-started` → (`subjects:resolved` per batch) →
+  `subjects:resolution-done` around the background subject-resolution pass that follows. The UI
+  treats that resolution pass as the tail of the sync: it reacts to `sync:progress` (live
+  progress) and `subjects:resolved` (re-render), and holds the status at "Syncing…" (and pauses
+  the poll countdown) until `subjects:resolution-done` — so "Synced" only shows once the current
+  resolution pass finishes. It reads sync status via `sync_status`.
 
 ### Current architecture (as built)
 
