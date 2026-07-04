@@ -846,7 +846,10 @@ export function initInbox() {
   // hoverRow/hoverHeader note above for why. `mouseover` bubbles, so one listener covers every
   // row; moving off all rows (onto a header/gap) or out of the list clears the markers.
   $("#inbox").addEventListener("mouseover", (e) => {
-    const el = e.target instanceof Element ? e.target : null;
+    // Normalize a text-node target (some WebViews target text nodes) to its element parent,
+    // the same way `inboxRowFromEvent` does — otherwise hover would clear while the pointer is
+    // still over the row's text.
+    const el = e.target instanceof Element ? e.target : (e.target?.parentElement ?? null);
     setHoverRow(el?.closest(".n-row") ?? null);
     setHoverHeader(el?.closest(".repo-header") ?? null);
   });
