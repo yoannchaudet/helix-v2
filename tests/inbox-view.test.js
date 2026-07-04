@@ -35,6 +35,21 @@ test("notificationRow adds n-row--new only when is_new is set", () => {
   assert.ok(!notificationRow(baseNotification).includes("n-row--new"));
 });
 
+test("notificationRow adds n-row--awaiting for an unresolved PR/Issue only", () => {
+  // No subject_state yet → striped "loading" cue.
+  const awaiting = notificationRow({ ...baseNotification, subject_state: null });
+  assert.ok(awaiting.includes("n-row--awaiting"));
+  // Resolved (has a state) → no cue.
+  assert.ok(!notificationRow(baseNotification).includes("n-row--awaiting"));
+  // Non-PR/Issue subjects never get the cue even without a state.
+  const discussion = notificationRow({
+    ...baseNotification,
+    subject_type: "Discussion",
+    subject_state: null,
+  });
+  assert.ok(!discussion.includes("n-row--awaiting"));
+});
+
 test("notificationRow shows a filled bookmark + pressed state when bookmarked", () => {
   const on = notificationRow({ ...baseNotification, bookmarked: true });
   assert.ok(on.includes("n-row--bookmarked"));
