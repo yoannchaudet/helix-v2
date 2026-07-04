@@ -86,6 +86,28 @@ test("the subject-type pills narrow the whole view and reduce counts", async ({ 
   await expect(page.locator("#inbox .n-row")).toHaveCount(1);
 });
 
+test("row hover is class-driven and clears when the pointer leaves", async ({ page }) => {
+  await openApp(page);
+
+  const row = page.locator('.n-row[data-thread-id="t2"]');
+  // Hovering marks the row (revealing its controls) via a JS class, not CSS `:hover` — this is
+  // what lets a background re-render drop the marker so controls can't get stuck visible in the
+  // macOS WKWebView.
+  await row.hover();
+  await expect(row).toHaveClass(/n-row--hover/);
+
+  // Moving the pointer off the row (onto the repo header) clears the marker (controls hide).
+  await page.locator("#inbox .repo-header").first().hover();
+  await expect(row).not.toHaveClass(/n-row--hover/);
+
+  // Leaving the list entirely also clears it (the mouseleave path — WKWebView can otherwise
+  // leave the class stuck on the live node).
+  await row.hover();
+  await expect(row).toHaveClass(/n-row--hover/);
+  await page.mouse.move(5, 5);
+  await expect(row).not.toHaveClass(/n-row--hover/);
+});
+
 test("marking a single row done removes it and decrements the count", async ({ page }) => {
   await openApp(page);
 
