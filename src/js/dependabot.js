@@ -329,7 +329,14 @@ export async function syncDependabot() {
     lastSyncAt = Date.now();
     const removed = result.removed ?? 0;
     const msg = `Found ${result.count} PR${result.count === 1 ? "" : "s"}`;
-    setDepProgress(removed > 0 ? `${msg}, removed ${removed}.` : `${msg}.`, "success");
+    const detail = removed > 0 ? `${msg}, removed ${removed}.` : `${msg}.`;
+    if (result.complete === false) {
+      // Some repos couldn't be read (e.g. a 404 from a repo the token lacks PR access to) or
+      // the scan stopped on the quota reserve. Surface it as a neutral note, not an error.
+      setDepProgress(`${detail} Some repositories were skipped — check token access.`, "");
+    } else {
+      setDepProgress(detail, "success");
+    }
     setDepStatus("success", "Synced just now");
     await loadDependabot();
   } catch (err) {

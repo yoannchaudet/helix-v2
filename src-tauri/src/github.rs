@@ -805,12 +805,29 @@ where
 {
     let client = reqwest::Client::new();
     let mut rate = RateLimit::default();
+    // A single problematic owner/repo (a 404, a transient 5xx, …) must not sink the whole
+    // sync. We skip it, log it, and mark the result incomplete so the caller won't
+    // reconcile-delete (a skipped repo's cached PRs are kept until a later clean sync). Only a
+    // genuine auth failure (401) or a rate-limit is treated specially.
+    let mut complete = true;
 
     // 1. Collect the admin repos across the selected owners (de-duplicated).
     let mut admin_repos: Vec<(String, String)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for owner in owners {
-        let repos = list_admin_repos(&client, token, owner, self_login, &mut rate).await?;
+        let repos = match list_admin_repos(&client, token, owner, self_login, &mut rate).await {
+            Ok(repos) => repos,
+            Err(GitHubError::Unauthorized) => return Err(GitHubError::Unauthorized),
+            Err(e) if e.is_rate_limited() => {
+                complete = false;
+                break;
+            }
+            Err(e) => {
+                eprintln!("helix: listing repos for {owner} failed, skipping: {e}");
+                complete = false;
+                continue;
+            }
+        };
         for (o, n) in repos {
             if seen.insert((o.to_lowercase(), n.to_lowercase())) {
                 admin_repos.push((o, n));
@@ -824,7 +841,6 @@ where
     //    reserve or GitHub starts rate-limiting — the rest resolves on a later sync.
     let mut prs: Vec<DependabotPr> = Vec::new();
     let mut scanned = 0usize;
-    let mut complete = true;
     for (owner, name) in &admin_repos {
         if core_below_reserve(&rate) {
             complete = false;
@@ -832,11 +848,17 @@ where
         }
         match list_open_dependabot_prs(&client, token, owner, name, &mut rate).await {
             Ok(repo_prs) => prs.extend(repo_prs),
+            Err(GitHubError::Unauthorized) => return Err(GitHubError::Unauthorized),
             Err(e) if e.is_rate_limited() => {
                 complete = false;
                 break;
             }
-            Err(e) => return Err(e),
+            // A per-repo failure (e.g. a 404 on a repo we can list but not read PRs for, or a
+            // transient error) — skip this repo rather than failing the whole sync.
+            Err(e) => {
+                eprintln!("helix: listing PRs for {owner}/{name} failed, skipping: {e}");
+                complete = false;
+            }
         }
         scanned += 1;
         on_progress(scanned, prs.len());

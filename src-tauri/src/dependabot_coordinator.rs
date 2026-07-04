@@ -47,6 +47,10 @@ pub struct DependabotSyncResult {
     count: usize,
     removed: usize,
     rate_remaining: Option<i64>,
+    /// False when the enumeration didn't cover everything — a repo was skipped (e.g. a 404
+    /// from a repo the token can't read PRs for) or it stopped early on the quota reserve. The
+    /// frontend surfaces a gentle note so an incomplete result isn't mistaken for "no PRs".
+    complete: bool,
 }
 
 /// One selectable account in the Dependabot picker: the authenticated user or an org they
@@ -194,6 +198,7 @@ pub async fn sync_dependabot(
             count: 0,
             removed,
             rate_remaining: None,
+            complete: true,
         });
     }
 
@@ -289,6 +294,7 @@ where
         count: stored.stored,
         removed: stored.removed,
         rate_remaining: outcome.rate.remaining,
+        complete: outcome.complete,
     };
     sink.emit(
         "dependabot:done",

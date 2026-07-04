@@ -114,6 +114,7 @@ export function installTauriMock(fixtures) {
       count: state.dependabot.reduce((sum, g) => sum + g.prs.length, 0),
       removed: 0,
       rate_remaining: 28,
+      complete: true,
     }),
     mark_threads_done: ({ threadIds }) => {
       const ids = new Set(threadIds);
