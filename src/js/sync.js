@@ -10,6 +10,12 @@ import { isAuthenticated, loadAccount } from "./account.js";
 
 /** True while a sync is in flight; gates stale sync:progress events. */
 let syncing = false;
+/** True from a successful list-sync until its background subject-resolution pass finishes
+ *  (`subjects:resolution-done`). Resolution is treated as the tail of the sync: the status pill
+ *  stays "Syncing…", the sync button stays busy, and the poll countdown is held until it clears
+ *  — so we don't report "Synced" (or start another sync) while resolution calls are still in
+ *  flight. */
+let resolving = false;
 /** Timer that clears the transient post-sync "Stored N" progress message. */
 let syncProgressTimer;
 /** 1-second tick driving the automatic poll + the refresh-button clock sweep. */
@@ -133,6 +139,11 @@ function renderSyncStats(status) {
   if (status.last_status === "error" && status.last_error) {
     setSyncStatus("error", "Error");
     setSyncProgress(status.last_error, "error");
+  } else if (resolving) {
+    // The notifications list is stored, but background subject resolution (the Open/Closed/
+    // Merged pills) is still running — it's part of the sync, so hold the pill until the
+    // resolution pass finishes (see the `subjects:resolution-done` listener).
+    setSyncStatus("pending", "Syncing…");
   } else if (status.last_status === "success") {
     // Green only confirms a sync that happened in this session. On launch we're showing
     // cached local state, so the same "success" record renders neutral with its age.
@@ -207,40 +218,57 @@ export async function loadSyncStatus() {
 }
 
 export async function syncNow() {
+  // Re-entrancy guard: a manual click or poll tick must not start a sync while one — including
+  // its trailing subject-resolution pass — is still running.
+  if (syncing || resolving) return;
   setSyncBusy(true);
   syncing = true;
+  // A successful sync always spawns a resolution pass, so optimistically enter the resolving
+  // phase now (before the await) — this both holds the pill and closes the race where a fast
+  // `subjects:resolution-done` could arrive before this continuation runs. The error path and
+  // the resolution-done listener clear it.
+  resolving = true;
   setSyncStatus("pending", "Syncing…");
   setSyncProgress("Starting…");
 
+  let result;
   try {
-    const result = await invoke("sync_now");
-    // Stop accepting progress updates before writing the final message, so a
-    // late-delivered sync:progress event can't overwrite it.
+    result = await invoke("sync_now");
+  } catch (err) {
+    // Only the list-sync itself failing means no resolution pass will run — leave the
+    // resolving phase. (Post-success refreshes below must NOT clear it: only
+    // `subjects:resolution-done` ends a successful sync.)
     syncing = false;
-    session.syncedThisSession = true;
-    const removed = result.removed ?? 0;
-    const storedMsg = `Stored ${result.count} notification${result.count === 1 ? "" : "s"}`;
-    // Transient: the durable record is the "Last synced" row, so the inline "Stored N"
-    // message clears itself shortly after it appears.
-    flashSyncProgress(
-      removed > 0 ? `${storedMsg}, removed ${removed}.` : `${storedMsg}.`,
-      "success",
-    );
+    resolving = false;
+    setSyncStatus("error", "Error");
+    setSyncProgress(String(err), "error");
+    setSyncBusy(false);
+    // Restart the countdown so the next automatic poll is measured from this attempt.
+    resetPollCountdown();
+    return;
+  }
+
+  // Stop accepting progress updates before writing the final message, so a
+  // late-delivered sync:progress event can't overwrite it.
+  syncing = false;
+  session.syncedThisSession = true;
+  const removed = result.removed ?? 0;
+  const storedMsg = `Stored ${result.count} notification${result.count === 1 ? "" : "s"}`;
+  // Transient: the durable record is the "Last synced" row, so the inline "Stored N"
+  // message clears itself shortly after it appears.
+  flashSyncProgress(removed > 0 ? `${storedMsg}, removed ${removed}.` : `${storedMsg}.`, "success");
+  // Refresh stats + inbox now (the list is stored and shown immediately). The pill stays
+  // "Syncing…" while `resolving` is true; `subjects:resolution-done` flips it to "Synced",
+  // clears the busy state, and restarts the poll countdown from full completion. Best-effort:
+  // a refresh failure here must not end the resolving phase (only resolution-done does that).
+  try {
     await loadSyncStatus();
     await onInboxStale?.();
     // A successful sync proves the Keychain is now readable, so refresh the account
     // section to clear any stale "failed to read token" error from an earlier cancel.
     await loadAccount();
   } catch (err) {
-    syncing = false;
-    setSyncStatus("error", "Error");
-    setSyncProgress(String(err), "error");
-  } finally {
-    syncing = false;
-    setSyncBusy(false);
-    // Restart the countdown so the next automatic poll is measured from the most
-    // recent sync, whether it was triggered manually or by the poll loop.
-    resetPollCountdown();
+    console.error("post-sync refresh failed:", err);
   }
 }
 
@@ -258,8 +286,9 @@ function resetPollCountdown() {
 
 /** One-second tick: advance the sweep and fire an automatic sync when due. */
 function pollTick() {
-  // Hold the countdown while signed out or while a sync is already running.
-  if (!isAuthenticated() || syncing) return;
+  // Hold the countdown while signed out, or while a sync — including its trailing subject
+  // resolution pass — is already running.
+  if (!isAuthenticated() || syncing || resolving) return;
   pollElapsed += 1;
   // Honor GitHub's requested cadence (X-Poll-Interval / Retry-After) on top of the user's
   // interval and the app's hard minimum.
@@ -292,10 +321,22 @@ export function registerSyncEvents() {
     setSyncProgress(`Fetching page ${page}… (${fetched} so far)`);
   });
   // Subject states (Open/Closed/Merged pills) resolve in the background after a sync;
-  // reload the inbox once they land so the pills appear without another sync, and refresh
+  // reload the inbox once a batch lands so the pills appear progressively, and refresh
   // the sync stats so the rate-limit count reflects the extra resolution calls.
   listen("subjects:resolved", () => {
     onInboxStale?.();
     loadSyncStatus();
+  });
+  // The resolution pass finished (drained, hit the rate reserve, or backed off) — this is the
+  // true end of the sync. Leave the resolving phase: flip the pill to "Synced", re-enable the
+  // controls, and restart the poll countdown from here. Any still-pending subjects (deferred
+  // under the reserve) resolve on a later sync. No inbox reload here — `subjects:resolved`
+  // already reloads it whenever anything actually changed, so reloading again would be redundant.
+  listen("subjects:resolution-done", () => {
+    if (!resolving) return;
+    resolving = false;
+    setSyncBusy(false);
+    loadSyncStatus();
+    resetPollCountdown();
   });
 }

@@ -4,6 +4,25 @@ import { openApp, emptyFixtures, defaultFixtures } from "./tauri-mock.js";
 /* Inbox flows against mocked data: rendering, the smart filters + repo refinement, and the
  * three mark-done paths (per-row, bulk-confirm, context menu). */
 
+test("a manual sync stays busy through resolution, then re-enables the controls", async ({
+  page,
+}) => {
+  // Withhold the resolution `-done` event so we can observe the "busy through resolution" phase.
+  await openApp(page, { ...defaultFixtures(), manualResolution: true });
+
+  await page.locator("#sync-btn").click();
+  // The list sync returns, but the sync button stays disabled and the pill stays "Syncing…"
+  // while the subject-resolution pass runs.
+  await expect(page.locator("#sync-btn")).toBeDisabled();
+  await expect(page.locator(".js-sync-label").first()).toHaveText("Syncing…");
+
+  // Completing the pass ends the sync: controls re-enable and the pill settles on success.
+  // Regression guard: the status must not get stuck in the resolving phase.
+  await page.evaluate(() => window.__mockEmit("subjects:resolution-done", { changed: 0 }));
+  await expect(page.locator("#sync-btn")).toBeEnabled();
+  await expect(page.locator(".js-sync-label").first()).toHaveClass(/status-label--success/);
+});
+
 test("renders the inbox grouped by repo with sidebar counts", async ({ page }) => {
   await openApp(page);
 
