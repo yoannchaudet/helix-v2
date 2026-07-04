@@ -72,18 +72,6 @@ pub fn store_notifications(
             params![t.id],
         )?;
 
-        // Feed the Dependabot module's persistent repo list: every repo we ever see in a
-        // notification is remembered there (it isn't pruned when notifications clear), so the
-        // Dependabot module can scan it for open Dependabot PRs. Done up here — before the
-        // done-tombstone suppression below — so a repo is still recorded even when all of its
-        // notifications have been marked done. Idempotent (INSERT OR IGNORE).
-        crate::dependabot::observe_repo(
-            &tx,
-            &t.repository.full_name,
-            &t.repository.owner.login,
-            &t.repository.name,
-        )?;
-
         // Keep a thread the user marked done out of the inbox. GitHub keeps returning done
         // threads in `all=true`, so the tombstone suppresses re-inserting it — unless it has
         // genuinely *newer* activity than the user has already dismissed, in which case it's a
@@ -505,6 +493,30 @@ pub fn store_resolved_subject(
             subject.mergeable_state
         ],
     )?;
+
+    // Feed the Dependabot module's persistent repo list. A repo is tracked only once we've
+    // resolved a **Dependabot-authored** notification in it (not just any notification) — the
+    // author is only known here, after resolution. The repo persists even after its
+    // notifications clear (dependabot_repos isn't pruned), so the Dependabot module can keep
+    // scanning it for open Dependabot PRs.
+    if subject
+        .author
+        .as_deref()
+        .is_some_and(crate::github::is_dependabot_author)
+    {
+        let repo: Option<(String, String, String)> = conn
+            .query_row(
+                "SELECT r.full_name, r.owner, r.name
+                 FROM notifications n JOIN repos r ON r.id = n.repo_id
+                 WHERE n.thread_id = ?1",
+                params![thread_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        if let Some((full_name, owner, name)) = repo {
+            crate::dependabot::observe_repo(conn, &full_name, &owner, &name)?;
+        }
+    }
     Ok(())
 }
 
@@ -872,48 +884,46 @@ mod tests {
             .unwrap();
         assert_eq!(repos, 2);
 
-        // The Dependabot module's persistent repo list was fed from these notifications.
+        // A plain notification does NOT add its repo to the Dependabot list — only a resolved
+        // Dependabot-authored notification does (see `dependabot_repos_track_only_dependabot`).
+        assert!(crate::dependabot::list_repos(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn dependabot_repos_track_only_dependabot_and_persist() {
+        let mut conn = mem_conn();
+        store_notifications(
+            &mut conn,
+            &[
+                thread("1", 100, "octo/repo-a", "Bump lodash"),
+                thread("2", 200, "octo/repo-b", "A human PR"),
+            ],
+        )
+        .unwrap();
+
+        // Resolve #1 as a Dependabot PR and #2 as a human PR.
+        let dependabot = ResolvedSubject {
+            author: Some("dependabot[bot]".to_string()),
+            ..Default::default()
+        };
+        let human = ResolvedSubject {
+            author: Some("octocat".to_string()),
+            ..Default::default()
+        };
+        store_resolved_subject(&conn, "1", &dependabot).unwrap();
+        store_resolved_subject(&conn, "2", &human).unwrap();
+
+        // Only the repo with a Dependabot-authored notification is tracked.
         let dep_repos: Vec<String> = crate::dependabot::list_repos(&conn)
             .unwrap()
             .into_iter()
             .map(|r| r.full_name)
             .collect();
-        assert_eq!(dep_repos, vec!["octo/repo-a", "octo/repo-b"]);
-    }
+        assert_eq!(dep_repos, vec!["octo/repo-a"]);
 
-    #[test]
-    fn dependabot_repos_persist_after_notifications_clear() {
-        let mut conn = mem_conn();
-        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "First")]).unwrap();
-        // A later sync no longer returns that thread → its notification + repo are pruned...
-        store_notifications(&mut conn, &[thread("2", 200, "octo/repo-b", "Second")]).unwrap();
-        let repos: i64 = conn
-            .query_row("SELECT COUNT(*) FROM repos", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(repos, 1, "the notifications repos table is pruned");
-        // ...but the Dependabot repo list keeps both (it accumulates over time).
-        let dep_repos: Vec<String> = crate::dependabot::list_repos(&conn)
-            .unwrap()
-            .into_iter()
-            .map(|r| r.full_name)
-            .collect();
-        assert_eq!(dep_repos, vec!["octo/repo-a", "octo/repo-b"]);
-    }
-
-    #[test]
-    fn dependabot_repos_records_repos_of_done_threads() {
-        let mut conn = mem_conn();
-        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "First")]).unwrap();
-        // Mark it done, then re-sync: GitHub still returns the thread (all=true) but it's
-        // suppressed from the inbox. Its repo must still be recorded for the Dependabot module.
-        mark_done_local(&mut conn, &["1".to_string()]).unwrap();
-        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "First")]).unwrap();
-
-        assert_eq!(
-            count(&conn).unwrap(),
-            0,
-            "the done thread stays out of the inbox"
-        );
+        // A later sync drops both threads → the notifications `repos` table is pruned, but the
+        // Dependabot list keeps repo-a (it accumulates and isn't pruned).
+        store_notifications(&mut conn, &[thread("9", 300, "octo/repo-c", "x")]).unwrap();
         let dep_repos: Vec<String> = crate::dependabot::list_repos(&conn)
             .unwrap()
             .into_iter()

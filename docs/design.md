@@ -407,11 +407,11 @@ module's **sidebar + content** split:
     Issues/Pull-requests read on the relevant repos for subject resolution. The
     **Dependabot** module additionally reads **Pull requests** on those repos.
 - The Dependabot module does **not** use the search API and has no account/repo picker. Its
-  repo list is built lazily "for free" from the notifications Helix already fetches (every repo
-  seen in a notification is remembered in `dependabot_repos`, which — unlike `repos` — is not
-  pruned when notifications clear). Each sync lists those repos' open Dependabot PRs via the
-  core REST API, paced serially. A repo that consistently 404s/403s (renamed/deleted/access
-  revoked) is dropped after a few tries.
+  repo list is built lazily "for free" from your notifications: when a **Dependabot-authored**
+  PR notification is resolved, that repo is remembered in `dependabot_repos` (which — unlike
+  `repos` — is not pruned when notifications clear). Each sync lists those repos' open
+  Dependabot PRs via the core REST API, paced serially. A repo that consistently 404s/403s
+  (renamed/deleted/access revoked) is dropped after a few tries.
 - All GitHub traffic is HTTPS to `api.github.com`.
 
 ## 9. Status & deferred work

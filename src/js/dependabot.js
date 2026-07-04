@@ -17,7 +17,7 @@ import { isShortcutsOpen } from "./shortcuts.js";
  *
  * Data is offline-first: `loadDependabot` reads the cached PRs from SQLite (`list_dependabot`)
  * and GitHub is only contacted on a sync (`sync_dependabot`). Auto-sync on module open is
- * staleness-gated (see `onDependabotOpened`) so repeated opens don't hammer the Search API. */
+ * staleness-gated (see `onDependabotOpened`) so repeated opens don't re-scan every time. */
 
 /** By-repo PR groups from the backend (`{ full_name, total, prs }[]`). */
 let depGroups = [];
@@ -33,8 +33,7 @@ let pendingSync = false;
 let lastSyncAt = 0;
 
 /** Auto-sync-on-open only fires if we've never synced this session or it's been at least
- *  this long since the last sync — keeping the Search API (a small ~30 req/min bucket)
- *  from being hit on every module open. */
+ *  this long since the last sync — so repeated opens don't re-scan the repo list every time. */
 const AUTO_SYNC_STALE_MS = 5 * 60 * 1000;
 
 const REPO_ICON = `<svg viewBox="0 0 16 16" width="15" height="15"><path d="M3 2.5h7.5L13 5v8.5H3z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M5 6h4M5 8.5h6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>`;
@@ -307,9 +306,10 @@ function renderIdleStatus() {
   else setDepStatus("pending", "Not synced yet");
 }
 
-/** Run a Dependabot sync: search GitHub, store, and reload the list. Manages its own status
- *  chrome (independent of the Notifications sync). If a sync is already in flight (e.g. the
- *  account scope just changed), queue exactly one follow-up so the new scope isn't lost. */
+/** Run a Dependabot sync: scan the notification-sourced repo list, store, and reload. Manages
+ *  its own status chrome (independent of the Notifications sync). If a sync is already in
+ *  flight (e.g. auto-sync + a manual click), queue exactly one follow-up. `syncing` stays true
+ *  until the `finally` block so re-entrancy is reliably gated across the whole flow. */
 export async function syncDependabot() {
   if (!isAuthenticated()) {
     setDepProgress("Connect a GitHub token to sync Dependabot.", "error");
@@ -325,7 +325,6 @@ export async function syncDependabot() {
   setDepProgress("Starting…");
   try {
     const result = await invoke("sync_dependabot");
-    syncing = false;
     lastSyncAt = Date.now();
     const removed = result.removed ?? 0;
     const msg = `Found ${result.count} PR${result.count === 1 ? "" : "s"}`;
@@ -340,7 +339,6 @@ export async function syncDependabot() {
     setDepStatus("success", "Synced just now");
     await loadDependabot();
   } catch (err) {
-    syncing = false;
     setDepStatus("error", "Error");
     // GitHub's raw rate-limit 403 body is noisy; show a short, actionable message instead.
     const raw = String(err);
@@ -349,9 +347,11 @@ export async function syncDependabot() {
       : raw;
     setDepProgress(friendly, "error");
   } finally {
+    // Only now clear the in-flight flag — kept true through the UI updates + loadDependabot
+    // above so a quick `r`/re-trigger can't start a concurrent sync.
     syncing = false;
     setDepBusy(false);
-    // A scope change (or another trigger) arrived mid-sync — run it now with the latest scope.
+    // A trigger arrived mid-sync — run it now.
     if (pendingSync) {
       pendingSync = false;
       syncDependabot();

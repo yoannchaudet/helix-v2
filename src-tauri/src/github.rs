@@ -577,7 +577,7 @@ struct PullListItem {
 
 /// Whether `login` is a Dependabot bot author (`dependabot[bot]`, or the legacy
 /// `dependabot-preview[bot]`).
-fn is_dependabot_author(login: &str) -> bool {
+pub fn is_dependabot_author(login: &str) -> bool {
     matches!(login, "dependabot[bot]" | "dependabot-preview[bot]")
 }
 
