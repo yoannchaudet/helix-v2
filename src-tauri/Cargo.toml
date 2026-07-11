@@ -1,6 +1,6 @@
 [package]
 name = "helix"
-version = "0.2.2"
+version = "0.2.3"
 description = "Helix — manage GitHub notifications and automate workflows"
 authors = ["Yoann Chaudet"]
 edition = "2021"
