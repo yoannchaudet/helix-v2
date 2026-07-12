@@ -987,7 +987,14 @@ fn merge_error(
     rates: &mut Vec<RateLimit>,
 ) -> MergeRemoteError {
     let normalized_body = body.to_lowercase();
-    let class = if status == reqwest::StatusCode::UNAUTHORIZED
+    let workflow_run_not_rerunnable = normalized_body.contains("workflow run cannot be retried")
+        || normalized_body.contains("workflow run cannot be rerun")
+        || normalized_body.contains("workflow run cannot be re-run");
+    let class = if status == reqwest::StatusCode::FORBIDDEN && workflow_run_not_rerunnable {
+        // This is specific to one stale/non-rerunnable Actions run, not the PAT. Treating every
+        // non-rate 403 as auth would stop the global processor and starve unrelated repositories.
+        MergeErrorClass::Permanent
+    } else if status == reqwest::StatusCode::UNAUTHORIZED
         || (status == reqwest::StatusCode::FORBIDDEN
             && !normalized_body.contains("rate limit")
             && rate.retry_after.is_none())
@@ -1167,6 +1174,31 @@ async fn merge_pages<T: for<'de> Deserialize<'de>>(
 
 fn direct_merge_attempt_allowed(mergeable_state: Option<&str>) -> bool {
     matches!(mergeable_state, Some("clean" | "unstable"))
+}
+
+#[derive(Debug)]
+pub struct PullHeadResult {
+    pub head_sha: String,
+    pub rates: Vec<RateLimit>,
+}
+
+/// Fetch the live pull-request head before dispatching durable work tied to an older SHA.
+pub async fn fetch_pull_head(
+    client: &reqwest::Client,
+    token: &str,
+    pull_url: &str,
+) -> Result<PullHeadResult, MergeRemoteError> {
+    let mut rates = Vec::new();
+    let pull: MergePull = merge_json(
+        authed_get(client, pull_url, token),
+        "pull request head",
+        &mut rates,
+    )
+    .await?;
+    Ok(PullHeadResult {
+        head_sha: pull.head.sha,
+        rates,
+    })
 }
 
 /// Process one queue head. This uses serial REST calls: normal queue heads are few, and REST
@@ -2834,6 +2866,20 @@ mod tests {
                 "Resource not accessible by personal access token"
             ),
             MergeErrorClass::Auth
+        );
+        assert_eq!(
+            classify(
+                reqwest::StatusCode::FORBIDDEN,
+                "This workflow run cannot be retried"
+            ),
+            MergeErrorClass::Permanent
+        );
+        assert_eq!(
+            classify(
+                reqwest::StatusCode::FORBIDDEN,
+                "This workflow run cannot be rerun"
+            ),
+            MergeErrorClass::Permanent
         );
         assert_eq!(
             classify(reqwest::StatusCode::METHOD_NOT_ALLOWED, "Merge not allowed"),

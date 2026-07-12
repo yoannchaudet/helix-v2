@@ -977,6 +977,11 @@ trait MergeBackend {
         head: &str,
     ) -> Result<github::BranchComparisonResult, github::MergeRemoteError>;
 
+    async fn current_head(
+        &self,
+        pull_url: &str,
+    ) -> Result<github::PullHeadResult, github::MergeRemoteError>;
+
     async fn update_branch(
         &self,
         repo: &str,
@@ -1083,6 +1088,13 @@ impl MergeBackend for RealMergeBackend<'_> {
         head: &str,
     ) -> Result<github::BranchComparisonResult, github::MergeRemoteError> {
         github::compare_pull_request_branch(&self.client, &self.token, repo, base, head).await
+    }
+
+    async fn current_head(
+        &self,
+        pull_url: &str,
+    ) -> Result<github::PullHeadResult, github::MergeRemoteError> {
+        github::fetch_pull_head(&self.client, &self.token, pull_url).await
     }
 
     async fn update_branch(
@@ -1321,7 +1333,8 @@ async fn orchestrate_operation<B: MergeBackend>(
     }
 
     // 2. Dispatch any check retries that were scheduled for this operation and are now due (their
-    //    backoff elapsed because the gate above passed). Each unique failed run is rerun once.
+    //    backoff elapsed because the gate above passed). First verify the live PR head: durable
+    //    retries survive restarts, but must never be replayed after Dependabot moves the branch.
     let pending_retries = with_conn(db, &rates, |conn| {
         dependabot::list_check_retries(conn, op_id)
     })?
@@ -1329,59 +1342,123 @@ async fn orchestrate_operation<B: MergeBackend>(
     .filter(|retry| retry.outcome.is_none())
     .collect::<Vec<_>>();
     if !pending_retries.is_empty() {
-        with_conn(db, &rates, |conn| {
-            dependabot::set_phase(conn, op_id, "retrying_checks", None, None, None)?;
-            dependabot::append_operation_event(
-                conn,
-                op_id,
-                "retrying_checks",
-                "retry",
-                "start",
-                "Re-running the GitHub Actions jobs that previously failed.",
-                None,
-                None,
-                None,
-            )
-        })?;
-        for retry in &pending_retries {
-            let result = net!(rates, backend.rerun(&repo, retry.workflow_run_id));
-            let outcome = match result.outcome {
-                github::MutationOutcome::Applied => "requested",
-                github::MutationOutcome::Cancelled => "cancelled",
-            };
-            let head = retry.head_sha.clone();
-            let run_id = retry.workflow_run_id;
+        let live_head = net!(rates, backend.current_head(&work.operation.pull_url)).head_sha;
+        let mut runnable_retries = Vec::new();
+        for retry in pending_retries {
+            if retry.head_sha == live_head {
+                runnable_retries.push(retry);
+                continue;
+            }
             let retry_id = retry.id;
+            let old_head = retry.head_sha.clone();
+            let run_id = retry.workflow_run_id;
             with_conn(db, &rates, |conn| {
-                dependabot::mark_check_retry(conn, retry_id, outcome)?;
+                dependabot::skip_check_retry(conn, retry_id, "stale_head")?;
                 dependabot::append_operation_event(
                     conn,
                     op_id,
                     "retrying_checks",
                     "retry",
-                    outcome,
-                    &format!("Requested a re-run of workflow run {run_id}."),
-                    None,
-                    Some(&head),
+                    "stale",
+                    &format!("Skipped workflow run {run_id}: its retry targeted an older PR head."),
+                    Some(&format!(
+                        "Retry head: {old_head}; current head: {live_head}."
+                    )),
+                    Some(&old_head),
                     Some(&run_id.to_string()),
                 )
             })?;
         }
-        // Reruns dispatched: clear the backoff and wait for the fresh checks to report.
-        let head = work.operation.observed_head_sha.clone().unwrap_or_default();
-        with_conn(db, &rates, |conn| {
-            dependabot::set_phase(conn, op_id, "waiting_checks", None, None, None)?;
-            dependabot::schedule_next_action(conn, op_id, None)
-        })?;
-        return Ok(github::MergeRemoteResult {
-            outcome: Outcome::Pending {
-                head_sha: head,
-                approved: true,
-                branch_update_requested: false,
-                reason: Some("Re-running failed checks; waiting for the results.".to_string()),
-            },
-            rates,
-        });
+        if runnable_retries.is_empty() {
+            with_conn(db, &rates, |conn| {
+                dependabot::schedule_next_action(conn, op_id, None)
+            })?;
+        } else {
+            with_conn(db, &rates, |conn| {
+                dependabot::set_phase(conn, op_id, "retrying_checks", None, None, None)?;
+                dependabot::append_operation_event(
+                    conn,
+                    op_id,
+                    "retrying_checks",
+                    "retry",
+                    "start",
+                    "Re-running the GitHub Actions jobs that previously failed.",
+                    None,
+                    None,
+                    None,
+                )
+            })?;
+            for retry in &runnable_retries {
+                let result = match backend.rerun(&repo, retry.workflow_run_id).await {
+                    Ok(result) => {
+                        rates.extend(result.rates.iter().cloned());
+                        result
+                    }
+                    Err(mut error) => {
+                        let mut all_rates = std::mem::take(&mut rates);
+                        all_rates.append(&mut error.rates);
+                        if error.class == github::MergeErrorClass::Permanent {
+                            let retry_id = retry.id;
+                            let head = retry.head_sha.clone();
+                            let run_id = retry.workflow_run_id;
+                            let detail = error.message.clone();
+                            with_conn(db, &all_rates, |conn| {
+                                dependabot::mark_check_retry(conn, retry_id, "not_rerunnable")?;
+                                dependabot::append_operation_event(
+                                    conn,
+                                    op_id,
+                                    "retrying_checks",
+                                    "retry",
+                                    "failed",
+                                    &format!("Workflow run {run_id} could not be re-run."),
+                                    Some(&detail),
+                                    Some(&head),
+                                    Some(&run_id.to_string()),
+                                )
+                            })?;
+                        }
+                        error.rates = all_rates;
+                        return Err(error);
+                    }
+                };
+                let outcome = match result.outcome {
+                    github::MutationOutcome::Applied => "requested",
+                    github::MutationOutcome::Cancelled => "cancelled",
+                };
+                let head = retry.head_sha.clone();
+                let run_id = retry.workflow_run_id;
+                let retry_id = retry.id;
+                with_conn(db, &rates, |conn| {
+                    dependabot::mark_check_retry(conn, retry_id, outcome)?;
+                    dependabot::append_operation_event(
+                        conn,
+                        op_id,
+                        "retrying_checks",
+                        "retry",
+                        outcome,
+                        &format!("Requested a re-run of workflow run {run_id}."),
+                        None,
+                        Some(&head),
+                        Some(&run_id.to_string()),
+                    )
+                })?;
+            }
+            // Reruns dispatched: clear the backoff and wait for the fresh checks to report.
+            let head = work.operation.observed_head_sha.clone().unwrap_or_default();
+            with_conn(db, &rates, |conn| {
+                dependabot::set_phase(conn, op_id, "waiting_checks", None, None, None)?;
+                dependabot::schedule_next_action(conn, op_id, None)
+            })?;
+            return Ok(github::MergeRemoteResult {
+                outcome: Outcome::Pending {
+                    head_sha: head,
+                    approved: true,
+                    branch_update_requested: false,
+                    reason: Some("Re-running failed checks; waiting for the results.".to_string()),
+                },
+                rates,
+            });
+        }
     }
 
     // 3. Resolve the strategy hint from the cache (only possible once the base ref is known).
@@ -2990,7 +3067,7 @@ mod tests {
         ActionsRunFailure, BranchComparisonResult, ExactHeadCheckDiagnosis, ExternalCheckFailure,
         MergeQueueEntryStatus, MergeQueuePolicy, MergeQueueStrategy, MergeRemoteError,
         MergeRemoteOutcome, MergeRemoteResult, MutationOutcome, MutationResult, PrQueueStatus,
-        PrQueueStatusResult,
+        PrQueueStatusResult, PullHeadResult,
     };
     use std::collections::VecDeque;
 
@@ -3010,6 +3087,7 @@ mod tests {
         policy: VecDeque<NetResult<MergeQueuePolicy>>,
         diagnose: VecDeque<NetResult<ExactHeadCheckDiagnosis>>,
         compare: VecDeque<NetResult<BranchComparisonResult>>,
+        current_head: VecDeque<NetResult<PullHeadResult>>,
         update_branch: VecDeque<NetResult<MutationResult>>,
         rerun: VecDeque<NetResult<MutationResult>>,
         queue: VecDeque<NetResult<PrQueueStatusResult>>,
@@ -3025,6 +3103,7 @@ mod tests {
         policy: usize,
         diagnose: usize,
         compare: usize,
+        current_head: usize,
         update_branch: usize,
         rerun: usize,
         rerun_ids: Vec<i64>,
@@ -3091,6 +3170,14 @@ mod tests {
         ) -> NetResult<BranchComparisonResult> {
             self.calls.lock().unwrap().compare += 1;
             Self::pop(&mut self.script.lock().unwrap().compare, "compare_branch")
+        }
+
+        async fn current_head(&self, _pull_url: &str) -> NetResult<PullHeadResult> {
+            self.calls.lock().unwrap().current_head += 1;
+            Self::pop(
+                &mut self.script.lock().unwrap().current_head,
+                "current_head",
+            )
         }
 
         async fn update_branch(
@@ -3178,6 +3265,13 @@ mod tests {
                 head_sha: head.to_string(),
                 base_ref: base.to_string(),
             },
+            rates: rates_core(),
+        }
+    }
+
+    fn pull_head(head: &str) -> PullHeadResult {
+        PullHeadResult {
+            head_sha: head.to_string(),
             rates: rates_core(),
         }
     }
@@ -3509,6 +3603,7 @@ mod tests {
                 rates: rates_core(),
                 ..Default::default()
             })]),
+            current_head: VecDeque::from([Ok(pull_head("sha1"))]),
             rerun: VecDeque::from([Ok(applied()), Ok(applied())]),
             ..Default::default()
         });
@@ -3554,6 +3649,7 @@ mod tests {
         // Every diagnose pass reports a fresh failed attempt of the same run.
         let mut process = VecDeque::new();
         let mut diagnose = VecDeque::new();
+        let mut current_head = VecDeque::new();
         let mut rerun = VecDeque::new();
         for attempt in 1..=3 {
             process.push_back(Ok(pending("sha1", false)));
@@ -3567,11 +3663,13 @@ mod tests {
                 rates: rates_core(),
                 ..Default::default()
             }));
+            current_head.push_back(Ok(pull_head("sha1")));
             rerun.push_back(Ok(applied()));
         }
         let fake = FakeBackend::new(Script {
             process,
             diagnose,
+            current_head,
             rerun,
             ..Default::default()
         });
@@ -3589,6 +3687,99 @@ mod tests {
         }
         assert_eq!(fake.calls().rerun, 3);
         assert_eq!(op(&db, id).check_retry_count, 3);
+    }
+
+    #[test]
+    fn stale_persisted_retry_is_skipped_before_processing_the_new_head() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "direct").unwrap();
+            dependabot::set_phase(
+                &conn,
+                id,
+                "retry_scheduled",
+                Some("direct"),
+                None,
+                Some("main"),
+            )
+            .unwrap();
+            dependabot::mark_merge_progress(&conn, id, "old-head", true, false, None).unwrap();
+            dependabot::schedule_check_retry(&conn, id, "old-head", 100, 1).unwrap();
+            dependabot::schedule_next_action(&conn, id, None).unwrap();
+        }
+        let fake = FakeBackend::new(Script {
+            current_head: VecDeque::from([Ok(pull_head("new-head"))]),
+            process: VecDeque::from([Ok(MergeRemoteResult {
+                outcome: MergeRemoteOutcome::Merged {
+                    head_sha: Some("new-head".to_string()),
+                },
+                rates: rates_core(),
+            })]),
+            ..Default::default()
+        });
+
+        tick(&db, &fake);
+
+        assert_eq!(op(&db, id).state, "merged");
+        assert_eq!(fake.calls().current_head, 1);
+        assert_eq!(fake.calls().rerun, 0);
+        let retry = dependabot::list_check_retries(&db.0.lock().unwrap(), id)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(retry.outcome.as_deref(), Some("stale_head"));
+        assert!(retry.requested_at.is_none());
+        assert!(statuses(&db, id).contains(&"stale".to_string()));
+    }
+
+    #[test]
+    fn non_rerunnable_workflow_failure_does_not_starve_later_repositories() {
+        let db = db_with_token();
+        store(
+            &db,
+            &[
+                pr(1, "octo/repo-a", 10, "Broken retry"),
+                pr(2, "octo/repo-b", 20, "Should progress"),
+            ],
+        );
+        let blocked_id = enqueue_op(&db, 1);
+        let later_id = enqueue_op(&db, 2);
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::mark_merge_progress(&conn, blocked_id, "sha-a", true, false, None).unwrap();
+            dependabot::schedule_check_retry(&conn, blocked_id, "sha-a", 100, 1).unwrap();
+            dependabot::schedule_next_action(&conn, blocked_id, None).unwrap();
+        }
+        let fake = FakeBackend::new(Script {
+            current_head: VecDeque::from([Ok(pull_head("sha-a"))]),
+            rerun: VecDeque::from([Err(permanent_err(
+                "GitHub returned 403 Forbidden: workflow run cannot be retried",
+            ))]),
+            process: VecDeque::from([Ok(MergeRemoteResult {
+                outcome: MergeRemoteOutcome::Merged {
+                    head_sha: Some("sha-b".to_string()),
+                },
+                rates: rates_core(),
+            })]),
+            ..Default::default()
+        });
+
+        let result = tick(&db, &fake);
+
+        assert_eq!(result.processed, 2);
+        assert_eq!(op(&db, blocked_id).state, "failed");
+        assert_eq!(op(&db, later_id).state, "merged");
+        let retry = dependabot::list_check_retries(&db.0.lock().unwrap(), blocked_id)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(retry.outcome.as_deref(), Some("not_rerunnable"));
+        assert!(retry.requested_at.is_some());
+        assert!(statuses(&db, blocked_id).contains(&"failed".to_string()));
+        assert_eq!(fake.calls().process, 1);
     }
 
     #[test]

@@ -449,6 +449,9 @@ module's **sidebar + content** split:
 - Failed GitHub Actions jobs are rerun after a five-minute backoff, once per workflow run attempt,
   with no numeric retry cap. New failed attempts continue until success or the operation's
   90-minute deadline; pending checks keep waiting, while failed external CI needs human attention.
+  Before dispatching a durable retry, Helix verifies that its recorded head SHA still matches the
+  live PR head and retires stale retries without calling GitHub. A run that GitHub says cannot be
+  rerun fails only its operation; unrelated repositories continue processing in the same tick.
   When the deadline passes on a queue operation, Helix disables native auto-merge and dequeues the
   PR (under the mutation guard) before terminalizing it as timed out; if that cleanup fails it stays
   active and retries rather than releasing the repo's FIFO head. A merge GitHub already completed

@@ -1111,6 +1111,15 @@ pub fn mark_check_retry(conn: &Connection, id: i64, outcome: &str) -> rusqlite::
     Ok(())
 }
 
+/// Retire a scheduled retry without dispatching it (for example because the PR head changed).
+pub fn skip_check_retry(conn: &Connection, id: i64, outcome: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE dependabot_merge_check_retries SET outcome = ?2 WHERE id = ?1",
+        params![id, outcome],
+    )?;
+    Ok(())
+}
+
 /// The merge strategy resolved for a repo + base branch (branch protection is base-ref scoped).
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct MergePolicy {
@@ -1925,6 +1934,15 @@ mod tests {
             .unwrap();
         assert_eq!(marked.outcome.as_deref(), Some("requested"));
         assert!(marked.requested_at.is_some());
+
+        skip_check_retry(&conn, second.id, "stale_head").unwrap();
+        let skipped = list_check_retries(&conn, operation.id)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == second.id)
+            .unwrap();
+        assert_eq!(skipped.outcome.as_deref(), Some("stale_head"));
+        assert!(skipped.requested_at.is_none());
 
         // Marking again with a different outcome updates the outcome but not requested_at.
         mark_check_retry(&conn, first.id, "succeeded").unwrap();
