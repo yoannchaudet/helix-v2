@@ -405,6 +405,8 @@ pub fn table_names(conn: &Connection) -> rusqlite::Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
     fn table_columns(conn: &Connection, table: &str) -> Vec<String> {
@@ -431,6 +433,19 @@ mod tests {
             .unwrap();
         indexes.sort();
         indexes
+    }
+
+    fn table_index_sql(conn: &Connection, table: &str) -> BTreeMap<String, String> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT name, COALESCE(sql, '') FROM sqlite_master
+                 WHERE type = 'index' AND tbl_name = ?1",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([table], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .unwrap();
+        rows.collect::<Result<_, _>>().unwrap()
     }
 
     #[test]
@@ -722,12 +737,18 @@ mod tests {
 
     #[test]
     fn upgrade_from_populated_v16_drops_dead_merge_operation_columns_with_schema_parity() {
+        let required_indexes = [
+            "idx_dependabot_merge_active_pr",
+            "idx_dependabot_merge_repo_fifo",
+            "idx_dependabot_merge_terminal",
+        ];
         let upgraded = Connection::open_in_memory().unwrap();
         upgraded.pragma_update(None, "foreign_keys", "ON").unwrap();
         for migration in &MIGRATIONS[..16] {
             upgraded.execute_batch(migration).unwrap();
         }
         upgraded.pragma_update(None, "user_version", 16).unwrap();
+        let before_index_sql = table_index_sql(&upgraded, "dependabot_merge_operations");
 
         upgraded
             .execute(
@@ -768,12 +789,14 @@ mod tests {
             == 1);
 
         let upgraded_indexes = table_indexes(&upgraded, "dependabot_merge_operations");
-        for required in [
-            "idx_dependabot_merge_active_pr",
-            "idx_dependabot_merge_repo_fifo",
-            "idx_dependabot_merge_terminal",
-        ] {
+        let after_index_sql = table_index_sql(&upgraded, "dependabot_merge_operations");
+        for required in required_indexes {
             assert!(upgraded_indexes.contains(&required.to_string()));
+            assert_eq!(
+                before_index_sql.get(required),
+                after_index_sql.get(required),
+                "index SQL changed for {required}"
+            );
         }
 
         let fresh = Connection::open_in_memory().unwrap();
@@ -788,5 +811,13 @@ mod tests {
             upgraded_indexes,
             table_indexes(&fresh, "dependabot_merge_operations")
         );
+        let fresh_index_sql = table_index_sql(&fresh, "dependabot_merge_operations");
+        for required in required_indexes {
+            assert_eq!(
+                after_index_sql.get(required),
+                fresh_index_sql.get(required),
+                "upgraded and fresh index SQL differ for {required}"
+            );
+        }
     }
 }
