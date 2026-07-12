@@ -11,10 +11,10 @@ test("a manual sync stays busy through resolution, then re-enables the controls"
   await openApp(page, { ...defaultFixtures(), manualResolution: true });
 
   await page.locator("#sync-btn").click();
-  // The list sync returns, but the sync button stays disabled and the pill stays "Syncing…"
-  // while the subject-resolution pass runs.
+  // The list sync returns, but the sync button stays disabled and identifies the remaining
+  // detail-resolution phase.
   await expect(page.locator("#sync-btn")).toBeDisabled();
-  await expect(page.locator(".js-sync-label").first()).toHaveText("Syncing…");
+  await expect(page.locator(".js-sync-label").first()).toHaveText("Resolving details…");
 
   // Completing the pass ends the sync: controls re-enable and the pill settles on success.
   // Regression guard: the status must not get stuck in the resolving phase.
