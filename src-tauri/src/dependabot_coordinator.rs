@@ -2239,6 +2239,7 @@ mod tests {
             title: title.to_string(),
             html_url: format!("https://github.com/{repo}/pull/{number}"),
             author: "dependabot[bot]".to_string(),
+            base_ref: "main".to_string(),
             repo_full_name: repo.to_string(),
             repo_owner: owner.to_string(),
             repo_name: name.to_string(),

@@ -24,6 +24,7 @@ const basePr = {
   title: "Bump lodash",
   html_url: "https://github.com/octo/hello/pull/40",
   author: "dependabot[bot]",
+  base_ref: "main",
   updated_at: "2026-01-01T00:00:00Z",
   mergeable_state: "clean",
 };
@@ -44,6 +45,12 @@ test("prRow shows the merge-readiness pill for the mergeable_state", () => {
   // unknown/null → no pill (GitHub computes it lazily).
   assert.ok(!prRow({ ...basePr, mergeable_state: null }).includes("n-state"));
   assert.ok(!prRow({ ...basePr, mergeable_state: "unknown" }).includes("n-state"));
+});
+
+test("prRow shows and escapes the target branch, but tolerates legacy rows", () => {
+  assert.ok(prRow(basePr).includes("Target: main"));
+  assert.ok(prRow({ ...basePr, base_ref: "<release&next>" }).includes("&lt;release&amp;next&gt;"));
+  assert.ok(!prRow({ ...basePr, base_ref: null }).includes("Target:"));
 });
 
 test("prRow marks a bot author and drops the [bot] suffix", () => {
@@ -89,6 +96,7 @@ const baseOperation = {
   number: 40,
   title: "Bump lodash",
   html_url: "https://github.com/octo/hello/pull/40",
+  base_ref: "main",
   state: "queued",
   queue_position: 2,
   enqueued_at: "2026-01-01T00:00:00Z",
@@ -100,6 +108,16 @@ test("operationRow renders queue state, position, and cancellation", () => {
   assert.ok(row.includes("queue 2"));
   assert.ok(row.includes("dep-operation-cancel"));
   assert.ok(row.includes('data-operation-id="7"'));
+  assert.ok(row.includes("Target: main"));
+});
+
+test("operationRow escapes the target branch and tolerates legacy operations", () => {
+  assert.ok(
+    operationRow({ ...baseOperation, base_ref: "<release&next>" }).includes(
+      "&lt;release&amp;next&gt;",
+    ),
+  );
+  assert.ok(!operationRow({ ...baseOperation, base_ref: null }).includes("Target:"));
 });
 
 test("terminal operations render errors without a cancellation action", () => {

@@ -326,6 +326,11 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (repo_full_name, base_ref)
     );
     "#,
+    // v15 — persist the target branch returned by the Dependabot PR listing. Existing cached
+    // rows remain null until the next sync; new operations snapshot this value at enqueue.
+    r#"
+    ALTER TABLE dependabot_prs ADD COLUMN base_ref TEXT;
+    "#,
 ];
 
 /// Open the database at `db_path`, apply any pending migrations, and return the
@@ -595,5 +600,39 @@ mod tests {
         );
 
         std::fs::remove_file(&db_path).ok();
+    }
+
+    #[test]
+    fn upgrade_from_populated_v14_preserves_pr_with_unknown_target_branch() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        for migration in &MIGRATIONS[..14] {
+            conn.execute_batch(migration).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 14).unwrap();
+        conn.execute(
+            "INSERT INTO dependabot_prs
+                (id, repo_full_name, repo_owner, repo_name, number, title, html_url, author,
+                 pull_url, created_at, updated_at, fetched_at)
+             VALUES (1, 'octo/repo', 'octo', 'repo', 10, 'Bump x',
+                     'https://github.com/octo/repo/pull/10', 'dependabot[bot]',
+                     'https://api.github.com/repos/octo/repo/pulls/10',
+                     '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z',
+                     '2026-01-02T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        run_migrations(&conn).unwrap();
+
+        let (title, base_ref): (String, Option<String>) = conn
+            .query_row(
+                "SELECT title, base_ref FROM dependabot_prs WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(title, "Bump x");
+        assert_eq!(base_ref, None);
     }
 }

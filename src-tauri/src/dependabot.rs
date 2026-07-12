@@ -57,8 +57,8 @@ pub fn store_prs(
         tx.execute(
             "INSERT INTO dependabot_prs
                (id, repo_full_name, repo_owner, repo_name, number, title, html_url, author,
-                pull_url, created_at, updated_at, fetched_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                pull_url, base_ref, created_at, updated_at, fetched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
                      strftime('%Y-%m-%dT%H:%M:%SZ','now'))
              ON CONFLICT(id) DO UPDATE SET
                repo_full_name = excluded.repo_full_name,
@@ -69,6 +69,7 @@ pub fn store_prs(
                html_url       = excluded.html_url,
                author         = excluded.author,
                pull_url       = excluded.pull_url,
+               base_ref       = excluded.base_ref,
                created_at     = excluded.created_at,
                updated_at     = excluded.updated_at,
                fetched_at     = excluded.fetched_at",
@@ -82,6 +83,7 @@ pub fn store_prs(
                 pr.html_url,
                 pr.author,
                 pr.pull_url,
+                pr.base_ref,
                 pr.created_at,
                 pr.updated_at,
             ],
@@ -117,6 +119,7 @@ pub struct DependabotPrView {
     pub title: String,
     pub html_url: String,
     pub author: String,
+    pub base_ref: Option<String>,
     pub updated_at: String,
     /// GitHub's rolled-up `mergeable_state` (clean/blocked/dirty/…), driving the
     /// merge-readiness pill. Null until first resolved (the PR list endpoint omits it).
@@ -146,8 +149,8 @@ pub struct DependabotRepoGroup {
 /// Repos are ordered by full name; within a repo, most recently updated first.
 pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<DependabotRepoGroup>> {
     let mut stmt = conn.prepare(
-        "SELECT p.repo_full_name, p.id, p.number, p.title, p.html_url, p.author, p.updated_at,
-                p.mergeable_state, o.id, o.state
+        "SELECT p.repo_full_name, p.id, p.number, p.title, p.html_url, p.author, p.base_ref,
+                p.updated_at, p.mergeable_state, o.id, o.state
          FROM dependabot_prs p
          LEFT JOIN dependabot_merge_operations o ON o.pr_id = p.id
              AND o.state IN ('queued', 'validating', 'delegated', 'cancel_requested')
@@ -163,11 +166,12 @@ pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<DependabotRepoGro
                 title: r.get(3)?,
                 html_url: r.get(4)?,
                 author: r.get(5)?,
-                updated_at: r.get(6)?,
-                mergeable_state: r.get(7)?,
+                base_ref: r.get(6)?,
+                updated_at: r.get(7)?,
+                mergeable_state: r.get(8)?,
                 active_merge_operation: match (
-                    r.get::<_, Option<i64>>(8)?,
-                    r.get::<_, Option<String>>(9)?,
+                    r.get::<_, Option<i64>>(9)?,
+                    r.get::<_, Option<String>>(10)?,
                 ) {
                     (Some(id), Some(state)) => Some(ActiveMergeOperationSummary {
                         id,
@@ -240,7 +244,8 @@ pub struct DependabotMergeOperation {
     /// The PR's GraphQL node id, needed for GraphQL mutations (e.g. enabling native
     /// auto-merge). `None` until the processor first resolves it.
     pub pull_node_id: Option<String>,
-    /// The PR's base branch. Branch-protection / merge-policy lookups are base-ref scoped.
+    /// The PR's base branch, snapshotted at enqueue and reconciled from the live PR during
+    /// processing. Branch-protection / merge-policy lookups are base-ref scoped.
     pub base_ref: Option<String>,
     /// When the processor should next revisit this operation (a scheduled retry/backoff).
     /// `None` means there is nothing pacing it away — see `is_next_action_due`.
@@ -330,24 +335,35 @@ pub fn enqueue_merge_operation(
     conn: &Connection,
     pr_id: i64,
 ) -> rusqlite::Result<DependabotMergeOperation> {
-    let cached: Option<(String, i64, String, String, String, String)> = conn
+    struct CachedPr {
+        repo: String,
+        number: i64,
+        title: String,
+        html_url: String,
+        pull_url: String,
+        author: String,
+        base_ref: Option<String>,
+    }
+
+    let cached: Option<CachedPr> = conn
         .query_row(
-            "SELECT repo_full_name, number, title, html_url, pull_url, author
+            "SELECT repo_full_name, number, title, html_url, pull_url, author, base_ref
              FROM dependabot_prs WHERE id = ?1",
             [pr_id],
             |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                ))
+                Ok(CachedPr {
+                    repo: r.get(0)?,
+                    number: r.get(1)?,
+                    title: r.get(2)?,
+                    html_url: r.get(3)?,
+                    pull_url: r.get(4)?,
+                    author: r.get(5)?,
+                    base_ref: r.get(6)?,
+                })
             },
         )
         .optional()?;
-    let Some((repo, number, title, html_url, pull_url, author)) = cached else {
+    let Some(cached) = cached else {
         return Err(rusqlite::Error::QueryReturnedNoRows);
     };
     if let Some(existing) = get_active_operation_for_pr(conn, pr_id)? {
@@ -358,9 +374,20 @@ pub fn enqueue_merge_operation(
     let tx = conn.unchecked_transaction()?;
     let inserted = tx.execute(
         "INSERT INTO dependabot_merge_operations
-             (pr_id, repo_full_name, number, title, html_url, pull_url, author, state, enqueued_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
-        params![pr_id, repo, number, title, html_url, pull_url, author],
+             (pr_id, repo_full_name, number, title, html_url, pull_url, author, base_ref, state,
+              enqueued_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'queued',
+                 strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
+        params![
+            pr_id,
+            cached.repo,
+            cached.number,
+            cached.title,
+            cached.html_url,
+            cached.pull_url,
+            cached.author,
+            cached.base_ref
+        ],
     );
     if let Err(error) = inserted {
         drop(tx);
@@ -1312,6 +1339,7 @@ mod tests {
             title: title.to_string(),
             html_url: format!("https://github.com/{repo}/pull/{number}"),
             author: "dependabot[bot]".to_string(),
+            base_ref: "main".to_string(),
             repo_full_name: repo.to_string(),
             repo_owner: owner.to_string(),
             repo_name: name.to_string(),
@@ -1346,6 +1374,7 @@ mod tests {
         assert_eq!(groups[1].total, 1);
         // No merge state resolved yet.
         assert_eq!(groups[0].prs[0].mergeable_state, None);
+        assert_eq!(groups[0].prs[0].base_ref.as_deref(), Some("main"));
     }
 
     #[test]
@@ -1490,11 +1519,13 @@ mod tests {
         store_prs(&mut conn, &[pr(1, "octo/repo-a", 10, "Old title")], true).unwrap();
         let mut updated = pr(1, "octo/repo-a", 10, "New title");
         updated.updated_at = "2026-02-01T00:00:00Z".to_string();
+        updated.base_ref = "release".to_string();
         store_prs(&mut conn, &[updated], true).unwrap();
 
         assert_eq!(count(&conn).unwrap(), 1);
         let groups = list_by_repo(&conn).unwrap();
         assert_eq!(groups[0].prs[0].title, "New title");
+        assert_eq!(groups[0].prs[0].base_ref.as_deref(), Some("release"));
     }
 
     #[test]
@@ -1594,22 +1625,19 @@ mod tests {
     #[test]
     fn merge_operations_are_idempotent_fifo_and_surface_on_prs() {
         let mut conn = mem_conn();
-        store_prs(
-            &mut conn,
-            &[
-                pr(1, "octo/repo-a", 10, "First"),
-                pr(2, "octo/repo-a", 11, "Second"),
-                pr(3, "octo/repo-b", 12, "Independent"),
-            ],
-            true,
-        )
-        .unwrap();
+        let first_pr = pr(1, "octo/repo-a", 10, "First");
+        let mut second_pr = pr(2, "octo/repo-a", 11, "Second");
+        second_pr.base_ref = "release".to_string();
+        let other_pr = pr(3, "octo/repo-b", 12, "Independent");
+        store_prs(&mut conn, &[first_pr, second_pr, other_pr], true).unwrap();
 
         let first = enqueue_merge_operation(&conn, 1).unwrap();
         let first_again = enqueue_merge_operation(&conn, 1).unwrap();
         let second = enqueue_merge_operation(&conn, 2).unwrap();
         let other_repo = enqueue_merge_operation(&conn, 3).unwrap();
         assert_eq!(first.id, first_again.id, "active enqueue is idempotent");
+        assert_eq!(first.base_ref.as_deref(), Some("main"));
+        assert_eq!(second.base_ref.as_deref(), Some("release"));
 
         let heads = merge_operation_heads(&conn).unwrap();
         assert_eq!(heads.len(), 2, "one FIFO head per repository");
@@ -1724,7 +1752,7 @@ mod tests {
         assert!(!operation.auto_merge_enabled);
         assert_eq!(operation.merge_queue_position, None);
         assert_eq!(operation.pull_node_id, None);
-        assert_eq!(operation.base_ref, None);
+        assert_eq!(operation.base_ref.as_deref(), Some("main"));
         assert_eq!(operation.next_action_at, None);
 
         let events = list_operation_events(&conn, operation.id).unwrap();

@@ -54,6 +54,7 @@ export function prRow(pr) {
   const merge = mergeStateBadge(pr.mergeable_state, "PullRequest", "open");
   const stateLine = merge ? html`<div class="n-state">${rawHtml(merge)}</div>` : "";
   const author = pr.author ? authorTag(pr.author) : "";
+  const target = pr.base_ref ? `Target: ${pr.base_ref} · ` : "";
   const operation = pr.active_merge_operation;
   const action = operation
     ? iconButton({
@@ -77,7 +78,7 @@ export function prRow(pr) {
         <div class="n-main">
           <div class="n-title">${rawHtml(number)}${pr.title}</div>
           ${rawHtml(stateLine)}
-          <div class="n-meta">${relTime(pr.updated_at)}</div>
+          <div class="n-meta">${target}${relTime(pr.updated_at)}</div>
         </div>
         ${rawHtml(author)}
       </div>
@@ -230,6 +231,7 @@ export function operationRow(operation, options = {}) {
       ? ` · queue ${operation.queue_position}`
       : "";
   const time = operation.terminal_at || operation.delegated_at || operation.enqueued_at;
+  const target = operation.base_ref ? ` · Target: ${operation.base_ref}` : "";
   const cancel = isActiveMergeOperation(operation)
     ? iconButton({
         icon: CANCEL_ICON,
@@ -245,7 +247,7 @@ export function operationRow(operation, options = {}) {
         <span class="n-badge-slot">${rawHtml(operationBadge(operation))}</span>
         <div class="n-main">
           <div class="n-title"><span class="n-number">#${operation.number}</span> ${operation.title}</div>
-          <div class="n-meta">${operation.repo_full_name}${queue} · ${relTime(time)}</div>
+          <div class="n-meta">${operation.repo_full_name}${target}${queue} · ${relTime(time)}</div>
           ${rawHtml(errorDetail)}
         </div>
       </div>
