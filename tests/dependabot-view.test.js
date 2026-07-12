@@ -251,6 +251,12 @@ test("operationActionLog renders an empty state for no events", () => {
   assert.ok(operationActionLog([]).includes("No actions recorded yet"));
 });
 
+test("operationActionLog omits datetime when an event has no timestamp", () => {
+  const log = operationActionLog([{ message: "Queued" }]);
+  assert.ok(log.includes('<time class="op-log-time">—</time>'));
+  assert.ok(!log.includes('datetime=""'));
+});
+
 test("operationDetailPanel renders retry metadata alongside queue metadata when both apply", () => {
   const panel = operationDetailPanel({
     operation: {

@@ -154,15 +154,18 @@ export function operationActionLog(actionLog) {
     return html`<p class="op-log-empty">No actions recorded yet.</p>`;
   }
   const items = actionLog
-    .map(
-      (event) => html`<li class="op-log-item">
-        <time class="op-log-time" datetime="${event.timestamp || ""}"
-          >${relTime(event.timestamp) || "—"}</time
-        >
+    .map((event) => {
+      const timestamp = event.timestamp
+        ? html`<time class="op-log-time" datetime="${event.timestamp}">${relTime(
+            event.timestamp,
+          )}</time>`
+        : html`<time class="op-log-time">—</time>`;
+      return html`<li class="op-log-item">
+        ${rawHtml(timestamp)}
         <span class="op-log-message">${event.message}</span>
         ${event.detail ? html`<span class="op-log-detail">${event.detail}</span>` : ""}
-      </li>`,
-    )
+      </li>`;
+    })
     .join("");
   return html`<ol class="op-log">${rawHtml(items)}</ol>`;
 }
