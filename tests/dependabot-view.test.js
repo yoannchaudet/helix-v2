@@ -284,13 +284,57 @@ test("operationFlow renders read-only steps with aria-current on the active step
   });
   const flow = operationFlow(graph);
   assert.ok(flow.includes("<ol"));
-  assert.ok(flow.includes('op-step--current" aria-current="step"'));
+  assert.ok(/op-step--current"[^>]*aria-current="step"/.test(flow));
   assert.ok(flow.includes('data-node-id="waiting_checks"'));
   assert.ok(!flow.includes("<button"));
   assert.ok(!flow.includes("aria-pressed"));
   assert.ok(!flow.includes("tabindex"));
   // Only one step is current.
   assert.ok(!flow.match(/data-node-id="queued"[^>]*aria-current/));
+});
+
+test("operationFlow exposes completed/current/upcoming/skipped/failed state in step labels", () => {
+  const flow = operationFlow({
+    strategy: STRATEGIES.DIRECT,
+    nodes: [
+      {
+        id: "queued",
+        label: "Queued",
+        state: "done",
+        detail: "Queue position 2",
+        group: "prep",
+      },
+      { id: "validating", label: "Validating", state: "current", detail: "", group: "prep" },
+      {
+        id: "waiting_checks",
+        label: "Waiting on checks",
+        state: "upcoming",
+        detail: "",
+        group: "prep",
+      },
+      {
+        id: "retrying_checks",
+        label: "Retrying checks",
+        state: "skipped",
+        detail: "Retry 1",
+        group: "retry",
+      },
+      {
+        id: "terminal",
+        label: "Failed",
+        state: "failed",
+        detail: "Merge conflict",
+        group: "terminal",
+      },
+    ],
+  });
+  assert.ok(flow.includes('aria-label="Queued, completed. Queue position 2"'));
+  assert.ok(flow.includes('aria-label="Validating, current"'));
+  assert.ok(flow.includes('aria-label="Waiting on checks, upcoming"'));
+  assert.ok(flow.includes('aria-label="Retrying checks, skipped. Retry 1"'));
+  assert.ok(flow.includes('aria-label="Failed, failed. Merge conflict"'));
+  assert.ok(flow.includes("Queue position 2"));
+  assert.ok(flow.includes("Merge conflict"));
 });
 
 test("operationFlow marks a branch marker naming the strategy, and only that branch's steps", () => {
@@ -403,6 +447,7 @@ test("operationDetailPanel renders retry metadata alongside queue metadata when 
   assert.ok(panel.includes("Retry 1 of 3"));
   assert.ok(panel.includes("Queue position 5"));
   assert.ok(panel.includes("GitHub queue position 2"));
+  assert.ok(panel.includes('<h4 class="op-log-heading">Activity</h4>'));
 });
 
 test("operationDetailPanel renders a loading placeholder for a null detail (not yet fetched)", () => {
@@ -420,6 +465,6 @@ test("operationsList accepts an optional rendering-options object without requir
   });
   assert.ok(expanded.includes("op-panel-row"));
   assert.ok(expanded.includes("op-flow"));
-  assert.ok(expanded.includes('op-step--current" aria-current="step"'));
+  assert.ok(/op-step--current"[^>]*aria-current="step"/.test(expanded));
   assert.ok(expanded.includes('data-node-id="waiting_merge_queue"'));
 });

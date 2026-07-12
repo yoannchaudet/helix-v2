@@ -1160,6 +1160,11 @@ code,
   font-size: 0.74rem;
 }
 
+.op-node-detail {
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
 .op-node-dot {
   flex: none;
   width: 8px;
@@ -1191,13 +1196,17 @@ code,
   color: var(--muted);
 }
 
+.op-step--upcoming .op-node-dot,
+.op-step--skipped .op-node-dot {
+  background: var(--muted);
+}
+
 /* skipped: not on the path this operation actually took (an unused retry loop, or a step
    the operation never reached before terminating) — visually receded further than
    "upcoming" so it doesn't compete with the real path. */
 .op-step--skipped .op-node {
   color: var(--muted);
   border-style: dashed;
-  opacity: 0.6;
 }
 
 /* failed: the step where the operation stopped unsuccessfully. */
