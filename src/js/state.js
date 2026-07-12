@@ -1,4 +1,9 @@
-import { DEFAULT_POLL_INTERVAL_S, FALLBACK_MIN_POLL_INTERVAL_S } from "./constants.js";
+import {
+  DEFAULT_DEPENDABOT_MERGE_POLL_INTERVAL_S,
+  DEFAULT_POLL_INTERVAL_S,
+  FALLBACK_MIN_DEPENDABOT_MERGE_POLL_INTERVAL_S,
+  FALLBACK_MIN_POLL_INTERVAL_S,
+} from "./constants.js";
 
 /* Small shared-state module for the handful of values that genuinely cross module
  * boundaries. Each export is a mutable object so importers see writes by reference;
@@ -20,8 +25,8 @@ export const poll = {
 
 /** Dedicated cadence for active Dependabot merge operations. */
 export const dependabotMergePoll = {
-  intervalSeconds: 60,
-  minIntervalS: 30,
+  intervalSeconds: DEFAULT_DEPENDABOT_MERGE_POLL_INTERVAL_S,
+  minIntervalS: FALLBACK_MIN_DEPENDABOT_MERGE_POLL_INTERVAL_S,
   githubFloorS: 0,
   backoffUntilMs: 0,
 };

@@ -303,7 +303,7 @@ export function buildActionLog(events) {
     .map((event, index) => ({
       id: event.id ?? `${event.timestamp ?? "event"}-${index}`,
       timestamp: event.timestamp ?? event.at ?? event.created_at ?? null,
-      message: event.message ?? event.description ?? event.label ?? "",
+      message: event.message ?? event.summary ?? event.description ?? event.label ?? "",
       detail: event.detail ?? event.context ?? "",
       _index: index,
     }))

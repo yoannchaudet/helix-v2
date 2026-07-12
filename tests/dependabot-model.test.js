@@ -298,6 +298,18 @@ test("buildActionLog normalizes fields and tolerates a missing/non-array input",
   assert.equal(event.message, "hi");
 });
 
+test("buildActionLog maps backend event fields to visible activity text", () => {
+  const [event] = buildActionLog([
+    {
+      id: 7,
+      summary: "Resolved a direct-merge strategy.",
+      created_at: "2026-01-01T00:00:00Z",
+    },
+  ]);
+  assert.equal(event.message, "Resolved a direct-merge strategy.");
+  assert.equal(event.timestamp, "2026-01-01T00:00:00Z");
+});
+
 test("selectedNodeDetail finds a node by id, or returns null when unselected/unmatched", () => {
   const graph = buildOperationGraph({
     state: "delegated",

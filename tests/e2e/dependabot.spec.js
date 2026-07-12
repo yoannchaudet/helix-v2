@@ -242,6 +242,9 @@ test("expanding an operation shows a loading state, then the fetched flow-graph 
   await expect(page.locator("#dependabot .op-panel-loading")).toHaveCount(0);
   await expect(page.locator("#dependabot .op-flow")).toBeVisible();
   await expect(page.locator("#dependabot .op-node[aria-current='step']")).toHaveCount(1);
+  await expect(page.locator("#dependabot .op-log-message")).toContainText(
+    "Merge operation queued.",
+  );
 
   // Collapsing removes the whole panel and returns the disclosure to its resting state.
   await disclosure.click();
