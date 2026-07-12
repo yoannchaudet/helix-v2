@@ -864,8 +864,8 @@ export function initInbox() {
 /* ─────────────────────────── Module registration ──────────────────────────── */
 
 // Register this module's lifecycle and keyboard shortcuts with the module system.
-// `load` is wired separately by main.js (it depends on account state), so we don't
-// register it here.
+// Initial + refresh loading is handled via activate (refreshInboxIfStale), so module
+// ownership stays local instead of app-shell wiring.
 
 registerModule("notifications", {
   sidebarSelector: "#sidebar-notifications",

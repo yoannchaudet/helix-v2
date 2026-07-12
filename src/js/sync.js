@@ -36,7 +36,14 @@ export function registerSyncStaleListener(key, callback) {
 }
 
 async function notifySyncStaleListeners() {
-  await Promise.all([...staleListeners.values()].map((callback) => callback()));
+  const results = await Promise.allSettled(
+    [...staleListeners.values()].map((callback) => Promise.resolve().then(() => callback())),
+  );
+  for (const result of results) {
+    if (result.status === "rejected") {
+      console.error("sync stale listener failed:", result.reason);
+    }
+  }
 }
 
 /* ------------------------------ Rate limits ------------------------------- */
