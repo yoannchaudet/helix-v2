@@ -28,6 +28,12 @@ pub(crate) struct AppState {
     /// Last window size persisted to SQLite, cached to skip redundant writes while a
     /// resize drag emits a stream of events.
     last_window_size: std::sync::Mutex<Option<(u32, u32)>>,
+    /// Prevent overlapping frontend-triggered merge processor ticks. The guard is deliberately
+    /// independent of the SQLite mutex, which is never held during token or network I/O.
+    pub(crate) dependabot_merge_tick_running: std::sync::atomic::AtomicBool,
+    /// Serializes cancellation with GitHub mutation dispatch. Cancellation waits for an already
+    /// dispatched request, while a mutation re-checks durable cancellation after acquiring it.
+    pub(crate) dependabot_merge_mutation_guard: tokio::sync::Mutex<()>,
 }
 
 /// Sink for the UI lifecycle/progress events the sync orchestration emits. Abstracting this
@@ -71,6 +77,8 @@ struct Settings {
     /// Lower bound the UI must enforce on `poll_interval_s`. Surfaced so the frontend
     /// validates/clamps against the backend's value instead of a duplicated literal.
     min_poll_interval_s: i64,
+    dependabot_merge_poll_interval_s: i64,
+    min_dependabot_merge_poll_interval_s: i64,
     github_login: Option<String>,
     /// Appearance preference: `system`, `light`, or `dark`.
     theme: String,
@@ -167,6 +175,9 @@ fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
     Ok(Settings {
         poll_interval_s: settings::get_poll_interval(&conn).map_err(|e| e.to_string())?,
         min_poll_interval_s: settings::MIN_POLL_INTERVAL_S,
+        dependabot_merge_poll_interval_s: settings::get_dependabot_merge_poll_interval(&conn)
+            .map_err(|e| e.to_string())?,
+        min_dependabot_merge_poll_interval_s: settings::MIN_DEPENDABOT_MERGE_POLL_INTERVAL_S,
         github_login: settings::get_string(&conn, settings::KEY_GITHUB_LOGIN)
             .map_err(|e| e.to_string())?,
         theme: settings::get_theme(&conn).map_err(|e| e.to_string())?,
@@ -175,18 +186,32 @@ fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
 
 /// Persist user-facing settings. Rejects a polling interval below the minimum.
 #[tauri::command]
-fn save_settings(poll_interval_s: i64, state: State<'_, AppState>) -> Result<Settings, String> {
+fn save_settings(
+    poll_interval_s: i64,
+    dependabot_merge_poll_interval_s: i64,
+    state: State<'_, AppState>,
+) -> Result<Settings, String> {
     if poll_interval_s < settings::MIN_POLL_INTERVAL_S {
         return Err(format!(
             "Polling interval must be at least {} seconds.",
             settings::MIN_POLL_INTERVAL_S
         ));
     }
+    if dependabot_merge_poll_interval_s < settings::MIN_DEPENDABOT_MERGE_POLL_INTERVAL_S {
+        return Err(format!(
+            "Dependabot merge polling interval must be at least {} seconds.",
+            settings::MIN_DEPENDABOT_MERGE_POLL_INTERVAL_S
+        ));
+    }
     let conn = state.db.0.lock().map_err(|e| e.to_string())?;
     settings::set_poll_interval(&conn, poll_interval_s).map_err(|e| e.to_string())?;
+    settings::set_dependabot_merge_poll_interval(&conn, dependabot_merge_poll_interval_s)
+        .map_err(|e| e.to_string())?;
     Ok(Settings {
         poll_interval_s,
         min_poll_interval_s: settings::MIN_POLL_INTERVAL_S,
+        dependabot_merge_poll_interval_s,
+        min_dependabot_merge_poll_interval_s: settings::MIN_DEPENDABOT_MERGE_POLL_INTERVAL_S,
         github_login: settings::get_string(&conn, settings::KEY_GITHUB_LOGIN)
             .map_err(|e| e.to_string())?,
         theme: settings::get_theme(&conn).map_err(|e| e.to_string())?,
@@ -565,6 +590,8 @@ pub fn run() {
                 db_path: db_path.to_string_lossy().into_owned(),
                 db: Db(std::sync::Mutex::new(conn)),
                 last_window_size: std::sync::Mutex::new(saved_size),
+                dependabot_merge_tick_running: std::sync::atomic::AtomicBool::new(false),
+                dependabot_merge_mutation_guard: tokio::sync::Mutex::new(()),
             });
 
             if let (Some((w, h)), Some(win)) = (saved_size, app.get_webview_window("main")) {
@@ -623,6 +650,12 @@ pub fn run() {
             dependabot_coordinator::sync_dependabot,
             dependabot_coordinator::list_dependabot,
             dependabot_coordinator::dependabot_status,
+            dependabot_coordinator::enqueue_dependabot_merge,
+            dependabot_coordinator::cancel_dependabot_merge,
+            dependabot_coordinator::list_dependabot_merge_operations,
+            dependabot_coordinator::dependabot_merge_status,
+            dependabot_coordinator::get_dependabot_merge_operation_detail,
+            dependabot_coordinator::process_dependabot_merges,
             show_main_window,
             get_start_at_login,
             set_start_at_login,

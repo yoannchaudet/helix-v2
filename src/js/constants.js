@@ -9,6 +9,9 @@ export const DEFAULT_POLL_INTERVAL_S = 60;
 /** Fallback poll-interval floor used only until/if `loadSettings()` provides the
  *  authoritative `min_poll_interval_s` from the backend. Mirrors the Rust default. */
 export const FALLBACK_MIN_POLL_INTERVAL_S = 10;
+/** Dependabot merge polling defaults until backend settings/status load. */
+export const DEFAULT_DEPENDABOT_MERGE_POLL_INTERVAL_S = 60;
+export const FALLBACK_MIN_DEPENDABOT_MERGE_POLL_INTERVAL_S = 30;
 
 /** Auto-dismiss timings (ms) for transient feedback. */
 export const FLASH_DISMISS_MS = 1800;

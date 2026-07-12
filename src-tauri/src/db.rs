@@ -196,6 +196,137 @@ const MIGRATIONS: &[&str] = &[
         last_synced_at TEXT
     );
     "#,
+    // v12 — durable, locally queued Dependabot merge operations.  The PR fields are an
+    // immutable enqueue-time snapshot: the processor observes live GitHub state separately,
+    // but a completed operation remains an auditable record even after its cached PR is gone.
+    r#"
+    ALTER TABLE sync_state ADD COLUMN dependabot_merge_poll_interval_s INTEGER NOT NULL DEFAULT 60;
+
+    CREATE TABLE IF NOT EXISTS dependabot_merge_operations (
+        id                 INTEGER PRIMARY KEY,
+        pr_id              INTEGER NOT NULL,
+        repo_full_name     TEXT NOT NULL,
+        number             INTEGER NOT NULL,
+        title              TEXT NOT NULL,
+        html_url           TEXT NOT NULL,
+        pull_url           TEXT NOT NULL,
+        author             TEXT NOT NULL,
+        state              TEXT NOT NULL CHECK (state IN
+                           ('queued', 'validating', 'delegated', 'cancel_requested',
+                            'merged', 'cancelled', 'failed', 'timed_out')),
+        observed_head_sha  TEXT,
+        validated_head_sha TEXT,
+        approved_head_sha  TEXT,
+        merge_command_at   TEXT,
+        cancel_command_at  TEXT,
+        enqueued_at        TEXT NOT NULL,
+        delegated_at       TEXT,
+        last_checked_at    TEXT,
+        last_action_at     TEXT,
+        retry_at           TEXT,
+        terminal_at        TEXT,
+        failure_code       TEXT,
+        failure_reason     TEXT,
+        last_error         TEXT
+    );
+
+    -- A PR may have one active request, while terminal history is retained.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_dependabot_merge_active_pr
+        ON dependabot_merge_operations(pr_id)
+        WHERE state IN ('queued', 'validating', 'delegated', 'cancel_requested');
+    -- The oldest active operation is the sole processor head for each repository.
+    CREATE INDEX IF NOT EXISTS idx_dependabot_merge_repo_fifo
+        ON dependabot_merge_operations(repo_full_name, enqueued_at, id)
+        WHERE state IN ('queued', 'validating', 'delegated', 'cancel_requested');
+    CREATE INDEX IF NOT EXISTS idx_dependabot_merge_terminal
+        ON dependabot_merge_operations(terminal_at DESC, id DESC)
+        WHERE state IN ('merged', 'cancelled', 'failed', 'timed_out');
+
+    CREATE TABLE IF NOT EXISTS dependabot_merge_runtime (
+        id                   INTEGER PRIMARY KEY CHECK (id = 1),
+        last_tick_at         TEXT,
+        last_error           TEXT,
+        github_poll_floor_s  INTEGER,
+        backoff_until        TEXT
+    );
+    INSERT OR IGNORE INTO dependabot_merge_runtime (id) VALUES (1);
+    "#,
+    // v13 — identify a Helix-requested update-branch commit so the subsequent authorship
+    // revalidation can accept that one PAT-authored merge commit without accepting arbitrary
+    // human work on the Dependabot branch.
+    r#"
+    ALTER TABLE dependabot_merge_operations ADD COLUMN update_branch_from_sha TEXT;
+    "#,
+    // v14 — Phase 2 durable processor fields plus an audit/retry/policy layer around
+    // `dependabot_merge_operations`. `phase` and `strategy` are intentionally freeform TEXT
+    // (no CHECK): unlike `state`, which is the small, stable lifecycle the rest of the schema
+    // keys off, these describe the processor's finer-grained internal progress and resolved
+    // merge approach, and are expected to grow without another migration. `pull_node_id`
+    // (GraphQL node id) and `base_ref` are metadata discovered once the processor first talks
+    // to GitHub about the PR, needed for GraphQL mutations (e.g. enabling native auto-merge)
+    // and branch-protection/policy lookups, which are base-ref scoped. `next_action_at` lets
+    // the processor pace itself (retry/backoff) without a separate timer table.
+    // `check_retry_count` tracks consecutive requested check-run re-runs for the current head
+    // SHA. `merge_queue_position`/`auto_merge_enabled` mirror GitHub's own native merge-queue
+    // position and auto-merge flag when that strategy is in play.
+    //
+    // `dependabot_merge_operation_events` is an append-only narration/audit trail per
+    // operation — cascade-deleted with it, so the existing terminal-retention prune in
+    // `terminalize` (the newest 100 terminal rows) also prunes each pruned operation's history.
+    // `dependabot_merge_check_retries` records each requested re-run of a failed workflow run
+    // for a given head SHA, uniquely keyed so the same run+attempt is never double-scheduled,
+    // and cascade-deleted with its operation. `dependabot_merge_policies` caches the merge
+    // strategy resolved for a repo + base branch (branch protection is base-ref scoped) so it
+    // isn't re-derived on every tick.
+    r#"
+    ALTER TABLE dependabot_merge_operations ADD COLUMN phase TEXT NOT NULL DEFAULT 'queued';
+    ALTER TABLE dependabot_merge_operations ADD COLUMN strategy TEXT NOT NULL DEFAULT 'unknown';
+    ALTER TABLE dependabot_merge_operations ADD COLUMN pull_node_id TEXT;
+    ALTER TABLE dependabot_merge_operations ADD COLUMN base_ref TEXT;
+    ALTER TABLE dependabot_merge_operations ADD COLUMN next_action_at TEXT;
+    ALTER TABLE dependabot_merge_operations ADD COLUMN check_retry_count INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE dependabot_merge_operations ADD COLUMN merge_queue_position INTEGER;
+    ALTER TABLE dependabot_merge_operations ADD COLUMN auto_merge_enabled INTEGER NOT NULL DEFAULT 0;
+
+    CREATE TABLE dependabot_merge_operation_events (
+        id            INTEGER PRIMARY KEY,
+        operation_id  INTEGER NOT NULL REFERENCES dependabot_merge_operations(id) ON DELETE CASCADE,
+        phase         TEXT NOT NULL,
+        kind          TEXT NOT NULL,
+        status        TEXT NOT NULL,
+        summary       TEXT NOT NULL,
+        detail        TEXT,
+        head_sha      TEXT,
+        external_id   TEXT,
+        created_at    TEXT NOT NULL
+    );
+    CREATE INDEX idx_dependabot_merge_operation_events_operation
+        ON dependabot_merge_operation_events(operation_id, created_at, id);
+    CREATE INDEX idx_dependabot_merge_operation_events_time
+        ON dependabot_merge_operation_events(created_at DESC, id DESC);
+
+    CREATE TABLE dependabot_merge_check_retries (
+        id               INTEGER PRIMARY KEY,
+        operation_id     INTEGER NOT NULL REFERENCES dependabot_merge_operations(id) ON DELETE CASCADE,
+        head_sha         TEXT NOT NULL,
+        workflow_run_id  INTEGER NOT NULL,
+        run_attempt      INTEGER NOT NULL,
+        scheduled_at     TEXT NOT NULL,
+        requested_at     TEXT,
+        outcome          TEXT,
+        UNIQUE(operation_id, head_sha, workflow_run_id, run_attempt)
+    );
+    CREATE INDEX idx_dependabot_merge_check_retries_operation
+        ON dependabot_merge_check_retries(operation_id, scheduled_at, id);
+
+    CREATE TABLE dependabot_merge_policies (
+        repo_full_name TEXT NOT NULL,
+        base_ref       TEXT NOT NULL,
+        strategy       TEXT NOT NULL,
+        checked_at     TEXT NOT NULL,
+        PRIMARY KEY (repo_full_name, base_ref)
+    );
+    "#,
 ];
 
 /// Open the database at `db_path`, apply any pending migrations, and return the
@@ -267,6 +398,11 @@ mod tests {
         for expected in [
             "dependabot_prs",
             "dependabot_repos",
+            "dependabot_merge_operations",
+            "dependabot_merge_operation_events",
+            "dependabot_merge_check_retries",
+            "dependabot_merge_policies",
+            "dependabot_merge_runtime",
             "done_tombstones",
             "notifications",
             "rate_limits",
@@ -344,6 +480,97 @@ mod tests {
         assert!(table_names(&conn)
             .unwrap()
             .contains(&"done_tombstones".to_string()));
+    }
+
+    /// Exercise the v13 → v14 upgrade: a populated v13 database (pre-Phase-2 merge operation,
+    /// no `phase`/`strategy`/event tables) migrates cleanly, backfilling the new columns with
+    /// their documented defaults and adding the event/retry/policy tables with working cascade
+    /// deletes.
+    #[test]
+    fn upgrade_from_populated_v13_adds_phase_fields_and_event_tables() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        for migration in &MIGRATIONS[..13] {
+            conn.execute_batch(migration).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 13).unwrap();
+
+        conn.execute(
+            "INSERT INTO dependabot_merge_operations
+                (pr_id, repo_full_name, number, title, html_url, pull_url, author, state,
+                 enqueued_at)
+             VALUES (1, 'octo/repo', 10, 'Bump x', 'https://github.com/octo/repo/pull/10',
+                     'https://api.github.com/repos/octo/repo/pulls/10', 'dependabot[bot]',
+                     'queued', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        let op_id = conn.last_insert_rowid();
+
+        run_migrations(&conn).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), MIGRATIONS.len() as i64);
+
+        // New columns exist and back-filled defaults match the documented ones.
+        let (phase, strategy, retry_count, auto_merge): (String, String, i64, bool) = conn
+            .query_row(
+                "SELECT phase, strategy, check_retry_count, auto_merge_enabled
+                 FROM dependabot_merge_operations WHERE id = ?1",
+                [op_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(phase, "queued");
+        assert_eq!(strategy, "unknown");
+        assert_eq!(retry_count, 0);
+        assert!(!auto_merge);
+
+        for expected in [
+            "dependabot_merge_operation_events",
+            "dependabot_merge_check_retries",
+            "dependabot_merge_policies",
+        ] {
+            assert!(
+                table_names(&conn).unwrap().contains(&expected.to_string()),
+                "missing table {expected}"
+            );
+        }
+
+        // Cascade delete: events and retries tied to the operation disappear with it.
+        conn.execute(
+            "INSERT INTO dependabot_merge_operation_events
+                (operation_id, phase, kind, status, summary, created_at)
+             VALUES (?1, 'queued', 'lifecycle', 'queued', 'Enqueued.', '2026-01-01T00:00:00Z')",
+            [op_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO dependabot_merge_check_retries
+                (operation_id, head_sha, workflow_run_id, run_attempt, scheduled_at)
+             VALUES (?1, 'deadbeef', 1, 1, '2026-01-01T00:00:00Z')",
+            [op_id],
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM dependabot_merge_operations WHERE id = ?1",
+            [op_id],
+        )
+        .unwrap();
+        let remaining_events: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dependabot_merge_operation_events",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let remaining_retries: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dependabot_merge_check_retries",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining_events, 0);
+        assert_eq!(remaining_retries, 0);
     }
 
     #[test]

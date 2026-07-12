@@ -326,9 +326,11 @@ and each module owns — or omits — its own sidebar. The active module is acce
 `⌘1` / `⌘2` jump straight to a module by position.
 - **Notifications** module — the inbox described below (the original v1 feature). It owns the
   smart-filter + repository **sidebar**.
-- **Dependabot** module — currently a **placeholder** ("Coming soon"); it has **no sidebar**
-  (the content spans the full body). It will surface the Dependabot-PR subset of
-  notifications with extra triage actions.
+- **Dependabot** module — lists cached open Dependabot PRs by repository and owns a
+  repository/Operations sidebar. Row-level merge actions create durable operations;
+  Operations shows active FIFO work plus the latest 100 terminal results. Expanding an
+  operation reveals its strategy-specific flow, highlighted current step, next action, retry or
+  GitHub queue position, and timestamped durable action log.
 - **Settings is *not* a module** — it's a focused, full-width **overlay** that temporarily
   covers the active module (hiding the sidebar) and returns to it on close. The top chrome
   (and picker) stays visible, so switching modules dismisses the overlay. `modules.js` owns
@@ -350,8 +352,8 @@ module's **sidebar + content** split:
   **module-scoped**: for Notifications it shows the cross-cutting smart filters (**All**,
   **Mentions**, **Team mentions**, **Review requests**, **Assigned**, **Cleanup**) with live
   counts and a **Repositories** list of selectable sources. Selection is single-active (a
-  smart filter *or* a repository), Mail-style. Modules without a sidebar (e.g. Dependabot)
-  collapse it.
+  smart filter *or* a repository), Mail-style. Dependabot uses the same shell for **All**,
+  **Operations**, and repository refinement.
 - **Content pane:** an opaque pane with a **toolbar** below the chrome showing the active
   source title (left) and sync status + refresh (right), pinned while the list scrolls.
 - Accent (purple) is applied **sparingly** — selection tint, counts, the active module tab —
@@ -406,9 +408,12 @@ module's **sidebar + content** split:
   - Classic PAT: `notifications` (read/modify the inbox). Add `repo` to resolve subjects
     in **private** repositories; the **Dependabot** module also needs it to read PRs in
     private repos.
-  - Fine-grained PAT alternative: read access to **Notifications**, plus
-    Issues/Pull-requests read on the relevant repos for subject resolution. The
-    **Dependabot** module additionally reads **Pull requests** on those repos.
+  - Fine-grained PAT alternative: read access to **Notifications**; **Pull requests:
+    read/write** for listing commits, approvals, and queue enrollment; **Contents: read/write**
+    for native SHA-bound merges and branch updates; **Actions: read/write** for rerunning failed
+    jobs; and **Metadata: read** for repository policy. Scope the token to the repositories Helix
+    manages. A user PAT cannot rerequest third-party check suites, so failed external CI is
+    surfaced as needing attention instead of silently retried.
 - The Dependabot module does **not** use the search API and has no account/repo picker. Its
   repo list is built lazily "for free" from your notifications: when a **Dependabot-authored**
   PR notification is resolved, that repo is remembered in `dependabot_repos` (which — unlike
@@ -418,6 +423,37 @@ module's **sidebar + content** split:
 - The Dependabot module's **last successful sync time** is persisted (settings key
   `dependabot_last_sync_at`) so the "Synced …" label and the auto-sync staleness gate survive
   restarts — distinct from the notifications sync time in `sync_state`.
+- Dependabot **merge operations** are durable SQLite state. Repositories progress
+  independently, but each repository has a strict FIFO queue with one active merge at a time.
+  At the head, Helix validates that the open/non-draft/non-conflicting PR and all its commits
+  are Dependabot-owned, approves the current head SHA, and auto-detects the base branch's merge
+  strategy. Direct merges update a behind branch, then revalidate and reapprove its new head;
+  expected PAT-authored update merge commits are tracked as a parent-linked chain without
+  allowing unrelated human commits. A ready direct PR is squash-merged with the validated SHA.
+- Queue-required branches use GitHub's GraphQL auto-merge/enqueue/dequeue operations instead:
+  Helix never updates or directly merges those branches, polls the queue entry and position, and
+  lets GitHub own merge-group freshness. Helix still admits only one PR per repository at a time.
+- Failed GitHub Actions jobs are rerun after a five-minute backoff, once per workflow run attempt,
+  with no numeric retry cap. New failed attempts continue until success or the operation's
+  90-minute deadline; pending checks keep waiting, while failed external CI needs human attention.
+  When the deadline passes on a queue operation, Helix disables native auto-merge and dequeues the
+  PR (under the mutation guard) before terminalizing it as timed out; if that cleanup fails it stays
+  active and retries rather than releasing the repo's FIFO head. A merge GitHub already completed
+  still wins.
+  Cancellation is serialized with every GitHub mutation and remotely disables auto-merge or
+  dequeues when necessary; a merge request already dispatched to GitHub still wins the race. If a
+  cancellation's remote cleanup fails, the operation stays `cancel_requested` and retries on later
+  passes — it only terminalizes as cancelled once cleanup succeeds, keeping the repo's next PR
+  blocked meanwhile.
+- Every operation phase and action is recorded locally. The expandable Operations visualization
+  reads that durable history rather than inferring progress in the frontend.
+- Active merge operations use a dedicated frontend-driven poll loop (60 seconds by default,
+  configurable with a 30-second minimum). Each tick advances one FIFO head per repo and
+  reloads all operations in a single batched read; GitHub poll/backoff headers can raise the
+  interval or pause it outright. The FIFO processor itself stops resolving new work once either
+  the shared **core** or **graphql** rate bucket drops below the ~25% reserve, while every
+  request's **core** and **graphql** rate snapshots are persisted for the Settings usage bars.
+  Missing or expired mutation permissions pause visibly without discarding queue state.
 - The **last opened module** is persisted (settings key `last_module`) and restored on the next
   launch, before the window is revealed, so we don't flash the default module first.
 - All GitHub traffic is HTTPS to `api.github.com`.

@@ -872,7 +872,10 @@ code,
    keyboard users. */
 .n-done,
 .repo-done,
-.n-bookmark {
+.n-bookmark,
+.dep-merge-action,
+.dep-operation-cancel,
+.dep-operation-disclosure {
   flex: none;
   display: inline-flex;
   align-items: center;
@@ -914,6 +917,21 @@ code,
   margin-right: var(--space-10);
 }
 
+.dep-merge-action,
+.dep-operation-cancel,
+.dep-operation-disclosure {
+  width: var(--control-icon-md);
+  height: var(--control-icon-md);
+  margin-right: var(--space-10);
+}
+
+.dep-operation-cancel,
+.dep-operation-disclosure,
+.dep-merge-action.is-on {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 /* Inert placeholder occupying the mark-as-done slot on done rows, so the bookmark icon stays
    aligned. Never interactive or visible — it only reserves layout space. */
 .n-done-spacer {
@@ -933,9 +951,13 @@ code,
    re-render and only re-applied on real pointer movement. */
 .n-row--hover .n-done,
 .n-row--hover .n-bookmark,
+.n-row--hover .dep-merge-action,
 .repo-header--hover .repo-done,
 .n-done:focus-visible,
 .n-bookmark:focus-visible,
+.dep-merge-action:focus-visible,
+.dep-operation-cancel:focus-visible,
+.dep-operation-disclosure:focus-visible,
 .repo-done:focus-visible {
   opacity: 1;
   pointer-events: auto;
@@ -950,7 +972,9 @@ code,
 }
 
 .n-done:hover,
-.repo-done:hover {
+.repo-done:hover,
+.dep-merge-action:hover,
+.dep-operation-disclosure:hover {
   color: var(--success);
   background: var(--surface-hover);
 }
@@ -962,9 +986,302 @@ code,
 
 .n-done:focus-visible,
 .n-bookmark:focus-visible,
+.dep-merge-action:focus-visible,
+.dep-operation-cancel:focus-visible,
+.dep-operation-disclosure:focus-visible,
 .repo-done:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
+}
+
+/* The disclosure chevron rotates to point "up" when its panel is expanded — a lightweight,
+   reduced-motion-safe (see the global `prefers-reduced-motion` block) affordance instead of
+   duplicating icons. */
+.dep-operation-disclosure svg {
+  transition: transform var(--duration-fast) ease;
+}
+
+.dep-operation-disclosure.is-expanded svg {
+  transform: rotate(180deg);
+}
+
+.n-row--operation {
+  background-color: rgba(var(--pending-rgb), 0.08);
+}
+
+.operation-state {
+  font-size: 0.68rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.operation-state--success {
+  color: var(--success);
+}
+
+.operation-state--pending {
+  color: var(--pending);
+}
+
+.operation-state--error,
+.operation-error {
+  color: var(--error);
+}
+
+.operation-state--neutral {
+  color: var(--muted);
+}
+
+.operation-error {
+  margin-top: 3px;
+  font-size: 0.74rem;
+  line-height: 1.35;
+}
+
+/* ---------------------------------------------------------------------------------------
+ * Operation detail panel (Phase 2): the inline flow visualization, selected-step readout,
+ * retry/queue metadata, current/next explanation, and action log revealed by an operation
+ * row's disclosure button. Pure semantic HTML (an `<ol>` of `<button>`s) — no canvas/SVG
+ * diagramming dependency. Colors all key off the existing themeable tokens so dark mode
+ * "just works", and all transitions are covered by the app-wide `prefers-reduced-motion`
+ * reset near the bottom of this file.
+ * --------------------------------------------------------------------------------------- */
+
+.op-panel-row {
+  display: block;
+  padding: var(--space-12) var(--space-16) var(--space-16);
+  background: var(--surface-hover);
+  border-bottom: 1px solid var(--hairline);
+}
+
+.op-panel-loading {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+/* The flow itself: a wrapping row of steps (a column on narrow viewports) joined by a
+   connector line drawn with each step's own `::before`, so it keeps working however the
+   items wrap — no absolutely-positioned overlay to keep in sync. */
+.op-flow {
+  list-style: none;
+  margin: 0 0 var(--space-10);
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-4) 0;
+}
+
+.op-step {
+  display: flex;
+  align-items: center;
+}
+
+/* Connector between consecutive steps. Skipped on the first step of the whole flow and
+   right after the branch marker (which already reads as a visual break). */
+.op-step + .op-step::before,
+.op-flow-marker + .op-step::before {
+  content: "";
+  flex: none;
+  width: var(--space-16);
+  height: 2px;
+  margin: 0 var(--space-4);
+  background: var(--border);
+}
+
+.op-step--done + .op-step::before {
+  background: var(--success);
+}
+
+/* A small non-interactive label marking where the shared preparation steps give way to the
+   strategy-specific branch (direct merge vs. merge queue vs. still-detecting). */
+.op-flow-marker {
+  flex: none;
+  margin: 0 var(--space-10);
+  padding: var(--space-2) var(--space-8);
+  border-radius: var(--radius-lg);
+  background: var(--accent-tint);
+  color: var(--accent-strong);
+  font-size: 0.68rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.op-node {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-6);
+  padding: var(--space-4) var(--space-8);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.74rem;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) ease,
+    border-color var(--duration-fast) ease,
+    color var(--duration-fast) ease;
+}
+
+.op-node:hover {
+  background: var(--surface-hover);
+}
+
+.op-node:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.op-node-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--border-strong);
+}
+
+.op-node--selected {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+}
+
+/* done: the step happened. */
+.op-step--done .op-node-dot {
+  background: var(--success);
+}
+
+/* current: the step in progress right now — a subtle pulse draws the eye without being
+   distracting; collapses to a single frame under `prefers-reduced-motion` (see the
+   app-wide reset). */
+.op-step--current .op-node {
+  border-color: var(--pending);
+  color: var(--pending);
+}
+
+.op-step--current .op-node-dot {
+  background: var(--pending);
+  animation: op-node-pulse 1.6s ease-in-out infinite;
+}
+
+/* upcoming: not reached yet — muted/inert-looking but still legible. */
+.op-step--upcoming .op-node {
+  color: var(--muted);
+}
+
+/* skipped: not on the path this operation actually took (an unused retry loop, or a step
+   the operation never reached before terminating) — visually receded further than
+   "upcoming" so it doesn't compete with the real path. */
+.op-step--skipped .op-node {
+  color: var(--muted);
+  border-style: dashed;
+  opacity: 0.6;
+}
+
+/* failed: the step where the operation stopped unsuccessfully. */
+.op-step--failed .op-node {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.op-step--failed .op-node-dot {
+  background: var(--error);
+}
+
+@keyframes op-node-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+.op-node-detail {
+  margin: 0 0 var(--space-8);
+  font-size: 0.78rem;
+  color: var(--text);
+}
+
+.op-node-detail--empty {
+  color: var(--muted);
+}
+
+.op-meta {
+  margin: 0 0 var(--space-6);
+  font-size: 0.74rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.op-explanation {
+  margin: 0 0 var(--space-6);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.op-explanation--current {
+  color: var(--text);
+}
+
+.op-explanation--next {
+  color: var(--muted);
+}
+
+.op-log-heading {
+  margin: var(--space-12) 0 var(--space-6);
+  font-size: 0.72rem;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+}
+
+.op-log,
+.op-log-empty {
+  margin: 0;
+  padding: 0;
+}
+
+.op-log-empty {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.op-log {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.op-log-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--space-8);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.op-log-time {
+  flex: none;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.op-log-message {
+  color: var(--text);
+}
+
+.op-log-detail {
+  color: var(--muted);
+  font-size: 0.72rem;
 }
 
 .n-list {

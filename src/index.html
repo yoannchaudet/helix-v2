@@ -280,11 +280,29 @@
                 </span>
               </span>
             </div>
+            <div class="srow">
+              <span class="srow-label">Dependabot merge polling</span>
+              <span class="srow-value">
+                <span class="stepper">
+                  <input
+                    id="dependabot-merge-poll-interval"
+                    name="dependabot-merge-poll-interval"
+                    type="number"
+                    step="5"
+                    inputmode="numeric"
+                    aria-label="Dependabot merge polling interval in seconds"
+                  />
+                  <span class="stepper-unit" aria-hidden="true">s</span>
+                </span>
+              </span>
+            </div>
           </div>
           <p class="sgroup-note" id="settings-note">
             Helix syncs in the background at this interval. Minimum
             <span id="poll-min-label">10</span> seconds. Changes apply immediately.<span
               id="poll-github-note" hidden></span>
+            Dependabot merge operations have a separate minimum of
+            <span id="dependabot-merge-poll-min-label">30</span> seconds.
           </p>
         </section>
 

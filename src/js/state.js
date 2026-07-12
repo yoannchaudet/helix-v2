@@ -18,6 +18,14 @@ export const poll = {
   githubFloorS: 0,
 };
 
+/** Dedicated cadence for active Dependabot merge operations. */
+export const dependabotMergePoll = {
+  intervalSeconds: 60,
+  minIntervalS: 30,
+  githubFloorS: 0,
+  backoffUntilMs: 0,
+};
+
 /** Per-session flags reset when the signed-in identity changes. */
 export const session = {
   /** True once a sync has succeeded *in this session*. Until then the status pill stays

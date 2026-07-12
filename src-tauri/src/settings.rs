@@ -26,6 +26,9 @@ pub const KEY_DEV_GITHUB_PAT: &str = "dev_github_pat";
 
 /// Lower bound for the polling interval, to avoid hammering the API.
 pub const MIN_POLL_INTERVAL_S: i64 = 10;
+/// Dependabot merge operations issue several serial REST calls and must not be driven faster
+/// than this even if notification polling is configured more aggressively.
+pub const MIN_DEPENDABOT_MERGE_POLL_INTERVAL_S: i64 = 30;
 
 /// Default appearance preference when none is stored.
 pub const DEFAULT_THEME: &str = "system";
@@ -99,6 +102,24 @@ pub fn set_poll_interval(conn: &Connection, seconds: i64) -> rusqlite::Result<()
     Ok(())
 }
 
+/// Read the durable Dependabot merge-queue polling interval.
+pub fn get_dependabot_merge_poll_interval(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT dependabot_merge_poll_interval_s FROM sync_state WHERE id = 1",
+        [],
+        |row| row.get(0),
+    )
+}
+
+/// Update the durable Dependabot merge-queue polling interval.
+pub fn set_dependabot_merge_poll_interval(conn: &Connection, seconds: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE sync_state SET dependabot_merge_poll_interval_s = ?1 WHERE id = 1",
+        [seconds],
+    )?;
+    Ok(())
+}
+
 /// Read the persisted window size (logical pixels), or `None` if either dimension is
 /// unset or unparseable. Used to restore the window to its last size on launch.
 pub fn get_window_size(conn: &Connection) -> rusqlite::Result<Option<(u32, u32)>> {
@@ -163,6 +184,14 @@ mod tests {
         assert_eq!(get_poll_interval(&conn).unwrap(), 60); // seeded default
         set_poll_interval(&conn, 120).unwrap();
         assert_eq!(get_poll_interval(&conn).unwrap(), 120);
+    }
+
+    #[test]
+    fn dependabot_merge_poll_interval_defaults_and_updates() {
+        let conn = mem_conn();
+        assert_eq!(get_dependabot_merge_poll_interval(&conn).unwrap(), 60);
+        set_dependabot_merge_poll_interval(&conn, 90).unwrap();
+        assert_eq!(get_dependabot_merge_poll_interval(&conn).unwrap(), 90);
     }
 
     #[test]
