@@ -583,13 +583,11 @@ pub fn mark_done_local(conn: &mut Connection, thread_ids: &[String]) -> rusqlite
                 .query_row(params![id], |r| Ok((r.get(0)?, r.get(1)?)))
                 .optional()?;
             let (notification_updated_at, subject_updated_at) = match generations {
-                Some((notification, subject)) => {
-                    dismissed += 1;
-                    (Some(notification), subject)
-                }
+                Some((notification, subject)) => (Some(notification), subject),
                 None => (None, None),
             };
             dismissal_stmt.execute(params![id, notification_updated_at, subject_updated_at])?;
+            dismissed += 1;
         }
     }
     tx.commit()?;
@@ -1485,7 +1483,7 @@ mod tests {
         conn.execute("DELETE FROM notifications WHERE thread_id = '1'", [])
             .unwrap();
 
-        mark_done_local(&mut conn, &["1".to_string()]).unwrap();
+        assert_eq!(mark_done_local(&mut conn, &["1".to_string()]).unwrap(), 1);
         let updated_at: Option<String> = conn
             .query_row(
                 "SELECT notification_updated_at

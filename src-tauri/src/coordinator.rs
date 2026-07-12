@@ -580,14 +580,7 @@ mod tests {
 
     fn visible_notification_count(db: &Db) -> i64 {
         let conn = db.0.lock().unwrap();
-        conn.query_row(
-            "SELECT COUNT(*) FROM notifications n
-             LEFT JOIN notification_dismissals d ON d.thread_id = n.thread_id
-             WHERE d.thread_id IS NULL",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap()
+        sync::visible_count(&conn).unwrap()
     }
 
     fn status(db: &Db) -> sync::SyncStatus {
