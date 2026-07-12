@@ -858,7 +858,6 @@ where
                                 id,
                                 Some(&head_sha),
                                 false,
-                                false,
                                 "merged",
                                 Some("Merged on GitHub."),
                             )
@@ -1605,7 +1604,7 @@ async fn orchestrate_operation<B: MergeBackend>(
     let strategy_hint = strategy_from_str(cached_strategy.as_deref());
 
     // 3a. Merge-queue polling fast path: once a queue operation has been validated and enrolled
-    //     (its node id and validated head are known), subsequent passes only poll/drive the queue
+    //     (its node id and accepted head are known), subsequent passes only poll/drive the queue
     //     over GraphQL — they must never re-issue the direct validation/merge REST processor.
     if strategy_hint == github::MergeQueueStrategy::MergeQueue {
         if let (Some(node_id), Some(head)) = (
@@ -1733,7 +1732,7 @@ async fn orchestrate_operation<B: MergeBackend>(
                     rates,
                 });
             }
-            // Direct strategy, head validated + approved, but not mergeable yet → diagnose checks.
+            // Direct strategy, head accepted + approved, but not mergeable yet → diagnose checks.
             let outcome =
                 direct_await_checks(db, backend, &work, &head_sha, None, timed_out, &mut rates)
                     .await?;
@@ -1765,7 +1764,7 @@ async fn orchestrate_operation<B: MergeBackend>(
                         "validating",
                         "check",
                         "ok",
-                        "Validated the head commit as Dependabot-owned.",
+                        "Accepted the current head of the Dependabot-authored pull request.",
                         None,
                         Some(&head),
                         None,
@@ -2319,7 +2318,7 @@ async fn queue_flow<B: MergeBackend>(
         });
     }
 
-    // Eligible and not queued → enqueue at the back with the validated head OID.
+    // Eligible and not queued → enqueue at the back with the accepted head OID.
     let mutation = net!(*rates, backend.enqueue(node_id, head_sha));
     if mutation.outcome == github::MutationOutcome::Cancelled {
         return Ok(Outcome::Cancelled);
@@ -4468,7 +4467,7 @@ mod tests {
         );
         let head_id = enqueue_op(&db, 1);
         let next_id = enqueue_op(&db, 2);
-        // Enroll the head in the merge queue (auto-merge on, node id + validated head known) so it
+        // Enroll the head in the merge queue (auto-merge on, node id + accepted head known) so it
         // takes the queue-polling fast path, then age it past the 90-minute deadline.
         {
             let conn = db.0.lock().unwrap();

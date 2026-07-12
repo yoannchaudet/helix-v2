@@ -302,7 +302,6 @@ pub struct DependabotMergeRuntime {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MergeWork {
     pub operation: DependabotMergeOperation,
-    pub update_branch_from_sha: Option<String>,
     pub last_checked_at: Option<String>,
     pub failure_code: Option<String>,
 }
@@ -500,7 +499,7 @@ pub fn list_merge_operations(conn: &Connection) -> rusqlite::Result<Vec<Dependab
 /// tick. A retry/backoff remains the head and intentionally blocks later requests in that repo.
 pub fn merge_operation_heads(conn: &Connection) -> rusqlite::Result<Vec<MergeWork>> {
     let sql = format!(
-        "SELECT {OPERATION_COLUMNS}, update_branch_from_sha, last_checked_at, failure_code
+        "SELECT {OPERATION_COLUMNS}, last_checked_at, failure_code
          FROM dependabot_merge_operations o
          WHERE o.state IN ({ACTIVE_STATES})
            AND NOT EXISTS (
@@ -516,9 +515,8 @@ pub fn merge_operation_heads(conn: &Connection) -> rusqlite::Result<Vec<MergeWor
         let operation = operation_from_row(r)?;
         Ok(MergeWork {
             operation,
-            update_branch_from_sha: r.get(25)?,
-            last_checked_at: r.get(26)?,
-            failure_code: r.get(27)?,
+            last_checked_at: r.get(25)?,
+            failure_code: r.get(26)?,
         })
     })?;
     rows.collect()
@@ -643,7 +641,6 @@ pub fn record_observation(
     conn: &Connection,
     id: i64,
     head_sha: Option<&str>,
-    validated: bool,
     approved: bool,
     state: &str,
     reason: Option<&str>,
@@ -651,12 +648,11 @@ pub fn record_observation(
     conn.execute(
         "UPDATE dependabot_merge_operations
          SET state = ?2, observed_head_sha = ?3,
-             validated_head_sha = CASE WHEN ?4 THEN ?3 ELSE validated_head_sha END,
-             approved_head_sha = CASE WHEN ?5 THEN ?3 ELSE approved_head_sha END,
+             approved_head_sha = CASE WHEN ?4 THEN ?3 ELSE approved_head_sha END,
              last_checked_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
-             failure_reason = ?6, last_error = NULL
+             failure_reason = ?5, last_error = NULL
          WHERE id = ?1",
-        params![id, state, head_sha, validated, approved, reason],
+        params![id, state, head_sha, approved, reason],
     )?;
     Ok(())
 }

@@ -957,69 +957,10 @@ struct MergeBase {
     ref_name: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct MergeCommit {
-    sha: String,
-    author: Option<SubjectUser>,
-    #[serde(default)]
-    parents: Vec<MergeCommitParent>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MergeCommitParent {
-    sha: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MergeCommitValidation {
-    Safe,
-    HeadChanged,
-    Unsafe,
-}
-
-fn merge_commits_are_safe(
-    commits: &[MergeCommit],
-    current_head: &str,
-    login: &str,
-    update_from: Option<&str>,
-) -> MergeCommitValidation {
-    // GitHub caps this endpoint at 250 commits without exposing a reliable truncation flag.
-    // Refuse the ambiguous boundary rather than approve a possibly unvalidated tail/prefix.
-    if commits.len() >= 250 {
-        return MergeCommitValidation::Unsafe;
-    }
-    if commits.last().map(|commit| commit.sha.as_str()) != Some(current_head) {
-        return MergeCommitValidation::HeadChanged;
-    }
-    let (start, mut accepted_head) = match update_from {
-        Some(marker) => {
-            let Some(index) = commits.iter().position(|commit| commit.sha == marker) else {
-                return MergeCommitValidation::Unsafe;
-            };
-            (index + 1, Some(marker))
-        }
-        None => (0, None),
-    };
-    for commit in &commits[start..] {
-        if commit
-            .author
-            .as_ref()
-            .is_some_and(|u| is_dependabot_author(&u.login))
-        {
-            accepted_head = Some(commit.sha.as_str());
-            continue;
-        }
-        if update_from.is_none() || commit.author.as_ref().is_none_or(|u| u.login != login) {
-            return MergeCommitValidation::Unsafe;
-        }
-        if commit.parents.len() != 2
-            || commit.parents.first().map(|parent| parent.sha.as_str()) != accepted_head
-        {
-            return MergeCommitValidation::Unsafe;
-        }
-        accepted_head = Some(commit.sha.as_str());
-    }
-    MergeCommitValidation::Safe
+fn merge_pull_has_trusted_author(pull: &MergePull) -> bool {
+    pull.user
+        .as_ref()
+        .is_some_and(|user| is_dependabot_author(&user.login))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1300,16 +1241,16 @@ pub async fn fetch_pull_head(
 }
 
 /// Process one queue head. This uses serial REST calls: normal queue heads are few, and REST
-/// directly supports all commits, reviews, and mutations needed for strict checks.
+/// directly supports the live pull request, reviews, and exact-head mutations.
 /// The caller owns durable state and must not hold SQLite while this function runs.
 ///
-/// Shared entry point for both merge strategies (requirement 3): it always validates the exact
-/// head as complete Dependabot-owned history and secures the PAT's approval at that head. Only
+/// Shared entry point for both merge strategies (requirement 3): it verifies that the live pull
+/// request is Dependabot-authored and secures the PAT's approval at the exact current head. Only
 /// when `strategy` is [`MergeQueueStrategy::Direct`] does it then issue the direct
 /// `PUT /merge` / `PUT /update-branch` mutations; for `MergeQueue`/`Unknown` it stops after
-/// validation+approval and returns [`MergeRemoteOutcome::Prepared`] so the orchestrator can
-/// resolve/cache the policy and drive the GraphQL merge-queue flow instead — the direct
-/// merge/update endpoints are never touched for a queue-governed branch (requirement 5).
+/// author verification and approval and returns [`MergeRemoteOutcome::Prepared`] so the
+/// orchestrator can resolve/cache the policy and drive the GraphQL merge-queue flow instead — the
+/// direct merge/update endpoints are never touched for a queue-governed branch (requirement 5).
 pub async fn process_dependabot_merge_operation<Cancelled>(
     client: &reqwest::Client,
     token: &str,
@@ -1349,7 +1290,7 @@ where
         });
     }
 
-    if !is_dependabot_author(pull.user.as_ref().map(|u| u.login.as_str()).unwrap_or("")) {
+    if !merge_pull_has_trusted_author(&pull) {
         return Ok(MergeRemoteResult {
             outcome: MergeRemoteOutcome::PermanentFailure {
                 code: "not_dependabot",
@@ -1386,74 +1327,23 @@ where
         });
     }
 
-    // An unchanged head has already passed authorship validation and carries the PAT owner's
-    // approval. Skip expensive commit pagination, but re-check reviews if GitHub reports the
-    // PR blocked so a dismissed approval cannot deadlock the operation.
-    let head_already_prepared = operation.state == "delegated"
+    // The live PR author is the provenance boundary. Later workflow or human pushes are allowed,
+    // but the exact current head must still carry the PAT owner's approval before it can merge.
+    // Re-check reviews when GitHub reports the PR blocked so a dismissed approval cannot deadlock
+    // the operation.
+    let head_already_approved = operation.state == "delegated"
         && operation.observed_head_sha.as_deref() == Some(head_sha.as_str())
-        && operation.validated_head_sha.as_deref() == Some(head_sha.as_str())
         && operation.approved_head_sha.as_deref() == Some(head_sha.as_str());
     let needs_approval = pull.mergeable_state.as_deref() != Some("behind")
-        && (!head_already_prepared || pull.mergeable_state.as_deref() == Some("blocked"));
-    let needs_identity = !head_already_prepared || needs_approval;
-    let login: Option<MergeLogin> = if needs_identity {
-        Some(
-            merge_json(
-                authed_get(client, &format!("{API_BASE}/user"), token),
-                "authenticated user",
-                &mut rates,
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
+        && (!head_already_approved || pull.mergeable_state.as_deref() == Some("blocked"));
 
-    if !head_already_prepared {
-        let commits: Vec<MergeCommit> = merge_pages(
-            client,
-            format!(
-                "{API_BASE}/repos/{}/pulls/{}/commits?per_page={DEPENDABOT_PER_PAGE}",
-                operation.repo_full_name, operation.number
-            ),
-            token,
-            "pull request commits",
+    if needs_approval {
+        let login: MergeLogin = merge_json(
+            authed_get(client, &format!("{API_BASE}/user"), token),
+            "authenticated user",
             &mut rates,
         )
         .await?;
-        let update_from = work.update_branch_from_sha.as_deref();
-        let commit_validation = merge_commits_are_safe(
-            &commits,
-            &head_sha,
-            &login
-                .as_ref()
-                .expect("identity fetched for commit validation")
-                .login,
-            update_from,
-        );
-        if commit_validation == MergeCommitValidation::HeadChanged {
-            return Err(MergeRemoteError {
-                class: MergeErrorClass::Transient,
-                message: "The pull request head changed during commit validation; retrying."
-                    .to_string(),
-                rates,
-            });
-        }
-        if commit_validation == MergeCommitValidation::Unsafe {
-            return Ok(MergeRemoteResult {
-                outcome: MergeRemoteOutcome::PermanentFailure {
-                    code: "non_dependabot_commit",
-                    reason:
-                        "Helix could not validate the complete current commit history as Dependabot-owned."
-                            .to_string(),
-                },
-                rates,
-            });
-        }
-    }
-
-    if needs_approval {
-        let login = login.as_ref().expect("identity fetched when needed");
         let reviews: Vec<MergeReview> = merge_pages(
             client,
             format!(
@@ -1497,9 +1387,9 @@ where
         }
     }
 
-    // Validation + approval are complete. For a queue-governed branch (or one whose policy
-    // hasn't been resolved yet) stop here and hand back the validated head, base ref, and node
-    // id: the orchestrator resolves/caches the strategy and, when it's a merge queue, drives the
+    // Author verification + approval are complete. For a queue-governed branch (or one whose
+    // policy hasn't been resolved yet) stop here and hand back the accepted head, base ref, and
+    // node id: the orchestrator resolves/caches the strategy and, when it's a merge queue, drives the
     // GraphQL auto-merge/enqueue flow. The direct merge/update endpoints below run only for a
     // conclusively `Direct` branch.
     if !matches!(strategy, MergeQueueStrategy::Direct) {
@@ -2047,7 +1937,7 @@ where
     Ok(MutationOutcome::Applied)
 }
 
-/// Update a PR branch from its base, guarded by the exact validated head SHA and cancellation.
+/// Update a PR branch from its base, guarded by the exact accepted head SHA and cancellation.
 pub async fn update_pull_request_branch<Cancelled>(
     client: &reqwest::Client,
     token: &str,
@@ -3136,89 +3026,32 @@ mod tests {
     }
 
     #[test]
-    fn commit_validation_accepts_only_the_expected_pat_update_merge() {
-        let commit = |sha: &str, author: &str, parents: &[&str]| MergeCommit {
-            sha: sha.to_string(),
-            author: Some(SubjectUser {
+    fn merge_trust_boundary_depends_only_on_live_pr_author() {
+        let pull = |author: &str, head: &str| MergePull {
+            state: "open".to_string(),
+            draft: false,
+            merged_at: None,
+            user: Some(SubjectUser {
                 login: author.to_string(),
             }),
-            parents: parents
-                .iter()
-                .map(|sha| MergeCommitParent {
-                    sha: (*sha).to_string(),
-                })
-                .collect(),
+            mergeable_state: Some("clean".to_string()),
+            head: MergeHead {
+                sha: head.to_string(),
+            },
+            node_id: "PR_node".to_string(),
+            base: Some(MergeBase {
+                ref_name: "main".to_string(),
+            }),
         };
-        let dependabot = commit("old-head", "dependabot[bot]", &["base"]);
-        let expected_update = commit("update-1", "octocat", &["old-head", "new-base"]);
-        assert_eq!(
-            merge_commits_are_safe(
-                &[dependabot, expected_update],
-                "update-1",
-                "octocat",
-                Some("old-head")
-            ),
-            MergeCommitValidation::Safe
-        );
 
-        for invalid in [
-            commit("update-1", "octocat", &["old-head"]),
-            commit("update-1", "octocat", &["new-base", "old-head"]),
-            commit("update-1", "octocat", &["old-head", "new-base", "other"]),
-        ] {
-            assert_eq!(
-                merge_commits_are_safe(
-                    &[commit("old-head", "dependabot[bot]", &["base"]), invalid],
-                    "update-1",
-                    "octocat",
-                    Some("old-head")
-                ),
-                MergeCommitValidation::Unsafe
-            );
-        }
-        let updates = [
-            commit("old-head", "dependabot[bot]", &["base"]),
-            commit("update-1", "octocat", &["old-head", "new-base-1"]),
-            commit("update-2", "octocat", &["update-1", "new-base-2"]),
-        ];
-        assert_eq!(
-            merge_commits_are_safe(&updates, "update-2", "octocat", Some("old-head")),
-            MergeCommitValidation::Safe
-        );
-        assert_eq!(
-            merge_commits_are_safe(&updates, "update-2", "octocat", Some("update-1")),
-            MergeCommitValidation::Safe
-        );
-        assert_eq!(
-            merge_commits_are_safe(
-                &[
-                    commit("old-head", "dependabot[bot]", &["base"]),
-                    commit("update-1", "octocat", &["old-head", "new-base-1"]),
-                    commit("update-2", "octocat", &["update-1", "new-base-2"]),
-                    commit("update-3", "octocat", &["update-2", "new-base-3"])
-                ],
-                "update-3",
-                "octocat",
-                Some("update-2")
-            ),
-            MergeCommitValidation::Safe
-        );
-        assert_eq!(
-            merge_commits_are_safe(
-                &[commit("safe-prefix", "dependabot[bot]", &["base"])],
-                "unreturned-head",
-                "octocat",
-                None
-            ),
-            MergeCommitValidation::HeadChanged
-        );
-        let capped: Vec<_> = (0..250)
-            .map(|index| commit(&format!("commit-{index}"), "dependabot[bot]", &["parent"]))
-            .collect();
-        assert_eq!(
-            merge_commits_are_safe(&capped, "commit-249", "octocat", None),
-            MergeCommitValidation::Unsafe
-        );
+        assert!(merge_pull_has_trusted_author(&pull(
+            "dependabot[bot]",
+            "head-pushed-by-another-workflow"
+        )));
+        assert!(!merge_pull_has_trusted_author(&pull(
+            "octocat",
+            "dependabot-authored-head"
+        )));
     }
 
     #[test]
