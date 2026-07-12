@@ -40,6 +40,55 @@ export const ACTIVE_MERGE_STATES = new Set([
   "cancel_requested",
 ]);
 
+export const TERMINAL_MERGE_STATES = new Set(["merged", "cancelled", "failed", "timed_out"]);
+
+/** Labels for terminal states used in announcements. */
+export const TERMINAL_LABELS_ANNOUNCE = {
+  merged: "merged",
+  cancelled: "cancelled",
+  failed: "failed",
+  timed_out: "timed out",
+};
+
+/** Diff old and new operation lists, returning only *new* terminal transitions: operations
+ *  whose state changed to a terminal state since the previous snapshot. Returns an array of
+ *  `{ id, title, number, repo_full_name, state }` objects, one per newly-terminal operation.
+ *  An unchanged terminal operation (same id + same state) is *not* included — it's old news. */
+export function diffOperationStates(oldOps, newOps) {
+  const oldById = new Map(oldOps.map((op) => [op.id, op]));
+  const transitions = [];
+  for (const op of newOps) {
+    if (!TERMINAL_MERGE_STATES.has(op.state)) continue;
+    const prev = oldById.get(op.id);
+    if (prev && prev.state === op.state) continue; // unchanged
+    transitions.push({
+      id: op.id,
+      title: op.title,
+      number: op.number,
+      repo_full_name: op.repo_full_name,
+      state: op.state,
+    });
+  }
+  return transitions;
+}
+
+/** Build a concise one-line summary of current operation state, suitable for announcing
+ *  when the user returns to the Dependabot module. Returns `null` if there are no operations
+ *  worth summarizing (no active work, no recent terminal events). */
+export function operationStateSummary(operations) {
+  const active = operations.filter(isActiveMergeOperation).length;
+  const merged = operations.filter((op) => op.state === "merged").length;
+  const failed = operations.filter(
+    (op) => op.state === "failed" || op.state === "timed_out",
+  ).length;
+  const parts = [];
+  if (active) parts.push(`${active} active`);
+  if (merged) parts.push(`${merged} merged`);
+  if (failed) parts.push(`${failed} failed`);
+  if (!parts.length) return null;
+  return `Operations: ${parts.join(", ")}.`;
+}
+
 export function isActiveMergeOperation(operation) {
   return ACTIVE_MERGE_STATES.has(operation.state);
 }

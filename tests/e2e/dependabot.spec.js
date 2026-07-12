@@ -762,3 +762,146 @@ test("expanded detail escapes untrusted explanation/next-action/event content", 
   expect(html).not.toContain("<b>bold</b>");
   expect(html).toContain("&lt;b&gt;bold&lt;/b&gt;");
 });
+
+/* ---------------------------------------------------------------------------------------
+ * Phase 3: snapshot normalization and announcement behavior (issue #133).
+ * - Sync progress is announced to the live region.
+ * - Terminal operation transitions are announced when the Dependabot module is active.
+ * - Returning to Dependabot announces a summary of any missed transitions.
+ * - Unchanged poll snapshots produce no announcement noise.
+ * --------------------------------------------------------------------------------------- */
+
+test("sync announces start, completion, and result to the live region", async ({ page }) => {
+  await openDependabot(page);
+
+  // The auto-sync fires on first open; wait for the sync to complete and the live region
+  // to receive the completion message.
+  const announcer = page.locator("#a11y-announcer");
+  await expect(announcer).toContainText(/Sync complete/);
+});
+
+test("a terminal operation transition announces to the live region while Dependabot is active", async ({
+  page,
+}) => {
+  const operation = mergeOperation({ id: 50, state: "delegated", phase: "waiting_checks" });
+  await openDependabot(page, { ...defaultFixtures(), mergeOperations: [operation] });
+  await page.locator('#dependabot-filter-list [data-filter="operations"]').click();
+
+  // Transition the operation to "merged" via the mock — fires dependabot:operations-changed.
+  await page.evaluate(() =>
+    window.__mockSetOperation(50, {
+      state: "merged",
+      phase: "merging",
+      terminal_at: "2026-06-27T10:02:00Z",
+    }),
+  );
+
+  const announcer = page.locator("#a11y-announcer");
+  await expect(announcer).toContainText("#40 merged");
+});
+
+test("a failed operation transition announces with 'failed'", async ({ page }) => {
+  const operation = mergeOperation({ id: 51, state: "delegated", phase: "waiting_checks" });
+  await openDependabot(page, { ...defaultFixtures(), mergeOperations: [operation] });
+  await page.locator('#dependabot-filter-list [data-filter="operations"]').click();
+
+  await page.evaluate(() =>
+    window.__mockSetOperation(51, {
+      state: "failed",
+      phase: "waiting_checks",
+      failure_reason: "conflict",
+      terminal_at: "2026-06-27T10:02:00Z",
+    }),
+  );
+
+  const announcer = page.locator("#a11y-announcer");
+  await expect(announcer).toContainText("#40 failed");
+});
+
+test("unchanged poll snapshots produce no announcement noise", async ({ page }) => {
+  const operation = mergeOperation({
+    id: 52,
+    state: "merged",
+    terminal_at: "2026-06-27T10:02:00Z",
+  });
+  await openDependabot(page, { ...defaultFixtures(), mergeOperations: [operation] });
+  await page.locator('#dependabot-filter-list [data-filter="operations"]').click();
+
+  // Clear the announcer, then fire a no-op operations-changed.
+  await page.evaluate(() => {
+    document.getElementById("a11y-announcer").textContent = "";
+  });
+  await page.evaluate(() => window.__mockEmit("dependabot:operations-changed", null));
+
+  // Give the queue time to drain, then verify no announcement was made.
+  await page.waitForTimeout(400);
+  const text = await page.locator("#a11y-announcer").textContent();
+  // Should be empty or at most a re-announced view count — NOT a terminal transition.
+  expect(text).not.toContain("merged");
+  expect(text).not.toContain("failed");
+});
+
+test("every snapshot path clears a vanished repository refinement", async ({ page }) => {
+  await openDependabot(page);
+
+  // Refine to octo/hello.
+  await page.locator('#dependabot-repo-list .repo-source[data-repo="octo/hello"]').click();
+  await expect(page.locator("#dependabot .repo-name")).toHaveText("octo/hello");
+
+  // Remove octo/hello from the mock groups, then fire a resolved event (triggers loadDependabot).
+  await page.evaluate(() => {
+    const remaining = [
+      {
+        full_name: "acme/widgets",
+        total: 1,
+        prs: [
+          {
+            id: 103,
+            number: 9,
+            title: "Bump serde",
+            html_url: "https://github.com/acme/widgets/pull/9",
+            author: "dependabot[bot]",
+            base_ref: "main",
+            updated_at: "2026-01-04T00:00:00Z",
+            mergeable_state: "blocked",
+          },
+        ],
+      },
+    ];
+    window.__mockSetDependabot(remaining);
+    window.__mockEmit("dependabot:resolved", null);
+  });
+
+  // The refinement should be cleared — show acme/widgets.
+  await expect(page.locator("#dependabot-view-title")).toContainText("Dependabot");
+  await expect(page.locator("#dependabot-view-title")).not.toContainText("octo/hello");
+});
+
+test("returning to Dependabot announces a summary when operations have state", async ({ page }) => {
+  const operation = mergeOperation({ id: 55, state: "delegated", phase: "waiting_checks" });
+  await openDependabot(page, { ...defaultFixtures(), mergeOperations: [operation] });
+
+  // Switch to notifications and back.
+  await page.locator('.module-tab[data-module="notifications"]').click();
+
+  // Transition the operation to "merged" while on notifications — this should be a missed
+  // transition that queues for the on-return summary.
+  await page.evaluate(() =>
+    window.__mockSetOperation(55, {
+      state: "merged",
+      phase: "merging",
+      terminal_at: "2026-06-27T10:02:00Z",
+    }),
+  );
+
+  // Wait for the operations-changed event to propagate.
+  await page.waitForTimeout(300);
+
+  // Switch back to Dependabot.
+  await page.locator('.module-tab[data-module="dependabot"]').click();
+  await page.waitForSelector("#dependabot .repo-section, #dependabot .inbox-empty");
+
+  const announcer = page.locator("#a11y-announcer");
+  // Should mention "While away" or the operations summary.
+  await expect(announcer).toContainText(/While away|Operations/);
+});

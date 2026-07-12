@@ -1,12 +1,15 @@
 import { invoke, listen } from "./api.js";
-import { $, html, toast, announce } from "./dom.js";
+import { $, html, toast, enqueueAnnounce, clearAnnounceQueue } from "./dom.js";
 import { POLL_TICK_MS, STATES } from "./constants.js";
 import { relTime } from "./format.js";
 import {
   activeMergeCount,
+  diffOperationStates,
   filterDependabotGroups,
   isActiveMergeOperation,
+  operationStateSummary,
   sortMergeOperations,
+  TERMINAL_LABELS_ANNOUNCE,
   totalPrs,
 } from "./dependabot-model.js";
 import { operationsList, repoSection } from "./dependabot-view.js";
@@ -15,6 +18,7 @@ import { isAuthenticated } from "./account.js";
 import { closeMenu, isMenuOpen, openContextMenu } from "./menu.js";
 import { isShortcutsOpen } from "./shortcuts.js";
 import { dependabotMergePoll } from "./state.js";
+import { getActiveModule } from "./modules.js";
 
 /* The Dependabot module: a read-only list of open Dependabot PRs grouped by repository, its
  * repo-only sidebar refinement, keyboard navigation, and its own sync flow. Pure row/section
@@ -54,9 +58,90 @@ let operationDetailGeneration = 0;
 const pendingDiscardPrIds = new Set();
 const discardRequestsInFlight = new Set();
 
+/** Terminal transitions that arrived while another module was active. Accumulated by
+ *  `applySnapshot` and flushed by `onDependabotOpened` as a concise on-return summary. */
+let missedTransitions = [];
+
+/** Whether we've received at least one operation snapshot. The first snapshot establishes a
+ *  baseline — its terminal operations are not announced as transitions, since they may be
+ *  historical state loaded from SQLite on startup. */
+let hasOperationBaseline = false;
+
 /** Auto-sync-on-open only fires if we've never synced this session or it's been at least
  *  this long since the last sync — so repeated opens don't re-scan the repo list every time. */
 const AUTO_SYNC_STALE_MS = 5 * 60 * 1000;
+
+/** Whether the Dependabot module is the currently visible module. */
+function isDependabotActive() {
+  return getActiveModule() === "dependabot";
+}
+
+/* ------------------------------ Unified snapshot ------------------------------ */
+
+/** Single path for applying a new `{ groups, operations }` snapshot to module state.
+ *  Every snapshot-loading path (`loadDependabot`, `reloadOperations`,
+ *  `startDependabotMergePolling`) must use this instead of inlining the logic.
+ *
+ *  Handles:
+ *  1. Replacing `depGroups` and `mergeOperations`.
+ *  2. Clearing a vanished `activeRepo` refinement.
+ *  3. Invalidating a vanished `expandedOperationId` and bumping `operationDetailGeneration`.
+ *  4. Diffing old/new operation states and announcing terminal transitions (or queuing them
+ *     as `missedTransitions` when another module is active). */
+function applySnapshot(groups, operations) {
+  const oldOps = mergeOperations;
+  depGroups = groups;
+  mergeOperations = operations;
+
+  // (1) Clear a repo refinement whose repository no longer exists in the new snapshot.
+  if (activeRepo != null && !depGroups.some((g) => g.full_name === activeRepo)) {
+    activeRepo = null;
+  }
+
+  // (2) Invalidate a vanished expanded operation and stale detail request.
+  if (expandedOperationId != null && !mergeOperations.some((op) => op.id === expandedOperationId)) {
+    expandedOperationId = null;
+    operationDetailGeneration += 1;
+  }
+
+  // (3) Diff for terminal transitions and announce or queue them. Skip on the first
+  //     snapshot (establishing the baseline) so historical terminal operations from SQLite
+  //     are not falsely announced as new transitions on startup.
+  if (!hasOperationBaseline) {
+    hasOperationBaseline = true;
+  } else {
+    const transitions = diffOperationStates(oldOps, mergeOperations);
+    if (transitions.length) {
+      if (isDependabotActive()) {
+        for (const t of transitions) {
+          const label = TERMINAL_LABELS_ANNOUNCE[t.state] || t.state;
+          enqueueAnnounce(`#${t.number} ${label}.`);
+        }
+      } else {
+        missedTransitions.push(...transitions);
+      }
+    }
+  }
+}
+
+/** Announce a concise on-return summary of operation state and any missed transitions that
+ *  arrived while another module was active. */
+function announceReturnSummary() {
+  // First, flush missed transitions.
+  if (missedTransitions.length) {
+    const counts = {};
+    for (const t of missedTransitions) {
+      const label = TERMINAL_LABELS_ANNOUNCE[t.state] || t.state;
+      counts[label] = (counts[label] || 0) + 1;
+    }
+    const parts = Object.entries(counts).map(([label, n]) => `${n} ${label}`);
+    enqueueAnnounce(`While away: ${parts.join(", ")}.`);
+    missedTransitions = [];
+  }
+  // Then, summarize current state.
+  const summary = operationStateSummary(mergeOperations);
+  if (summary) enqueueAnnounce(summary);
+}
 
 const REPO_ICON = `<svg viewBox="0 0 16 16" width="15" height="15"><path d="M3 2.5h7.5L13 5v8.5H3z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M5 6h4M5 8.5h6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>`;
 // Matches the notifications "All" smart-filter icon for cross-module consistency.
@@ -223,11 +308,11 @@ async function continueDiscard(prId) {
     const result = await invoke("discard_dependabot_pr", { prId });
     if (result.status === "closed") {
       pendingDiscardPrIds.delete(prId);
-      announce("Pull request discarded and closed.");
+      enqueueAnnounce("Pull request discarded and closed.");
       await loadDependabot();
       return;
     }
-    announce("Cancelling merge before closing pull request.");
+    enqueueAnnounce("Cancelling merge before closing pull request.");
     await reloadOperations();
     operationPollElapsed = Number.POSITIVE_INFINITY;
     processMergeOperations();
@@ -336,13 +421,15 @@ function renderTitle() {
 function announceView() {
   if (activeView === "operations") {
     const count = mergeOperations.length;
-    announce(`Dependabot merge operations, ${count} ${count === 1 ? "operation" : "operations"}.`);
+    enqueueAnnounce(
+      `Dependabot merge operations, ${count} ${count === 1 ? "operation" : "operations"}.`,
+    );
     return;
   }
   const count = totalPrs(visibleGroups());
   const noun = count === 1 ? "pull request" : "pull requests";
   const where = activeRepo != null ? `Dependabot, repository ${activeRepo}` : "Dependabot";
-  announce(`${where}, ${count} ${noun}.`);
+  enqueueAnnounce(`${where}, ${count} ${noun}.`);
 }
 
 /** Toggle the repository refinement: select it, or clear it if already active. */
@@ -388,12 +475,7 @@ export async function loadDependabot() {
       invoke("list_dependabot_merge_operations"),
     ]);
     if (generation !== loadGeneration) return;
-    depGroups = groups;
-    mergeOperations = operations;
-    // Drop a repo refinement whose repository is no longer present.
-    if (activeRepo != null && !depGroups.some((g) => g.full_name === activeRepo)) {
-      activeRepo = null;
-    }
+    applySnapshot(groups, operations);
     renderTitle();
     renderSidebar();
     renderList();
@@ -411,15 +493,7 @@ async function reloadOperations() {
       invoke("list_dependabot_merge_operations"),
     ]);
     if (generation !== loadGeneration) return;
-    depGroups = groups;
-    mergeOperations = operations;
-    if (
-      expandedOperationId != null &&
-      !mergeOperations.some((operation) => operation.id === expandedOperationId)
-    ) {
-      expandedOperationId = null;
-      operationDetailGeneration += 1;
-    }
+    applySnapshot(groups, operations);
     renderSidebar();
     if (!$("#view-dependabot")?.hidden) renderList();
     if (expandedOperationId != null) refreshExpandedOperationDetail();
@@ -529,7 +603,7 @@ function onListKeydown(e) {
 async function enqueueMerge(prId) {
   try {
     await invoke("enqueue_dependabot_merge", { prId: Number(prId) });
-    announce("Merge queued.");
+    enqueueAnnounce("Merge queued.");
     await reloadOperations();
     operationPollElapsed = Number.POSITIVE_INFINITY;
     processMergeOperations();
@@ -543,7 +617,9 @@ async function cancelMerge(operationId) {
     const operation = await invoke("cancel_dependabot_merge", {
       operationId: Number(operationId),
     });
-    announce(operation.state === "cancelled" ? "Merge operation cancelled." : "Cancelling merge.");
+    enqueueAnnounce(
+      operation.state === "cancelled" ? "Merge operation cancelled." : "Cancelling merge.",
+    );
     await reloadOperations();
     operationPollElapsed = Number.POSITIVE_INFINITY;
     processMergeOperations();
@@ -609,8 +685,7 @@ export async function startDependabotMergePolling() {
     ]);
     if (pollGeneration !== pollStartGeneration) return;
     if (generation === loadGeneration) {
-      depGroups = groups;
-      mergeOperations = operations;
+      applySnapshot(groups, operations);
       applyMergeStatus(status);
       renderSidebar();
       if (!$("#view-dependabot")?.hidden) renderList();
@@ -744,6 +819,7 @@ export async function syncDependabot() {
   syncing = true;
   setDepStatus("pending", "Syncing…");
   setDepProgress("Starting…");
+  enqueueAnnounce("Dependabot sync started.");
   try {
     const result = await invoke("sync_dependabot");
     lastSyncAt = Date.now();
@@ -754,8 +830,10 @@ export async function syncDependabot() {
       // Some repos couldn't be read (e.g. a 404 from a repo the token lacks PR access to) or
       // the scan stopped on the quota reserve. Surface it as a neutral note, not an error.
       setDepProgress(`${detail} Some repositories were skipped — check token access.`, "");
+      enqueueAnnounce(`Sync partially complete. ${detail}`);
     } else {
       setDepProgress(detail, "success");
+      enqueueAnnounce(`Sync complete. ${detail}`);
     }
     setDepStatus("success", "Synced just now");
     await loadDependabot();
@@ -767,6 +845,7 @@ export async function syncDependabot() {
       ? "GitHub is rate-limiting requests right now. Wait a few minutes, then sync again."
       : raw;
     setDepProgress(friendly, "error");
+    enqueueAnnounce("Dependabot sync failed.");
   } finally {
     // Only now clear the in-flight flag — kept true through the UI updates + loadDependabot
     // above so a quick `r`/re-trigger can't start a concurrent sync.
@@ -781,9 +860,11 @@ export async function syncDependabot() {
 }
 
 /** Called by main.js when the Dependabot module becomes active: render cached PRs, then
- *  auto-sync if stale (never synced this session, or older than the staleness window). */
+ *  auto-sync if stale (never synced this session, or older than the staleness window). Also
+ *  announces a concise summary of current operation state and any missed terminal transitions. */
 export async function onDependabotOpened() {
-  loadDependabot();
+  await loadDependabot();
+  announceReturnSummary();
   if (!isAuthenticated()) return;
   // Wait for the persisted last-sync time to load before the staleness gate, so restoring into
   // the Dependabot module doesn't re-scan when a recent sync (from a previous run) is still

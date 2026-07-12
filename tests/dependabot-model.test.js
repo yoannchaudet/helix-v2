@@ -6,15 +6,18 @@ import {
   buildActionLog,
   buildOperationDetailModel,
   buildOperationGraph,
+  diffOperationStates,
   filterDependabotGroups,
   githubQueueSummary,
   isActiveMergeOperation,
+  operationStateSummary,
   PHASES,
   queueSummary,
   repoDomId,
   retrySummary,
   sortMergeOperations,
   STRATEGIES,
+  TERMINAL_LABELS_ANNOUNCE,
   totalPrs,
 } from "../src/js/dependabot-model.js";
 
@@ -387,4 +390,82 @@ test("buildOperationGraph surfaces Helix's own queue_position on the shared 'que
     merge_queue_position: 9,
   });
   assert.equal(nodeById(other, "queued").detail, "");
+});
+
+/* ---------------------------------------------------------------------------------------
+ * Phase 3: diffOperationStates, operationStateSummary, and TERMINAL_LABELS_ANNOUNCE — the
+ * snapshot-unification and announcement helpers added by issue #133.
+ * --------------------------------------------------------------------------------------- */
+
+function op(id, state, title = `PR ${id}`) {
+  return { id, state, title, number: id, repo_full_name: "octo/hello" };
+}
+
+test("diffOperationStates detects newly-terminal operations", () => {
+  const oldOps = [op(1, "delegated"), op(2, "queued")];
+  const newOps = [op(1, "merged"), op(2, "queued")];
+  const diff = diffOperationStates(oldOps, newOps);
+  assert.equal(diff.length, 1);
+  assert.equal(diff[0].id, 1);
+  assert.equal(diff[0].state, "merged");
+});
+
+test("diffOperationStates ignores unchanged terminal operations", () => {
+  const oldOps = [op(1, "merged")];
+  const newOps = [op(1, "merged")];
+  assert.deepEqual(diffOperationStates(oldOps, newOps), []);
+});
+
+test("diffOperationStates detects multiple transitions in one snapshot", () => {
+  const oldOps = [op(1, "delegated"), op(2, "delegated"), op(3, "queued")];
+  const newOps = [op(1, "merged"), op(2, "failed"), op(3, "queued")];
+  const diff = diffOperationStates(oldOps, newOps);
+  assert.equal(diff.length, 2);
+  assert.deepEqual(
+    diff.map((d) => d.state),
+    ["merged", "failed"],
+  );
+});
+
+test("diffOperationStates detects a brand-new terminal operation (not in oldOps)", () => {
+  const diff = diffOperationStates([], [op(1, "cancelled")]);
+  assert.equal(diff.length, 1);
+  assert.equal(diff[0].state, "cancelled");
+});
+
+test("diffOperationStates returns empty for no terminal changes", () => {
+  const oldOps = [op(1, "queued")];
+  const newOps = [op(1, "delegated")];
+  assert.deepEqual(diffOperationStates(oldOps, newOps), []);
+});
+
+test("operationStateSummary returns null for empty operations", () => {
+  assert.equal(operationStateSummary([]), null);
+});
+
+test("operationStateSummary returns null for only cancelled operations", () => {
+  assert.equal(operationStateSummary([op(1, "cancelled")]), null);
+});
+
+test("operationStateSummary summarizes active, merged, and failed counts", () => {
+  const ops = [
+    op(1, "queued"),
+    op(2, "delegated"),
+    op(3, "merged"),
+    op(4, "failed"),
+    op(5, "timed_out"),
+  ];
+  assert.equal(operationStateSummary(ops), "Operations: 2 active, 1 merged, 2 failed.");
+});
+
+test("operationStateSummary omits zero-count categories", () => {
+  assert.equal(operationStateSummary([op(1, "merged")]), "Operations: 1 merged.");
+  assert.equal(operationStateSummary([op(1, "queued")]), "Operations: 1 active.");
+});
+
+test("TERMINAL_LABELS_ANNOUNCE has human-readable labels for all terminal states", () => {
+  assert.equal(TERMINAL_LABELS_ANNOUNCE.merged, "merged");
+  assert.equal(TERMINAL_LABELS_ANNOUNCE.cancelled, "cancelled");
+  assert.equal(TERMINAL_LABELS_ANNOUNCE.failed, "failed");
+  assert.equal(TERMINAL_LABELS_ANNOUNCE.timed_out, "timed out");
 });
