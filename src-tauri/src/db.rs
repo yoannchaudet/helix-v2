@@ -331,6 +331,18 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE dependabot_prs ADD COLUMN base_ref TEXT;
     "#,
+    // v16 — separate GitHub's remote notification state from Helix's local done state.
+    // Notifications remain a faithful `all=true` mirror (including `unread`), while durable
+    // dismissals independently control inbox visibility. Preserve every existing tombstone.
+    r#"
+    ALTER TABLE notifications ADD COLUMN unread INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE notifications ADD COLUMN subject_updated_at TEXT;
+
+    ALTER TABLE done_tombstones RENAME TO notification_dismissals;
+    ALTER TABLE notification_dismissals RENAME COLUMN updated_at TO notification_updated_at;
+    ALTER TABLE notification_dismissals RENAME COLUMN done_at TO dismissed_at;
+    ALTER TABLE notification_dismissals ADD COLUMN subject_updated_at TEXT;
+    "#,
 ];
 
 /// Open the database at `db_path`, apply any pending migrations, and return the
@@ -407,7 +419,7 @@ mod tests {
             "dependabot_merge_check_retries",
             "dependabot_merge_policies",
             "dependabot_merge_runtime",
-            "done_tombstones",
+            "notification_dismissals",
             "notifications",
             "rate_limits",
             "repos",
@@ -429,9 +441,9 @@ mod tests {
         std::fs::remove_file(&db_path).ok();
     }
 
-    /// Exercise the real upgrade path: a populated v2 database (with the dropped `unread`
-    /// column, its index, and a data row) migrates to the latest schema, dropping the
-    /// read-status columns while preserving the row, and adding `done_tombstones`.
+    /// Exercise the real upgrade path: a populated v2 database (with the original `unread`
+    /// column, its index, and a data row) migrates to the latest schema while preserving the
+    /// row and restoring the remote unread signal in the current model.
     #[test]
     fn upgrade_from_populated_v2_drops_read_columns_and_keeps_data() {
         let conn = Connection::open_in_memory().unwrap();
@@ -457,11 +469,11 @@ mod tests {
         )
         .unwrap();
 
-        // Run the remaining migrations (v3 drop-columns, v4 tombstones).
+        // Run the remaining migrations (including v3's drop and v16's remote-state restore).
         run_migrations(&conn).unwrap();
         assert_eq!(schema_version(&conn).unwrap(), MIGRATIONS.len() as i64);
 
-        // The read-status columns are gone; the data row survives.
+        // `last_read_at` stays gone, while the remote unread signal is restored.
         let cols: Vec<String> = {
             let mut stmt = conn.prepare("PRAGMA table_info(notifications)").unwrap();
             let rows = stmt
@@ -471,7 +483,8 @@ mod tests {
                 .unwrap();
             rows
         };
-        assert!(!cols.contains(&"unread".to_string()));
+        assert!(cols.contains(&"unread".to_string()));
+        assert!(cols.contains(&"subject_updated_at".to_string()));
         assert!(!cols.contains(&"last_read_at".to_string()));
         let title: String = conn
             .query_row(
@@ -482,6 +495,44 @@ mod tests {
             .unwrap();
         assert_eq!(title, "Hi");
         assert!(table_names(&conn)
+            .unwrap()
+            .contains(&"notification_dismissals".to_string()));
+    }
+
+    #[test]
+    fn upgrade_from_v15_preserves_done_tombstones_as_dismissals() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        for migration in &MIGRATIONS[..15] {
+            conn.execute_batch(migration).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 15).unwrap();
+        conn.execute(
+            "INSERT INTO done_tombstones (thread_id, updated_at, done_at)
+             VALUES ('t1', '2026-01-02T00:00:00Z', '2026-01-03T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        run_migrations(&conn).unwrap();
+
+        let dismissal: (Option<String>, String, Option<String>) = conn
+            .query_row(
+                "SELECT notification_updated_at, dismissed_at, subject_updated_at
+                 FROM notification_dismissals WHERE thread_id = 't1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            dismissal,
+            (
+                Some("2026-01-02T00:00:00Z".to_string()),
+                "2026-01-03T00:00:00Z".to_string(),
+                None,
+            )
+        );
+        assert!(!table_names(&conn)
             .unwrap()
             .contains(&"done_tombstones".to_string()));
     }

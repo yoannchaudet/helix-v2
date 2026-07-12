@@ -161,7 +161,7 @@ where
     };
 
     let result = SyncResult {
-        count: stored.stored,
+        count: stored.visible,
         removed: stored.removed,
         rate_remaining: outcome.rate.remaining,
     };
@@ -578,6 +578,11 @@ mod tests {
             .unwrap()
     }
 
+    fn visible_notification_count(db: &Db) -> i64 {
+        let conn = db.0.lock().unwrap();
+        sync::visible_count(&conn).unwrap()
+    }
+
     fn status(db: &Db) -> sync::SyncStatus {
         let conn = db.0.lock().unwrap();
         sync::read_status(&conn).unwrap()
@@ -658,6 +663,7 @@ mod tests {
                 subject_type: "Issue".to_string(),
             },
             reason: "subscribed".to_string(),
+            unread: true,
             updated_at: "2026-01-02T00:00:00Z".to_string(),
             url: format!("https://api.github.com/notifications/threads/{id}"),
         }
@@ -807,7 +813,35 @@ mod tests {
         assert_eq!(result.ok, 3);
         assert!(result.failed.is_empty());
         assert_eq!(result.rate_remaining, Some(4900));
-        assert_eq!(notification_count(&db), 0, "done threads are removed");
+        assert_eq!(notification_count(&db), 3, "remote rows remain mirrored");
+        assert_eq!(
+            visible_notification_count(&db),
+            0,
+            "done threads are hidden"
+        );
+    }
+
+    #[test]
+    fn done_thread_stays_hidden_after_false_remote_timestamp_bump() {
+        let db = db_with_token();
+        store(&db, &[thread("1", 100, "octo/repo-a", "First")]);
+
+        let result = tauri::async_runtime::block_on(mutate_threads(
+            &db,
+            vec!["1".into()],
+            |_token, _id| async move { Ok(rate("core", 4900, 5000)) },
+            sync::mark_done_local,
+        ))
+        .unwrap();
+        assert_eq!(result.ok, 1);
+
+        let mut bumped = thread("1", 100, "octo/repo-a", "First");
+        bumped.unread = false;
+        bumped.updated_at = "2099-01-01T00:00:00Z".to_string();
+        store(&db, &[bumped]);
+
+        assert_eq!(notification_count(&db), 1);
+        assert_eq!(visible_notification_count(&db), 0);
     }
 
     #[test]
@@ -847,11 +881,18 @@ mod tests {
         assert_eq!(result.failed[0].thread_id, "bad-2");
         // Failed request's rate snapshot is folded in too — 4800 is the lowest seen.
         assert_eq!(result.rate_remaining, Some(4800));
-        // Only the two successes were removed; the failed thread specifically remains.
-        assert_eq!(notification_count(&db), 1);
+        // Only the two successes are dismissed; the failed thread specifically remains visible.
+        assert_eq!(notification_count(&db), 3);
+        assert_eq!(visible_notification_count(&db), 1);
         let conn = db.0.lock().unwrap();
         let remaining: String = conn
-            .query_row("SELECT thread_id FROM notifications", [], |r| r.get(0))
+            .query_row(
+                "SELECT n.thread_id FROM notifications n
+                 LEFT JOIN notification_dismissals d ON d.thread_id = n.thread_id
+                 WHERE d.thread_id IS NULL",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(remaining, "bad-2");
     }

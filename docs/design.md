@@ -120,6 +120,7 @@ CREATE TABLE notifications (
   subject_title  TEXT NOT NULL,
   subject_url    TEXT,                    -- API url to resolve PR/issue
   reason         TEXT,                    -- review_requested, mention, ...
+  unread         INTEGER NOT NULL DEFAULT 0, -- remote reactivation signal; not UI visibility
   updated_at     TEXT NOT NULL,           -- notification updated_at
   thread_url     TEXT,                    -- API url for the thread
   -- Resolved subject metadata (filled by cleanup resolution; nullable)
@@ -129,6 +130,7 @@ CREATE TABLE notifications (
   subject_author      TEXT,
   subject_merged_at   TEXT,
   subject_html_url    TEXT,
+  subject_updated_at  TEXT,               -- underlying subject activity timestamp
   resolved_at         TEXT,               -- when subject metadata was last resolved
   is_new              INTEGER NOT NULL DEFAULT 0, -- new/changed in the last sync; clears next sync
   fetched_at          TEXT NOT NULL       -- when this row was last synced
@@ -169,13 +171,13 @@ CREATE TABLE rate_limits (
   updated_at  TEXT NOT NULL
 );
 
--- Durable local record of threads the user marked done. GitHub's `DELETE` only removes a
--- thread from the *unread* list; `all=true` keeps returning done threads as "read", so we
--- remember "done" locally and suppress those threads until they genuinely re-surface.
-CREATE TABLE done_tombstones (
-  thread_id   TEXT PRIMARY KEY,
-  updated_at  TEXT,                       -- thread updated_at at mark-done time
-  done_at     TEXT NOT NULL               -- re-surface watermark (see reconciliation)
+-- Durable local visibility overlay for threads the user marked done. It is independent of
+-- the mirrored notification row and survives temporary or permanent remote omission.
+CREATE TABLE notification_dismissals (
+  thread_id                TEXT PRIMARY KEY,
+  notification_updated_at  TEXT,           -- remote notification generation at dismissal
+  dismissed_at             TEXT NOT NULL,  -- local stale-fetch watermark
+  subject_updated_at       TEXT            -- resolved subject generation at dismissal
 );
 
 CREATE TABLE bookmarks (                  -- local-only; snapshot survives done/removal
@@ -198,30 +200,34 @@ CREATE TABLE bookmarks (                  -- local-only; snapshot survives done/
 > **Bookmarks** are a local, never-synced overlay: bookmarking snapshots the thread's
 > notification data so a "Bookmarks" filter shows it even after it's marked done or drops off
 > GitHub's list. Snapshots refresh from the inbox on each sync while the thread is present.
-> Done-ness is derived on read (absent from `notifications` → done), so a done bookmark simply
-> hides its mark-as-done button (its absence implies the thread is already done).
+> Done-ness is derived on read (`notification_dismissals` contains the thread, or the mirrored
+> notification is absent), so a done bookmark simply hides its mark-as-done button.
 
-> Read state is intentionally **not** modeled: the original `unread` / `last_read_at`
-> columns were dropped once Helix switched to showing every notification until it is marked
-> *done*.
+> Remote `unread` is synchronization metadata only. It never controls ordinary inbox
+> visibility: Helix still shows read notifications until they are marked *done*. It is retained
+> solely to recognize a genuinely new generation after a dismissal. `last_read_at` is not stored.
 
 ### Reconciliation model
-- **Upsert:** each synced notification is `INSERT ... ON CONFLICT(thread_id) DO UPDATE`.
+- **Remote mirror:** each synced notification is unconditionally
+  `INSERT ... ON CONFLICT(thread_id) DO UPDATE`, including locally-done threads.
 - **Deletion/reconcile:** Helix fetches `all=true` (read and unread alike). After a full
   sync pass we delete local rows whose threads GitHub no longer lists (the set of fetched
-  thread ids, a temp table, identifies the stale rows). Locally-done threads are a
-  deliberate exception — GitHub keeps returning them, but tombstones keep them out (below).
-  Read state is not modeled: a notification is shown until it is marked **done** (the only
-  thing that removes it), here or elsewhere.
-- **Done threads & durable tombstones:** marking a thread done (`DELETE`) only removes it
-  from GitHub's *unread* list — `all=true` keeps returning it as "read". So Helix records a
-  durable row in `done_tombstones` and suppresses that thread on subsequent syncs until it
-  genuinely re-surfaces, i.e. its fetched `updated_at` is newer than the tombstone watermark
-  `max(updated_at, done_at)`. A tombstone is reaped once GitHub stops listing the thread.
+  thread ids, a temp table, identifies the stale rows). Reconciliation never deletes a local
+  dismissal, so one transient omission cannot resurrect a handled thread. Dismissals are
+  intentionally retained indefinitely: they are tiny, keyed rows, and GitHub thread IDs are
+  stable; correctness is preferable to guessing a safe expiry from an unreliable feed.
+- **Done threads & durable dismissals:** marking a thread done (`DELETE`) writes a
+  `notification_dismissals` snapshot and leaves the mirrored notification intact. Inbox queries
+  hide rows with a dismissal. A newer notification timestamp alone is not trusted: GitHub can
+  advance it without underlying activity.
+- **Verified reactivation:** a dismissal clears immediately when GitHub returns a newer
+  `unread = true` generation after `dismissed_at`. If genuine activity was marked read outside
+  Helix before the next poll, background resolution clears it when the subject's own
+  `updated_at` is newer than the captured subject generation and `dismissed_at`. Unsupported or
+  inaccessible subjects use the unread path only.
 - **Optimistic local mutation:** when the user marks a thread done, the UI updates
-  immediately; the core calls the API for each thread (bounded concurrency), then deletes
-  the local rows for the threads that succeeded (writing a tombstone) and reports per-thread
-  failures.
+  immediately; the core calls the API for each thread (bounded concurrency), then records
+  dismissals only for successful calls and reports per-thread failures.
 - The token is **not** stored in SQLite for release builds — see §8.
 
 ## 4. GitHub integration
@@ -271,7 +277,7 @@ A single coordinator in the Rust core:
 
 1. **Fetch** all notifications, read and unread (`all=true`, paginated, §4).
 2. **Upsert** repos + notifications into SQLite (§3).
-3. **Reconcile** rows missing from the latest pass (and honor done tombstones, §3).
+3. **Reconcile** mirrored rows missing from the latest pass while retaining dismissals (§3).
 4. **Resolve** subjects in the background — for **any** subject that carries a URL we fetch
    its `html_url` (so discussions, releases, etc. become clickable), and for
    PR/Issue/Discussion we also capture state/`merged_at`/`state_reason`/author. A bounded
@@ -311,7 +317,7 @@ single merged/closed/open state pill and does not classify issues further.)
 - The user clears them via the toolbar **••• → "Mark all as done"** over the visible
   (filtered) set, with an in-menu confirmation, or one at a time from a row's context menu.
 - Each thread is marked done via `DELETE /notifications/threads/{thread_id}` (bounded
-  concurrency); successes are removed locally and tombstoned (§3); failures are reported
+  concurrency); successes receive a local dismissal overlay (§3); failures are reported
   per-thread in 🔴 without aborting the rest.
 
 ## 7. UI / UX
@@ -469,7 +475,7 @@ module's **sidebar + content** split:
 
 ### Status
 The v1/MVP scope is implemented: Keychain/SQLite auth + settings, the paginated
-fetch → upsert → reconcile sync engine (with durable done tombstones and per-bucket
+fetch → upsert → reconcile sync engine (with durable notification dismissals and per-bucket
 rate-limit handling), the by-repo notifications view, background subject resolution, the
 **Cleanup** filter, and mark-as-done (single + bulk).
 
@@ -478,9 +484,9 @@ Per-thread mark-as-read, mute, unsubscribe; search; user-defined custom filter r
 menu-bar/badge background poller; and cross-platform support.
 
 ### Resolved decisions
-- **Reconcile vs. retain:** Helix fetches `all=true` and does not model read state — a
-  notification is shown until it is marked **done**. Because GitHub keeps done threads in the
-  `all=true` response, "done" is tracked locally via durable tombstones (§3).
+- **Reconcile vs. retain:** Helix fetches `all=true`; remote read state does not determine
+  ordinary visibility, so a notification is shown until it is marked **done**. GitHub threads
+  are mirrored independently while local done state is tracked via durable dismissals (§3).
 - **Subject resolution cost:** resolution runs in the background after a sync (not eagerly
   inline), bounded by a concurrent pool and a rate-limit reserve, so it never blocks the
   inbox or starves foreground syncs.

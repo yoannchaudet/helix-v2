@@ -14,28 +14,28 @@ use crate::github::{NotificationThread, RateLimit, ResolvedSubject};
 /// Outcome of a store + reconcile pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StoreOutcome {
-    /// Notifications upserted from the latest fetch.
+    /// Remote notifications upserted from the latest fetch.
     pub stored: usize,
+    /// Non-dismissed notifications visible after the pass.
+    pub visible: usize,
     /// Local notifications removed because they were no longer present upstream.
     pub removed: usize,
 }
 
 /// Upsert repos + notifications from a **complete** fetch and reconcile local state.
 ///
-/// `threads` must be the full current set of notifications GitHub returns for `all=true`
-/// (read **and** unread — and, unhelpfully, GitHub keeps returning *done* threads here too;
-/// they're filtered out locally via `done_tombstones`). Existing rows are updated in place;
-/// the subject-resolution columns (`subject_state`, `resolved_at`, …) are intentionally left
-/// untouched here — they are populated separately by `store_resolved_subject` after subjects
-/// are resolved.
+/// `threads` must be the full current set of notifications GitHub returns for `all=true`.
+/// Every fetched thread is mirrored regardless of local dismissal state. Existing rows are
+/// updated in place; the subject-resolution columns (`subject_state`, `resolved_at`, …) are
+/// intentionally left untouched here — they are populated separately by
+/// `store_resolved_subject` after subjects are resolved.
 ///
 /// Reconciliation (M5): any locally-stored notification absent from this fetch was removed
 /// upstream (e.g. the underlying repo became inaccessible), so it is deleted. Note this is
-/// *not* how marking-done works — GitHub keeps done threads in `all=true`, so done is handled
-/// by the local tombstones, not reconciliation. Repos left without any notifications are
-/// pruned so the table doesn't accumulate orphans. Stale rows are identified by the exact set
-/// of fetched thread ids rather than a timestamp watermark, so reconciliation is correct even
-/// when two syncs land within the same clock tick.
+/// *not* how marking-done works — GitHub keeps done threads in `all=true`, while
+/// `notification_dismissals` independently controls inbox visibility. Dismissals survive
+/// reconciliation so a temporary omission cannot resurrect a thread. Repos left without any
+/// mirrored notifications are pruned.
 pub fn store_notifications(
     conn: &mut Connection,
     threads: &[NotificationThread],
@@ -51,20 +51,17 @@ pub fn store_notifications(
          DELETE FROM present_threads;",
     )?;
 
-    // Count notifications actually written (tombstoned re-inserts are skipped below, so
-    // this can be less than `threads.len()`).
+    // Count notifications written from the complete fetch.
     let mut stored = 0usize;
 
-    // A done-tombstone is a *durable* local record that the user marked this thread done.
-    // It must persist for as long as GitHub keeps returning the thread, because
-    // `DELETE /notifications/threads/{id}` ("done") only drops a thread from the *unread*
-    // list — `all=true` (which we fetch) keeps returning done threads as "read". So there is
-    // no time-based expiry: a tombstone is cleared only when the thread genuinely re-surfaces
-    // with newer activity (handled below) or when GitHub finally stops listing it (the
-    // cleanup at the end of this pass). Prepared once and reused across the loop (with
-    // `all=true` the fetch can be large); dropped before `tx.commit()` since it borrows tx.
-    let mut tombstone_stmt =
-        tx.prepare("SELECT updated_at, done_at FROM done_tombstones WHERE thread_id = ?1")?;
+    // A new unread generation is GitHub's immediate signal that a dismissed thread genuinely
+    // re-surfaced. The timestamp guard rejects a stale in-flight fetch from before the DELETE.
+    // Read-only timestamp bumps remain dismissed until subject resolution verifies real
+    // post-dismissal activity.
+    let mut dismissal_stmt = tx.prepare(
+        "SELECT notification_updated_at, dismissed_at
+         FROM notification_dismissals WHERE thread_id = ?1",
+    )?;
 
     for t in threads {
         tx.execute(
@@ -72,36 +69,30 @@ pub fn store_notifications(
             params![t.id],
         )?;
 
-        // Keep a thread the user marked done out of the inbox. GitHub keeps returning done
-        // threads in `all=true`, so the tombstone suppresses re-inserting it — unless it has
-        // genuinely *newer* activity than the user has already dismissed, in which case it's a
-        // real re-surface, so we clear the tombstone and let it back in.
-        //
-        // The watermark is the later of the activity we knew about at done-time
-        // (`updated_at`, which may be stale or NULL if the row hadn't synced) and the moment
-        // the user marked it done (`done_at`). Using `done_at` too means pre-done activity we
-        // simply hadn't fetched yet can't masquerade as a re-surface, and a NULL `updated_at`
-        // tombstone still suppresses correctly. (ISO-8601 UTC timestamps compare lexically.)
-        let tombstone: Option<(Option<String>, String)> = tombstone_stmt
+        let dismissal: Option<(Option<String>, String)> = dismissal_stmt
             .query_row(params![t.id], |r| {
                 Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?))
             })
             .optional()?;
-        if let Some((done_updated_at, done_at)) = tombstone {
-            let watermark: &str = match done_updated_at.as_deref() {
-                Some(prev) if prev > done_at.as_str() => prev,
-                _ => done_at.as_str(),
+        let reactivated = if let Some((dismissed_updated_at, dismissed_at)) = dismissal {
+            // GitHub REST and SQLite's local clock both use canonical UTC `...Z` timestamps,
+            // so their chronological order matches lexical order.
+            let watermark: &str = match dismissed_updated_at.as_deref() {
+                Some(previous) if previous > dismissed_at.as_str() => previous,
+                _ => dismissed_at.as_str(),
             };
-            let resurfaced = t.updated_at.as_str() > watermark;
-            if resurfaced {
+            if t.unread && t.updated_at.as_str() > watermark {
                 tx.execute(
-                    "DELETE FROM done_tombstones WHERE thread_id = ?1",
+                    "DELETE FROM notification_dismissals WHERE thread_id = ?1",
                     params![t.id],
                 )?;
+                true
             } else {
-                continue; // still done: keep it out of the inbox
+                false
             }
-        }
+        } else {
+            false
+        };
 
         tx.execute(
             "INSERT INTO repos (id, full_name, owner, name, private, updated_at)
@@ -125,8 +116,8 @@ pub fn store_notifications(
         tx.execute(
             "INSERT INTO notifications (
                  thread_id, repo_id, subject_type, subject_title, subject_url,
-                 reason, updated_at, thread_url, is_new, fetched_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1,
+                reason, unread, updated_at, thread_url, is_new, fetched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1,
                      strftime('%Y-%m-%dT%H:%M:%SZ','now'))
              ON CONFLICT(thread_id) DO UPDATE SET
                repo_id       = excluded.repo_id,
@@ -134,7 +125,8 @@ pub fn store_notifications(
                subject_title = excluded.subject_title,
                subject_url   = excluded.subject_url,
                reason        = excluded.reason,
-               is_new        = CASE WHEN excluded.updated_at <> notifications.updated_at
+               unread        = excluded.unread,
+               is_new        = CASE WHEN ?10 OR excluded.updated_at <> notifications.updated_at
                                     THEN 1 ELSE 0 END,
                updated_at    = excluded.updated_at,
                thread_url    = excluded.thread_url,
@@ -146,20 +138,20 @@ pub fn store_notifications(
                 t.subject.title,
                 t.subject.url,
                 t.reason,
+                t.unread as i64,
                 t.updated_at,
                 t.url,
+                reactivated,
             ],
         )?;
         stored += 1;
     }
 
     // Release the prepared statement's borrow of the transaction before committing.
-    drop(tombstone_stmt);
+    drop(dismissal_stmt);
 
-    // Reconcile: drop notifications no longer returned upstream, then prune repos that
-    // ended up with no notifications. Notifications are deleted first to respect the
-    // repos foreign key. The inbox mirrors GitHub's `all=true` feed, so a row absent from
-    // the latest fetch was marked done elsewhere and is removed.
+    // Reconcile mirrored notifications no longer returned upstream, then prune repos that
+    // ended up with no remote rows. Dismissals are deliberately independent and survive.
     let removed = tx.execute(
         "DELETE FROM notifications
          WHERE thread_id NOT IN (SELECT thread_id FROM present_threads)",
@@ -171,19 +163,13 @@ pub fn store_notifications(
         [],
     )?;
 
-    // Retire a tombstone only once GitHub stops returning the thread — i.e. it has finally
-    // left the `all=true` list (aged out of GitHub's retention, or was un-done elsewhere). We
-    // deliberately do NOT expire tombstones on a timer: GitHub keeps returning done threads
-    // indefinitely, so a timer would let them resurface (the bug this fixes). The set stays
-    // bounded by GitHub's retention window and self-cleans as threads drop off.
-    tx.execute(
-        "DELETE FROM done_tombstones
-         WHERE thread_id NOT IN (SELECT thread_id FROM present_threads)",
-        [],
-    )?;
-
+    let visible = visible_count(&tx)? as usize;
     tx.commit()?;
-    Ok(StoreOutcome { stored, removed })
+    Ok(StoreOutcome {
+        stored,
+        visible,
+        removed,
+    })
 }
 
 /// Record a successful sync: timestamp, status, and the rate-limit snapshot.
@@ -368,8 +354,7 @@ pub fn read_status(conn: &Connection) -> rusqlite::Result<SyncStatus> {
             ))
         },
     )?;
-    let notification_count: i64 =
-        conn.query_row("SELECT COUNT(*) FROM notifications", [], |r| r.get(0))?;
+    let notification_count = visible_count(conn)?;
     let rate_buckets = read_rate_buckets(conn)?;
 
     Ok(SyncStatus {
@@ -384,7 +369,18 @@ pub fn read_status(conn: &Connection) -> rusqlite::Result<SyncStatus> {
     })
 }
 
-/// Count stored notifications (helper, also used by tests).
+/// Count non-dismissed notifications shown in the inbox.
+pub fn visible_count(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM notifications n
+         LEFT JOIN notification_dismissals d ON d.thread_id = n.thread_id
+         WHERE d.thread_id IS NULL",
+        [],
+        |r| r.get(0),
+    )
+}
+
+/// Count mirrored notifications (test helper).
 #[cfg(test)]
 pub fn count(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row("SELECT COUNT(*) FROM notifications", [], |r| r.get(0))
@@ -456,7 +452,8 @@ pub fn store_resolved_subject(
     thread_id: &str,
     subject: &ResolvedSubject,
 ) -> rusqlite::Result<()> {
-    conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "UPDATE notifications SET
            subject_number          = ?2,
            subject_state           = ?3,
@@ -465,7 +462,8 @@ pub fn store_resolved_subject(
            subject_author          = ?6,
            subject_html_url        = ?7,
            subject_mergeable_state = ?8,
-           resolved_at             = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+          subject_updated_at      = COALESCE(?9, subject_updated_at),
+          resolved_at             = strftime('%Y-%m-%dT%H:%M:%SZ','now')
          WHERE thread_id = ?1",
         params![
             thread_id,
@@ -476,11 +474,34 @@ pub fn store_resolved_subject(
             subject.author,
             subject.html_url,
             subject.mergeable_state,
+            subject.updated_at,
         ],
     )?;
+
+    // A notification can be marked read outside Helix before the next poll. In that case the
+    // notification's `unread` flag cannot reactivate it, so verify the underlying subject
+    // timestamp. Comparing against both captured subject activity and the local dismissal time
+    // rejects activity that happened before the user marked the thread done.
+    let reactivated = tx.execute(
+        "DELETE FROM notification_dismissals
+         WHERE thread_id = ?1
+           AND ?2 IS NOT NULL
+           AND ?2 > CASE
+               WHEN subject_updated_at > dismissed_at THEN subject_updated_at
+               ELSE dismissed_at
+           END",
+        params![thread_id, subject.updated_at],
+    )?;
+    if reactivated > 0 {
+        tx.execute(
+            "UPDATE notifications SET is_new = 1 WHERE thread_id = ?1",
+            params![thread_id],
+        )?;
+    }
+
     // Keep a bookmark's snapshot current too, so a bookmarked thread marked done before the
     // next sync still carries the resolved number/state/url in the Bookmarks filter.
-    conn.execute(
+    tx.execute(
         "UPDATE bookmarks SET subject_number = ?2, subject_state = ?3, subject_html_url = ?4,
            subject_author = ?5, subject_mergeable_state = ?6
          WHERE thread_id = ?1",
@@ -504,7 +525,7 @@ pub fn store_resolved_subject(
         .as_deref()
         .is_some_and(crate::github::is_dependabot_author)
     {
-        let repo: Option<(String, String, String)> = conn
+        let repo: Option<(String, String, String)> = tx
             .query_row(
                 "SELECT r.full_name, r.owner, r.name
                  FROM notifications n JOIN repos r ON r.id = n.repo_id
@@ -514,9 +535,10 @@ pub fn store_resolved_subject(
             )
             .optional()?;
         if let Some((full_name, owner, name)) = repo {
-            crate::dependabot::observe_repo(conn, &full_name, &owner, &name)?;
+            crate::dependabot::observe_repo(&tx, &full_name, &owner, &name)?;
         }
     }
+    tx.commit()?;
     Ok(())
 }
 
@@ -531,46 +553,45 @@ pub fn reset_resolution(conn: &Connection) -> rusqlite::Result<usize> {
 
 /* ------------------------------- Mutations -------------------------------- */
 
-/// Remove the given threads **locally** (for the threads whose network `DELETE` succeeded),
-/// then prune any repo left without notifications so the sidebar doesn't keep an empty
-/// entry. Returns the number of notification rows deleted.
+/// Mark the given threads done **locally** after their network `DELETE` succeeds.
+///
+/// The mirrored notification rows stay intact. A dismissal snapshots the remote notification
+/// and subject generations the user handled; inbox queries overlay that local state.
 pub fn mark_done_local(conn: &mut Connection, thread_ids: &[String]) -> rusqlite::Result<usize> {
     let tx = conn.transaction()?;
-    let mut removed = 0;
+    let mut dismissed = 0;
     {
-        // For each thread, record a tombstone (with the row's current `updated_at`) before
-        // deleting it, so future syncs keep the just-done thread out of the inbox — GitHub
-        // keeps returning done threads in `all=true`, and this also covers a stale in-flight
-        // sync that still carries the thread. The tombstone is keyed by thread id;
-        // `updated_at` lets a later sync tell an unchanged thread (same/older timestamp → keep
-        // suppressed) from a genuine re-surface with new activity (newer timestamp → allow
-        // back). `done_at` (the mark-done time) is the suppression watermark — see
-        // store_notifications — so pre-done activity can't masquerade as a re-surface.
-        let mut updated_at_stmt =
-            tx.prepare("SELECT updated_at FROM notifications WHERE thread_id = ?1")?;
-        let mut tombstone_stmt = tx.prepare(
-            "INSERT INTO done_tombstones (thread_id, updated_at, done_at)
-             VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-             ON CONFLICT(thread_id) DO UPDATE SET
-               updated_at = COALESCE(excluded.updated_at, done_tombstones.updated_at),
-               done_at    = excluded.done_at",
+        let mut generation_stmt = tx.prepare(
+            "SELECT updated_at, subject_updated_at
+             FROM notifications WHERE thread_id = ?1",
         )?;
-        let mut delete_stmt = tx.prepare("DELETE FROM notifications WHERE thread_id = ?1")?;
+        let mut dismissal_stmt = tx.prepare(
+            "INSERT INTO notification_dismissals (
+                 thread_id, notification_updated_at, dismissed_at, subject_updated_at)
+             VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%SZ','now'), ?3)
+             ON CONFLICT(thread_id) DO UPDATE SET
+               notification_updated_at = COALESCE(
+                   excluded.notification_updated_at,
+                   notification_dismissals.notification_updated_at),
+               subject_updated_at = COALESCE(
+                   excluded.subject_updated_at,
+                   notification_dismissals.subject_updated_at),
+               dismissed_at = excluded.dismissed_at",
+        )?;
         for id in thread_ids {
-            let updated_at: Option<String> = updated_at_stmt
-                .query_row(params![id], |r| r.get(0))
+            let generations: Option<(String, Option<String>)> = generation_stmt
+                .query_row(params![id], |r| Ok((r.get(0)?, r.get(1)?)))
                 .optional()?;
-            tombstone_stmt.execute(params![id, updated_at])?;
-            removed += delete_stmt.execute(params![id])?;
+            let (notification_updated_at, subject_updated_at) = match generations {
+                Some((notification, subject)) => (Some(notification), subject),
+                None => (None, None),
+            };
+            dismissal_stmt.execute(params![id, notification_updated_at, subject_updated_at])?;
+            dismissed += 1;
         }
     }
-    tx.execute(
-        "DELETE FROM repos
-         WHERE id NOT IN (SELECT DISTINCT repo_id FROM notifications)",
-        [],
-    )?;
     tx.commit()?;
-    Ok(removed)
+    Ok(dismissed)
 }
 
 /* -------------------------------- Bookmarks ------------------------------- */
@@ -625,9 +646,10 @@ pub fn list_bookmarks(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
                 COALESCE(b.reason, ''), b.updated_at, b.thread_url,
                 b.subject_number, b.subject_state, b.subject_html_url, b.subject_author,
                 b.subject_mergeable_state,
-                CASE WHEN n.thread_id IS NULL THEN 1 ELSE 0 END AS is_done
+               CASE WHEN n.thread_id IS NULL OR d.thread_id IS NOT NULL THEN 1 ELSE 0 END AS is_done
          FROM bookmarks b
          LEFT JOIN notifications n ON n.thread_id = b.thread_id
+         LEFT JOIN notification_dismissals d ON d.thread_id = b.thread_id
          ORDER BY b.repo_full_name ASC, b.updated_at DESC, b.thread_id ASC",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -743,9 +765,9 @@ pub struct RepoGroup {
 
 /// Read all stored notifications grouped by repository.
 ///
-/// Repos are ordered by full name; within a repo, most recently updated first. Read state
-/// is not tracked — every stored notification is shown until it's marked done. This is a
-/// pure local read (offline-first) — the source of truth is SQLite.
+/// Repos are ordered by full name; within a repo, most recently updated first. Remote read
+/// state does not control ordinary visibility; the dismissal overlay does. This is a pure
+/// local read (offline-first) — the source of truth is SQLite.
 pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
     let mut stmt = conn.prepare(
         "SELECT r.id, r.full_name, r.private,
@@ -758,6 +780,8 @@ pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
          FROM notifications n
          JOIN repos r ON r.id = n.repo_id
          LEFT JOIN bookmarks b ON b.thread_id = n.thread_id
+         LEFT JOIN notification_dismissals d ON d.thread_id = n.thread_id
+         WHERE d.thread_id IS NULL
          ORDER BY r.full_name ASC, n.updated_at DESC, n.thread_id ASC",
     )?;
 
@@ -857,6 +881,7 @@ mod tests {
                 subject_type: "Issue".to_string(),
             },
             reason: "subscribed".to_string(),
+            unread: true,
             updated_at: "2026-01-02T00:00:00Z".to_string(),
             url: format!("https://api.github.com/notifications/threads/{id}"),
         }
@@ -969,9 +994,10 @@ mod tests {
         assert_eq!(bm[0].notifications[0].subject_title, "One");
         assert!(!bm[0].notifications[0].is_done);
 
-        // Mark done removes it from the inbox but the bookmark snapshot persists, now done.
+        // Mark done hides it from the inbox but keeps the mirrored row and bookmark snapshot.
         mark_done_local(&mut conn, &["1".to_string()]).unwrap();
-        assert_eq!(count(&conn).unwrap(), 0);
+        assert_eq!(count(&conn).unwrap(), 1);
+        assert!(list_by_repo(&conn).unwrap().is_empty());
         let bm = list_bookmarks(&conn).unwrap();
         assert_eq!(bm.len(), 1);
         assert!(
@@ -1116,7 +1142,7 @@ mod tests {
         assert_eq!(groups[0].full_name, "octo/alpha");
         assert_eq!(groups[1].full_name, "octo/zeta");
 
-        // Every stored notification is shown (read state is not tracked); count is the total.
+        // Every non-dismissed notification is shown; remote read state does not filter it.
         let alpha = &groups[0];
         assert_eq!(alpha.total, 2);
         assert_eq!(alpha.notifications.len(), 2);
@@ -1286,7 +1312,7 @@ mod tests {
     }
 
     #[test]
-    fn mark_done_local_removes_rows_and_prunes_empty_repos() {
+    fn mark_done_local_hides_rows_but_keeps_remote_mirror() {
         let mut conn = mem_conn();
         store_notifications(
             &mut conn,
@@ -1298,69 +1324,78 @@ mod tests {
         )
         .unwrap();
 
-        // Done on thread 3 (the only one in repo-b) removes it and prunes the repo.
+        // Done on thread 3 hides it without deleting its remote row or repository.
         assert_eq!(mark_done_local(&mut conn, &["3".to_string()]).unwrap(), 1);
-        assert_eq!(count(&conn).unwrap(), 2);
-        assert_eq!(repo_full_name(&conn, 200).unwrap(), None);
-        // repo-a survives because thread 1 and 2 remain.
+        assert_eq!(count(&conn).unwrap(), 3);
         assert_eq!(
-            repo_full_name(&conn, 100).unwrap().as_deref(),
-            Some("octo/repo-a")
+            repo_full_name(&conn, 200).unwrap().as_deref(),
+            Some("octo/repo-b")
+        );
+        assert_eq!(
+            list_by_repo(&conn)
+                .unwrap()
+                .iter()
+                .flat_map(|group| &group.notifications)
+                .count(),
+            2
         );
     }
 
     #[test]
     fn mark_done_then_stale_sync_does_not_resurrect() {
-        // The classic race: a sync's fetch predates the mark-done, then tries to re-insert
-        // the just-deleted thread. The tombstone must keep it out of the inbox.
+        // A fetched generation from before mark-done may still arrive after the mutation.
         let mut conn = mem_conn();
         store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
         mark_done_local(&mut conn, &["1".to_string()]).unwrap();
-        assert_eq!(count(&conn).unwrap(), 0);
+        assert!(list_by_repo(&conn).unwrap().is_empty());
 
-        // Stale fetch still lists thread 1 (same updated_at as when it was marked done).
         let outcome =
             store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
-        assert_eq!(
-            count(&conn).unwrap(),
-            0,
-            "tombstone must suppress re-insert"
-        );
-        assert_eq!(
-            outcome.stored, 0,
-            "a suppressed thread isn't counted as stored"
-        );
+        assert!(list_by_repo(&conn).unwrap().is_empty());
+        assert_eq!(outcome.stored, 1, "the remote row is still mirrored");
     }
 
     #[test]
-    fn resurfaced_thread_with_newer_activity_comes_back() {
-        // A thread marked done that gets genuinely new activity (newer updated_at) is a real
-        // re-surface and must be allowed back, clearing the tombstone.
+    fn newer_read_notification_timestamp_does_not_resurface() {
         let mut conn = mem_conn();
         store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
         mark_done_local(&mut conn, &["1".to_string()]).unwrap();
 
-        let mut newer = thread("1", 100, "octo/repo-a", "One (new comment)");
-        // Activity *after* the mark-done (done_at ≈ now); use a far-future date so it's
-        // unambiguously past the wall-clock done watermark regardless of when the test runs.
+        let mut newer = thread("1", 100, "octo/repo-a", "False notification bump");
+        newer.unread = false;
         newer.updated_at = "2099-01-01T00:00:00Z".to_string();
         store_notifications(&mut conn, &[newer]).unwrap();
 
-        assert_eq!(
-            count(&conn).unwrap(),
-            1,
-            "new activity must re-surface the thread"
-        );
-        let tombstones: i64 = conn
-            .query_row("SELECT COUNT(*) FROM done_tombstones", [], |r| r.get(0))
+        assert!(list_by_repo(&conn).unwrap().is_empty());
+        let dismissals: i64 = conn
+            .query_row("SELECT COUNT(*) FROM notification_dismissals", [], |r| {
+                r.get(0)
+            })
             .unwrap();
-        assert_eq!(tombstones, 0, "tombstone cleared once it re-surfaced");
+        assert_eq!(dismissals, 1);
     }
 
     #[test]
-    fn tombstone_retires_once_thread_leaves_the_fetch() {
-        // Once GitHub stops returning a done thread, its tombstone has served its purpose
-        // and is removed (so the table doesn't grow unbounded).
+    fn newer_unread_notification_generation_resurfaces() {
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
+        mark_done_local(&mut conn, &["1".to_string()]).unwrap();
+
+        let mut newer = thread("1", 100, "octo/repo-a", "Real new activity");
+        newer.updated_at = "2099-01-01T00:00:00Z".to_string();
+        store_notifications(&mut conn, &[newer]).unwrap();
+
+        assert_eq!(list_by_repo(&conn).unwrap()[0].notifications.len(), 1);
+        let dismissals: i64 = conn
+            .query_row("SELECT COUNT(*) FROM notification_dismissals", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(dismissals, 0);
+    }
+
+    #[test]
+    fn remote_omission_and_reappearance_keep_dismissal() {
         let mut conn = mem_conn();
         store_notifications(
             &mut conn,
@@ -1371,135 +1406,115 @@ mod tests {
         )
         .unwrap();
         mark_done_local(&mut conn, &["1".to_string()]).unwrap();
-
-        // A sync that no longer lists thread 1 confirms the mark-done stuck.
         store_notifications(&mut conn, &[thread("2", 100, "octo/repo-a", "Two")]).unwrap();
-        let tombstones: i64 = conn
-            .query_row("SELECT COUNT(*) FROM done_tombstones", [], |r| r.get(0))
+        let dismissals: i64 = conn
+            .query_row("SELECT COUNT(*) FROM notification_dismissals", [], |r| {
+                r.get(0)
+            })
             .unwrap();
-        assert_eq!(
-            tombstones, 0,
-            "tombstone retired after the thread left the fetch"
-        );
+        assert_eq!(dismissals, 1, "omission must not erase local done state");
+
+        let mut returned = thread("1", 100, "octo/repo-a", "One");
+        returned.unread = false;
+        store_notifications(&mut conn, &[returned]).unwrap();
+        assert!(list_by_repo(&conn).unwrap().is_empty());
     }
 
     #[test]
-    fn old_tombstone_still_suppresses_unchanged_thread() {
-        // The fix: a tombstone never expires on a timer. GitHub keeps returning done threads
-        // in `all=true`, so even a long-old tombstone must keep an unchanged thread out of the
-        // inbox (no resurrection), and must remain so it can keep doing so.
+    fn newer_subject_activity_resurfaces_an_already_read_notification() {
         let mut conn = mem_conn();
         store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
-        mark_done_local(&mut conn, &["1".to_string()]).unwrap();
-        // Backdate the tombstone far into the past — under the old 10-minute TTL it would have
-        // been reaped and the thread would resurface; now it must not.
-        conn.execute(
-            "UPDATE done_tombstones SET done_at = '2000-01-01T00:00:00Z' WHERE thread_id = '1'",
-            [],
+        store_resolved_subject(
+            &conn,
+            "1",
+            &ResolvedSubject {
+                updated_at: Some("2026-01-02T00:00:00Z".to_string()),
+                ..Default::default()
+            },
         )
         .unwrap();
+        mark_done_local(&mut conn, &["1".to_string()]).unwrap();
 
-        let outcome =
-            store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
-        assert_eq!(
-            count(&conn).unwrap(),
-            0,
-            "an old tombstone must still suppress"
-        );
-        assert_eq!(outcome.stored, 0);
-        let tombstones: i64 = conn
-            .query_row("SELECT COUNT(*) FROM done_tombstones", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(
-            tombstones, 1,
-            "tombstone is kept while the thread is still listed"
-        );
+        let mut bumped = thread("1", 100, "octo/repo-a", "One");
+        bumped.unread = false;
+        bumped.updated_at = "2099-01-01T00:00:00Z".to_string();
+        store_notifications(&mut conn, &[bumped]).unwrap();
+        assert!(list_by_repo(&conn).unwrap().is_empty());
+        let pending = subjects_needing_resolution(&conn).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].thread_id, "1");
+
+        store_resolved_subject(
+            &conn,
+            "1",
+            &ResolvedSubject {
+                updated_at: Some("2099-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let notification = &list_by_repo(&conn).unwrap()[0].notifications[0];
+        assert!(notification.is_new);
     }
 
     #[test]
-    fn duplicate_mark_done_preserves_tombstone_updated_at() {
-        // A second mark-done for the same id (row already gone → NULL updated_at) must not
-        // clobber the tombstone's captured updated_at, or a real re-surface would be missed.
+    fn pre_dismissal_subject_activity_stays_hidden() {
         let mut conn = mem_conn();
         store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
         mark_done_local(&mut conn, &["1".to_string()]).unwrap();
-        mark_done_local(&mut conn, &["1".to_string()]).unwrap(); // row already deleted
 
+        store_resolved_subject(
+            &conn,
+            "1",
+            &ResolvedSubject {
+                updated_at: Some("2026-01-03T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(list_by_repo(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn duplicate_dismissal_without_remote_row_preserves_generation() {
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
+        mark_done_local(&mut conn, &["1".to_string()]).unwrap();
+        conn.execute("DELETE FROM notifications WHERE thread_id = '1'", [])
+            .unwrap();
+
+        assert_eq!(mark_done_local(&mut conn, &["1".to_string()]).unwrap(), 1);
         let updated_at: Option<String> = conn
             .query_row(
-                "SELECT updated_at FROM done_tombstones WHERE thread_id = '1'",
+                "SELECT notification_updated_at
+                 FROM notification_dismissals WHERE thread_id = '1'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
         assert_eq!(updated_at.as_deref(), Some("2026-01-02T00:00:00Z"));
-
-        // A genuine re-surface (activity after the mark-done) still comes back.
-        let mut newer = thread("1", 100, "octo/repo-a", "One");
-        newer.updated_at = "2099-01-01T00:00:00Z".to_string();
-        store_notifications(&mut conn, &[newer]).unwrap();
-        assert_eq!(count(&conn).unwrap(), 1);
     }
 
     #[test]
-    fn pre_done_activity_does_not_resurface() {
-        // The local row was stale (T1) when marked done, and the user dismissed it at T3,
-        // after activity T2 that Helix hadn't synced yet (T1 < T2 < T3). A later fetch
-        // returning the thread at T2 must NOT resurface it — the activity predates the
-        // mark-done, so it's already been dismissed.
-        let mut conn = mem_conn();
-        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
-        mark_done_local(&mut conn, &["1".to_string()]).unwrap();
-        // Tombstone: knew about T1 locally, marked done at T3.
-        conn.execute(
-            "UPDATE done_tombstones
-                SET updated_at = '2026-01-02T00:00:00Z', done_at = '2026-03-01T00:00:00Z'
-              WHERE thread_id = '1'",
-            [],
-        )
-        .unwrap();
-        // Fetch surfaces T2 (between T1 and T3) — activity that predates the done.
-        let mut t2 = thread("1", 100, "octo/repo-a", "One");
-        t2.updated_at = "2026-02-01T00:00:00Z".to_string();
-        store_notifications(&mut conn, &[t2]).unwrap();
-        assert_eq!(
-            count(&conn).unwrap(),
-            0,
-            "activity before the mark-done must not resurface a done thread"
-        );
-    }
-
-    #[test]
-    fn null_updated_at_tombstone_uses_done_at_watermark() {
-        // A tombstone created when the row wasn't locally present has NULL updated_at; done_at
-        // alone must still suppress, and only activity strictly after done_at resurfaces.
+    fn dismissal_without_captured_generation_uses_dismissed_at() {
         let mut conn = mem_conn();
         conn.execute(
-            "INSERT INTO done_tombstones (thread_id, updated_at, done_at)
-             VALUES ('1', NULL, '2026-03-01T00:00:00Z')",
+            "INSERT INTO notification_dismissals (
+                 thread_id, notification_updated_at, dismissed_at, subject_updated_at)
+             VALUES ('1', NULL, '2026-03-01T00:00:00Z', NULL)",
             [],
         )
         .unwrap();
 
-        // Activity before done_at → still suppressed.
         let mut before = thread("1", 100, "octo/repo-a", "One");
         before.updated_at = "2026-02-01T00:00:00Z".to_string();
         store_notifications(&mut conn, &[before]).unwrap();
-        assert_eq!(
-            count(&conn).unwrap(),
-            0,
-            "NULL-updated_at tombstone suppresses before done_at"
-        );
+        assert!(list_by_repo(&conn).unwrap().is_empty());
 
-        // Activity after done_at → genuine re-surface.
         let mut after = thread("1", 100, "octo/repo-a", "One");
         after.updated_at = "2026-04-01T00:00:00Z".to_string();
         store_notifications(&mut conn, &[after]).unwrap();
-        assert_eq!(
-            count(&conn).unwrap(),
-            1,
-            "activity after done_at resurfaces"
-        );
+        assert_eq!(list_by_repo(&conn).unwrap()[0].notifications.len(), 1);
     }
 
     #[test]
@@ -1911,6 +1926,7 @@ mod tests {
                 state_reason: None,
                 merged_at: Some("2026-01-02T03:04:05Z".to_string()),
                 html_url: Some("https://github.com/octo/repo-a/pull/99".to_string()),
+                updated_at: Some("2026-01-02T04:05:06Z".to_string()),
                 author: Some("dev".to_string()),
                 mergeable_state: Some("clean".to_string()),
             },
@@ -1925,11 +1941,21 @@ mod tests {
             Option<String>,
             Option<String>,
             Option<String>,
+            Option<String>,
         );
-        let (number, state, merged_at, author, html_url, mergeable_state, resolved_at): ResolvedRow =
-            conn.query_row(
+        let (
+            number,
+            state,
+            merged_at,
+            author,
+            html_url,
+            mergeable_state,
+            subject_updated_at,
+            resolved_at,
+        ): ResolvedRow = conn
+            .query_row(
                 "SELECT subject_number, subject_state, subject_merged_at, subject_author,
-                        subject_html_url, subject_mergeable_state, resolved_at
+                        subject_html_url, subject_mergeable_state, subject_updated_at, resolved_at
                  FROM notifications WHERE thread_id = '1'",
                 [],
                 |r| {
@@ -1941,6 +1967,7 @@ mod tests {
                         r.get(4)?,
                         r.get(5)?,
                         r.get(6)?,
+                        r.get(7)?,
                     ))
                 },
             )
@@ -1954,6 +1981,7 @@ mod tests {
             Some("https://github.com/octo/repo-a/pull/99")
         );
         assert_eq!(mergeable_state.as_deref(), Some("clean"));
+        assert_eq!(subject_updated_at.as_deref(), Some("2026-01-02T04:05:06Z"));
         assert!(resolved_at.is_some());
     }
 }
