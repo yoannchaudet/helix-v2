@@ -16,10 +16,10 @@ import { operationsList, repoSection } from "./dependabot-view.js";
 import { sourceButton } from "./ui.js";
 import { isAuthenticated } from "./account.js";
 import { closeMenu, isMenuOpen, openContextMenu } from "./menu.js";
-import { isShortcutsOpen, registerShortcutGroups } from "./shortcuts.js";
+import { isShortcutsOpen } from "./shortcuts.js";
 import { dependabotMergePoll } from "./state.js";
 import { getActiveModule, registerModule } from "./modules.js";
-import { createHoverManager, createRowNavigator } from "./list-kit.js";
+import { createHoverManager, createRowNavigator, createListFocusRetainer } from "./list-kit.js";
 
 /* The Dependabot module: a read-only list of open Dependabot PRs grouped by repository, its
  * repo-only sidebar refinement, keyboard navigation, and its own sync flow. Pure row/section
@@ -173,61 +173,60 @@ function emptyDependabot() {
   </div>`;
 }
 
+const focusRetainer = createListFocusRetainer({
+  containerSelector: "#dependabot",
+  rowSelector: ".n-row",
+  captureTarget: (row, active) => {
+    if (row.dataset.operationId) {
+      return {
+        kind: "operation",
+        id: row.dataset.operationId,
+        part: active.classList.contains("dep-discard-action")
+          ? "discard"
+          : active.classList.contains("dep-operation-cancel")
+            ? "cancel"
+            : active.classList.contains("dep-operation-disclosure")
+              ? "disclosure"
+              : "open",
+      };
+    }
+    return row.dataset.prId
+      ? {
+          kind: "pr",
+          id: row.dataset.prId,
+          part: active.classList.contains("dep-discard-action")
+            ? "discard"
+            : active.classList.contains("dep-merge-action")
+              ? "action"
+              : "open",
+        }
+      : null;
+  },
+  matchRow: (row, target) =>
+    target.kind === "operation"
+      ? row.dataset.operationId === target.id
+      : row.dataset.prId === target.id,
+  resolveElement: (row, target) =>
+    target.part === "discard"
+      ? row.querySelector(".dep-discard-action") || row.querySelector(".n-open[tabindex]")
+      : target.kind === "operation" && target.part === "cancel"
+        ? row.querySelector(".dep-operation-cancel") || row.querySelector(".n-open[tabindex]")
+        : target.kind === "operation" && target.part === "disclosure"
+          ? row.querySelector(".dep-operation-disclosure") || row.querySelector(".n-open[tabindex]")
+          : target.kind === "pr" && target.part === "action"
+            ? row.querySelector(".dep-merge-action") || row.querySelector(".n-open[tabindex]")
+            : row.querySelector(".n-open[tabindex]"),
+});
+
 /** Snapshot the focused PR row id so a re-render can restore focus (the list re-renders
  *  wholesale on refine/sync, which would otherwise drop focus to <body>). */
 function captureFocus() {
-  const active = document.activeElement;
-  const list = $("#dependabot");
-  if (!active || !list || !list.contains(active)) return null;
-  const row = active.closest(".n-row");
-  if (!row) return null;
-  if (row.dataset.operationId) {
-    return {
-      kind: "operation",
-      id: row.dataset.operationId,
-      part: active.classList.contains("dep-discard-action")
-        ? "discard"
-        : active.classList.contains("dep-operation-cancel")
-          ? "cancel"
-          : active.classList.contains("dep-operation-disclosure")
-            ? "disclosure"
-            : "open",
-    };
-  }
-  return row.dataset.prId
-    ? {
-        kind: "pr",
-        id: row.dataset.prId,
-        part: active.classList.contains("dep-discard-action")
-          ? "discard"
-          : active.classList.contains("dep-merge-action")
-            ? "action"
-            : "open",
-      }
-    : null;
+  return focusRetainer.capture();
 }
 
 /** Restore focus to the same PR/operation control after a re-render. */
 function applyFocus(target, { preventScroll = false } = {}) {
-  if (!target) return false;
-  const safe = String(target.id).replace(/["\\]/g, "\\$&");
-  const row = $("#dependabot")?.querySelector(
-    `.n-row[data-${target.kind === "operation" ? "operation" : "pr"}-id="${safe}"]`,
-  );
-  const control =
-    target.part === "discard"
-      ? row?.querySelector(".dep-discard-action") || row?.querySelector(".n-open[tabindex]")
-      : target.kind === "operation" && target.part === "cancel"
-        ? row?.querySelector(".dep-operation-cancel") || row?.querySelector(".n-open[tabindex]")
-        : target.kind === "operation" && target.part === "disclosure"
-          ? row?.querySelector(".dep-operation-disclosure") ||
-            row?.querySelector(".n-open[tabindex]")
-          : target.kind === "pr" && target.part === "action"
-            ? row?.querySelector(".dep-merge-action") || row?.querySelector(".n-open[tabindex]")
-            : row?.querySelector(".n-open[tabindex]");
-  if (!control) return false;
-  control.focus({ preventScroll });
-  return true;
+  return focusRetainer.apply(target, { preventScroll });
 }
 
 /** Render the central PR list for the active repo refinement. A live re-render (e.g. from a
@@ -912,19 +911,19 @@ export function initDependabot() {
 // operation/sync announcements don't fire after the user moves to another module.
 
 registerModule("dependabot", {
+  sidebarSelector: "#sidebar-dependabot",
   init: initDependabot,
   activate: onDependabotOpened,
   deactivate: clearAnnounceQueue,
+  shortcuts: [
+    {
+      group: "Dependabot",
+      items: [
+        { keys: ["j", "↓"], desc: "Next pull request" },
+        { keys: ["k", "↑"], desc: "Previous pull request" },
+        { keys: ["Enter"], desc: "Open in browser" },
+        { keys: ["r"], desc: "Sync Dependabot" },
+      ],
+    },
+  ],
 });
-
-registerShortcutGroups([
-  {
-    group: "Dependabot",
-    items: [
-      { keys: ["j", "↓"], desc: "Next pull request" },
-      { keys: ["k", "↑"], desc: "Previous pull request" },
-      { keys: ["Enter"], desc: "Open in browser" },
-      { keys: ["r"], desc: "Sync Dependabot" },
-    ],
-  },
-]);

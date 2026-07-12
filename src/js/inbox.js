@@ -14,12 +14,23 @@ import { repoSection, typeFilterBar } from "./inbox-view.js";
 import { sourceButton } from "./ui.js";
 import { openContextMenu, closeMenu, isMenuOpen, menuContains } from "./menu.js";
 import { isAuthenticated } from "./account.js";
-import { setSyncProgress, flashSyncProgress, loadSyncStatus, syncNow } from "./sync.js";
+import {
+  setSyncProgress,
+  flashSyncProgress,
+  loadSyncStatus,
+  syncNow,
+  registerSyncStaleListener,
+} from "./sync.js";
 import { showSettings } from "./settings.js";
 import { isShortcutsOpen } from "./shortcuts.js";
-import { registerShortcutGroups } from "./shortcuts.js";
-import { registerModule } from "./modules.js";
-import { createHoverManager, createKbdFocusRing, createRowNavigator } from "./list-kit.js";
+import { registerModule, getActiveModule } from "./modules.js";
+import {
+  createHoverManager,
+  createKbdFocusRing,
+  createRowNavigator,
+  createListFocusRetainer,
+} from "./list-kit.js";
+import { focusNeighborAfterRemoval } from "./list-kit-model.js";
 
 /* The inbox: the notification list + its sidebar (type filters + repo refinement), keyboard
  * focus preservation across re-renders, the mark-done flows, and row interactions. Pure
@@ -41,6 +52,8 @@ let activeRepo = null;
  *  one always stays selected. Pre-filters both datasets so the smart-filter counts, repo
  *  list, and main view all reflect the active type selection. Resets each launch. */
 let selectedTypes = new Set(TYPE_FILTERS.map((t) => t.id));
+/** Whether notifications should be reloaded next time the module becomes active. */
+let inboxStale = true;
 
 /** The dataset the active filter draws from: bookmarks come from their own snapshot (so
  *  done/removed ones still show); every other filter draws from the live inbox. The active
@@ -129,63 +142,53 @@ const hoverManager = createHoverManager({
  *  clicks use `:focus-visible`). Cleared on the next mouse interaction. */
 const kbdFocus = createKbdFocusRing({ containerSelector: "#inbox" });
 
-/** Snapshot the inbox's current focus so a re-render can restore it. Returns null when
- *  focus isn't inside the inbox (so background re-renders never steal focus). */
-function captureInboxFocus() {
-  const active = document.activeElement;
-  const inbox = $("#inbox");
-  if (!active || !inbox || !inbox.contains(active)) return null;
-  const row = active.closest(".n-row");
-  if (!row) return null;
-  return {
+const inboxFocusRetainer = createListFocusRetainer({
+  containerSelector: "#inbox",
+  rowSelector: ".n-row",
+  captureTarget: (row, active) => ({
     threadId: row.dataset.threadId,
     part: active.classList.contains("n-done") ? "done" : "open",
-  };
+  }),
+  matchRow: (row, target) => row.dataset.threadId === target.threadId,
+  resolveElement: (row, target) => {
+    // Prefer the part the user was on. Never fall back to the mark-as-done control for a
+    // non-"done" target: focusing a `.n-done` reveals it via `:focus-visible`, and during the
+    // background subject-resolution re-render storm that leaves stray mark-as-done checks on
+    // unresolved rows (which have no openable `.n-open[tabindex]` to catch focus instead).
+    const done = row.querySelector(".n-done");
+    const open = row.querySelector(".n-open[tabindex]");
+    return target.part === "done" ? done || open : open;
+  },
+});
+
+/** Snapshot the inbox's current row focus so a re-render can restore it. */
+function captureInboxFocus() {
+  return inboxFocusRetainer.capture();
 }
 
 /** Apply a focus target within the freshly-rendered inbox. Returns true if it landed. */
 function applyInboxFocus(target, { preventScroll = false } = {}) {
   if (!target) return false;
-  const inbox = $("#inbox");
-  if (!inbox) return false;
   if (target.selector) {
     const el = $(target.selector);
-    if (el) {
-      el.focus({ preventScroll });
-      return true;
-    }
-    return false;
+    if (!el) return false;
+    el.focus({ preventScroll });
+    return true;
   }
-  // Escape `"`/`\` for use inside the double-quoted attribute selector.
-  const safeId = String(target.threadId).replace(/["\\]/g, "\\$&");
-  const row = inbox.querySelector(`.n-row[data-thread-id="${safeId}"]`);
-  if (!row) return false;
-  // Prefer the part the user was on. Never fall back to the mark-as-done control for a
-  // non-"done" target: focusing a `.n-done` reveals it via `:focus-visible`, and during the
-  // background subject-resolution re-render storm that leaves stray mark-as-done checks on
-  // unresolved rows (which have no openable `.n-open[tabindex]` to catch focus instead).
-  const done = row.querySelector(".n-done");
-  const open = row.querySelector(".n-open[tabindex]");
-  const el = target.part === "done" ? done || open : open;
-  if (!el) return false;
-  el.focus({ preventScroll });
-  return true;
+  return inboxFocusRetainer.apply(target, { preventScroll });
 }
 
 /** Pick where focus should land after `removedIds` are removed from the current view:
  *  the nearest surviving row after the removed block (else before it), or the inbox
  *  container when the view empties out. Call BEFORE mutating `inboxGroups`. */
 function focusTargetAfterRemoval(removedIds) {
-  const removed = new Set(removedIds);
   const flat = visibleNotifications();
-  const firstRemoved = flat.findIndex((n) => removed.has(n.thread_id));
+  const removedSet = new Set(removedIds);
+  const survivor = focusNeighborAfterRemoval(flat, removedIds, (n) => n.thread_id);
   // None of the removed threads are in the current view (e.g. the list changed while a
   // confirm menu was open). Don't force focus anywhere — let renderInbox's preserved-focus
   // path keep the user where they are.
-  if (firstRemoved === -1) return null;
-  const after = flat.slice(firstRemoved + 1).find((n) => !removed.has(n.thread_id));
-  const before = [...flat.slice(0, firstRemoved)].reverse().find((n) => !removed.has(n.thread_id));
-  const survivor = after || before;
+  if (survivor == null && !flat.some((n) => removedSet.has(n.thread_id))) return null;
   // Nothing left to focus in the list — keep focus in a sensible place by sending it to the
   // inbox container (made programmatically focusable in renderInbox's empty branch).
   if (!survivor) return { selector: "#inbox" };
@@ -435,6 +438,18 @@ function announceView() {
   announce(`${activeTitleLabel()}, ${count} ${noun}.`);
 }
 
+function markInboxStale() {
+  inboxStale = true;
+  if (getActiveModule() === "notifications") {
+    loadInbox();
+  }
+}
+
+async function refreshInboxIfStale() {
+  if (!inboxStale) return;
+  await loadInbox();
+}
+
 export async function loadInbox() {
   try {
     const [inbox, bookmarks] = await Promise.all([invoke("list_inbox"), invoke("list_bookmarks")]);
@@ -446,7 +461,11 @@ export async function loadInbox() {
     }
     renderSidebar();
     renderInbox();
+    // `isAuthenticated()` may still be false while account bootstrap is in flight. Keep the
+    // module stale in that case so auth-driven re-activation can reload with resolved auth.
+    inboxStale = !isAuthenticated();
   } catch (err) {
+    inboxStale = true;
     $("#inbox").innerHTML = html`<pre class="error-detail">${err}</pre>`;
   }
 }
@@ -792,6 +811,7 @@ function confirmDone(ids, anchorEl) {
 /** Wire all inbox DOM listeners (row actions, sidebar filters, the bulk-done popover and
  *  its dismissal). Call once on DOMContentLoaded. `loadInbox()` then fetches + renders. */
 export function initInbox() {
+  registerSyncStaleListener("notifications", markInboxStale);
   // Render the smart-filter buttons (data-driven from FILTERS) before wiring their clicks.
   renderFilterList();
   // Sidebar smart filters.
@@ -848,29 +868,30 @@ export function initInbox() {
 // register it here.
 
 registerModule("notifications", {
+  sidebarSelector: "#sidebar-notifications",
   init: initInbox,
+  activate: refreshInboxIfStale,
+  shortcuts: [
+    {
+      group: "Navigation",
+      items: [
+        { keys: ["j", "↓"], desc: "Next notification" },
+        { keys: ["k", "↑"], desc: "Previous notification" },
+        { keys: ["Enter"], desc: "Open in browser" },
+      ],
+    },
+    {
+      group: "Triage",
+      items: [
+        { keys: ["d", "e"], desc: "Mark as done" },
+        { keys: ["c"], desc: "Copy link" },
+        { keys: ["b"], desc: "Bookmark / unbookmark" },
+        { keys: ["r"], desc: "Sync now" },
+      ],
+    },
+    {
+      group: "Filters",
+      items: [{ keys: ["1"], desc: "Switch smart filter (1 = All … 7 = Bookmarks)" }],
+    },
+  ],
 });
-
-registerShortcutGroups([
-  {
-    group: "Navigation",
-    items: [
-      { keys: ["j", "↓"], desc: "Next notification" },
-      { keys: ["k", "↑"], desc: "Previous notification" },
-      { keys: ["Enter"], desc: "Open in browser" },
-    ],
-  },
-  {
-    group: "Triage",
-    items: [
-      { keys: ["d", "e"], desc: "Mark as done" },
-      { keys: ["c"], desc: "Copy link" },
-      { keys: ["b"], desc: "Bookmark / unbookmark" },
-      { keys: ["r"], desc: "Sync now" },
-    ],
-  },
-  {
-    group: "Filters",
-    items: [{ keys: ["1"], desc: "Switch smart filter (1 = All … 7 = Bookmarks)" }],
-  },
-]);

@@ -3,21 +3,19 @@
  * DOM wiring; everything here is pure. */
 
 /** The top-level modules, in picker (and ⌘N) order. `id` is stable; `paneId` is the
- *  `<section class="pane">` the module shows; `sidebarSelector` is the sidebar nav for
- *  that module (toggled by the app shell's `data-module` attribute). Settings is
+ *  `<section class="pane">` the module shows. Module-specific sidebar + shortcuts wiring
+ *  is contributed by each module at registration time (see modules.js). Settings is
  *  intentionally absent — it's an overlay, not a module. */
 export const MODULES = [
   {
     id: "notifications",
     label: "Notifications",
     paneId: "view-notifications",
-    sidebarSelector: ".sidebar-module--notifications",
   },
   {
     id: "dependabot",
     label: "Dependabot",
     paneId: "view-dependabot",
-    sidebarSelector: ".sidebar-module--dependabot",
   },
 ];
 

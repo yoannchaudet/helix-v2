@@ -11,11 +11,10 @@ test("MODULES lists the expected top-level modules in picker order", () => {
   );
 });
 
-test("each module declares a label, a pane id, and a sidebar selector", () => {
+test("each module declares a label and pane id", () => {
   for (const m of MODULES) {
     assert.ok(m.label, `${m.id} has a label`);
     assert.ok(m.paneId, `${m.id} has a paneId`);
-    assert.ok(m.sidebarSelector, `${m.id} has a sidebarSelector`);
   }
 });
 

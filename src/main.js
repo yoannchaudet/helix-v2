@@ -10,10 +10,8 @@ import {
   startPolling,
   stopPolling,
   registerSyncEvents,
-  configureSync,
 } from "./js/sync.js";
 import { initSettings, loadSettings, showSettings } from "./js/settings.js";
-import { loadInbox } from "./js/inbox.js";
 import { startDependabotMergePolling, stopDependabotMergePolling } from "./js/dependabot.js";
 import {
   initModules,
@@ -24,14 +22,14 @@ import {
 import { initShortcuts } from "./js/shortcuts.js";
 
 // Note: inbox.js and dependabot.js self-register with the module system (registerModule)
-// and the shortcuts system (registerShortcutGroups) at import time. The named imports above
-// trigger those registrations, so their lifecycle callbacks are available when initModules()
-// runs — no separate side-effect imports are needed.
+// at import time, including their lifecycle, sidebar selector, and shortcut groups. The
+// named imports above trigger those registrations, so initModules() can wire them without
+// separate side-effect imports.
 
 /* main.js is the thin orchestrator: it wires each domain module's init on DOMContentLoaded
- * and connects the cross-domain lifecycle hooks. Modules self-register their lifecycle
- * (init/activate/deactivate) and keyboard shortcuts via `registerModule` and
- * `registerShortcutGroups` — see inbox.js and dependabot.js. Everything else lives in `js/`:
+ * and connects the cross-domain lifecycle hooks. Modules self-register lifecycle +
+ * shortcuts + sidebar contribution via `registerModule` — see inbox.js/dependabot.js.
+ * Everything else lives in `js/`:
  *  - state.js     cross-module poll/session state
  *  - sync.js      notifications status header, sync flow, poll countdown
  *  - settings.js  Settings pane (appearance/theme + poll-interval form)
@@ -68,9 +66,6 @@ window.addEventListener("DOMContentLoaded", () => {
   initModules();
 
   registerSyncEvents();
-  // Sync reloads the inbox after a sync (and after background subject resolution) via this
-  // hook, so the inbox view can stay in main.js without sync importing it (avoids a cycle).
-  configureSync({ onInboxStale: loadInbox });
   // Wire account auth transitions to the poll/sync lifecycle. account.js doesn't import the
   // sync machinery directly (avoids a circular dependency); it fires these hooks instead.
   configureAccount({
@@ -101,8 +96,7 @@ window.addEventListener("DOMContentLoaded", () => {
   loadSyncStatus();
   loadSettings();
   initUpdates();
-  // Load the account first so the inbox knows whether to show its signed-out hint.
-  loadAccount().finally(loadInbox);
+  loadAccount();
 
   // The window starts hidden (see tauri.conf.json) to avoid a flash on launch;
   // reveal it from Rust now that the DOM is built and styled. First restore the last opened
