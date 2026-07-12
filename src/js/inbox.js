@@ -310,7 +310,7 @@ function renderSidebar() {
   counts.bookmarked = bookmarkGroups
     .flatMap((g) => g.notifications)
     .filter((n) => typeMatch(n, selectedTypes)).length;
-  for (const el of $$(".source-count")) {
+  for (const el of $$("#filter-list .source-count[data-count]")) {
     const key = el.dataset.count;
     const value = counts[key] ?? 0;
     el.textContent = value ? String(value) : "";
