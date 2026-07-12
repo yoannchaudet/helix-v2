@@ -988,6 +988,56 @@ async fn merge_json<T: for<'de> Deserialize<'de>>(
     })
 }
 
+fn merge_refusal_message(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("message")?.as_str().map(str::to_string))
+        .filter(|message| !message.is_empty())
+        .unwrap_or_else(|| "GitHub is still blocking this merge.".to_string())
+}
+
+fn squash_merge_is_disallowed(message: &str) -> bool {
+    message.eq_ignore_ascii_case("Squash merges are not allowed on this repository.")
+}
+
+async fn merge_pull_request(
+    request: reqwest::RequestBuilder,
+    rates: &mut Vec<RateLimit>,
+) -> Result<MergeResponse, MergeRemoteError> {
+    let response = request.send().await.map_err(|e| MergeRemoteError {
+        class: MergeErrorClass::Transient,
+        message: format!("network error: {e}"),
+        rates: std::mem::take(rates),
+    })?;
+    let status = response.status();
+    let mut rate = RateLimit::default();
+    rate.update_from(response.headers());
+    rates.push(rate.clone());
+    if status.is_success() {
+        return response.json().await.map_err(|e| MergeRemoteError {
+            class: MergeErrorClass::Transient,
+            message: format!("failed to parse merge pull request: {e}"),
+            rates: std::mem::take(rates),
+        });
+    }
+    let body = response.text().await.unwrap_or_default().trim().to_string();
+    if status == reqwest::StatusCode::METHOD_NOT_ALLOWED {
+        let message = merge_refusal_message(&body);
+        if squash_merge_is_disallowed(&message) {
+            return Err(MergeRemoteError {
+                class: MergeErrorClass::Permanent,
+                message: format!("GitHub returned {status}: {body}"),
+                rates: std::mem::take(rates),
+            });
+        }
+        return Ok(MergeResponse {
+            merged: false,
+            message,
+        });
+    }
+    Err(merge_error(status, body, &rate, rates))
+}
+
 async fn merge_empty(
     request: reqwest::RequestBuilder,
     rates: &mut Vec<RateLimit>,
@@ -1050,6 +1100,10 @@ async fn merge_pages<T: for<'de> Deserialize<'de>>(
             None => return Ok(all),
         }
     }
+}
+
+fn direct_merge_attempt_allowed(mergeable_state: Option<&str>) -> bool {
+    matches!(mergeable_state, Some("clean" | "unstable"))
 }
 
 /// Process one queue head. This uses serial REST calls: normal queue heads are few, and REST
@@ -1267,7 +1321,9 @@ where
         });
     }
 
-    if pull.mergeable_state.as_deref() == Some("clean") {
+    // `unstable` is still mergeable but has a non-passing status, which can come from optional
+    // checks. The merge endpoint remains authoritative if the REST mergeability snapshot is stale.
+    if direct_merge_attempt_allowed(pull.mergeable_state.as_deref()) {
         let _mutation_lease = mutation_guard.lock().await;
         if is_cancelled() {
             return Ok(MergeRemoteResult {
@@ -1275,7 +1331,7 @@ where
                 rates,
             });
         }
-        let merged: MergeResponse = merge_json(
+        let merged = merge_pull_request(
             authed(
                 client
                     .put(format!(
@@ -1288,7 +1344,6 @@ where
                     })),
                 token,
             ),
-            "merge pull request",
             &mut rates,
         )
         .await?;
@@ -2757,6 +2812,46 @@ mod tests {
             .into();
         assert_eq!(resolved.state.as_deref(), Some("open"));
         assert_eq!(resolved.mergeable_state.as_deref(), Some("clean"));
+    }
+
+    #[test]
+    fn direct_merge_attempts_clean_and_unstable_pull_requests() {
+        assert!(direct_merge_attempt_allowed(Some("clean")));
+        assert!(
+            direct_merge_attempt_allowed(Some("unstable")),
+            "GitHub's merge endpoint must decide whether a non-passing status is required"
+        );
+        for state in ["blocked", "behind", "dirty", "draft", "unknown"] {
+            assert!(
+                !direct_merge_attempt_allowed(Some(state)),
+                "{state} must not trigger a merge attempt"
+            );
+        }
+        assert!(!direct_merge_attempt_allowed(None));
+    }
+
+    #[test]
+    fn merge_refusal_uses_github_message_or_safe_fallback() {
+        assert_eq!(
+            merge_refusal_message(r#"{"message":"Pull Request is not mergeable"}"#),
+            "Pull Request is not mergeable"
+        );
+        assert_eq!(
+            merge_refusal_message(r#"{"message":""}"#),
+            "GitHub is still blocking this merge."
+        );
+        assert_eq!(
+            merge_refusal_message("not json"),
+            "GitHub is still blocking this merge."
+        );
+    }
+
+    #[test]
+    fn disallowed_squash_merge_is_a_permanent_refusal() {
+        assert!(squash_merge_is_disallowed(
+            "Squash merges are not allowed on this repository."
+        ));
+        assert!(!squash_merge_is_disallowed("Pull Request is not mergeable"));
     }
 
     /* ------------------------- exact-head check diagnosis ------------------- */
