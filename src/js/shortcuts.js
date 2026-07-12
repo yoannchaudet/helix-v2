@@ -3,32 +3,12 @@ import { html, rawHtml } from "./dom.js";
 
 /* The keyboard-shortcuts cheatsheet: a single in-app overlay opened by `?` or the macOS
  * "Keyboard Shortcuts" menu item (which emits `menu:shortcuts`). The SHORTCUTS registry
- * below is the single source of truth for what the overlay shows; the actual key handling
- * for the inbox-scoped commands lives in inbox.js. */
+ * below is the built-in reference; modules can register additional groups via
+ * `registerShortcutGroup()`. The actual key handling for module-scoped commands lives in
+ * each module's controller (inbox.js, dependabot.js). */
 
 /** Grouped shortcut reference. `keys` are rendered as individual <kbd> chips. */
 const SHORTCUTS = [
-  {
-    group: "Navigation",
-    items: [
-      { keys: ["j", "↓"], desc: "Next notification" },
-      { keys: ["k", "↑"], desc: "Previous notification" },
-      { keys: ["Enter"], desc: "Open in browser" },
-    ],
-  },
-  {
-    group: "Triage",
-    items: [
-      { keys: ["d", "e"], desc: "Mark as done" },
-      { keys: ["c"], desc: "Copy link" },
-      { keys: ["b"], desc: "Bookmark / unbookmark" },
-      { keys: ["r"], desc: "Sync now" },
-    ],
-  },
-  {
-    group: "Filters",
-    items: [{ keys: ["1"], desc: "Switch smart filter (1 = All … 7 = Bookmarks)" }],
-  },
   {
     group: "General",
     items: [
@@ -40,6 +20,25 @@ const SHORTCUTS = [
     ],
   },
 ];
+
+/** Module-registered shortcut groups (inserted before the General group). */
+const moduleShortcutGroups = [];
+
+/** Register one shortcut group for the cheatsheet overlay. Modules call this during their
+ *  init to contribute their own keybindings. Groups appear before the built-in General group. */
+export function registerShortcutGroup(group) {
+  moduleShortcutGroups.push(group);
+}
+
+/** Register multiple shortcut groups at once. */
+export function registerShortcutGroups(groups) {
+  for (const g of groups) moduleShortcutGroups.push(g);
+}
+
+/** All shortcut groups in display order: module-registered groups first, then built-in. */
+function allShortcutGroups() {
+  return [...moduleShortcutGroups, ...SHORTCUTS];
+}
 
 /** Render the cheatsheet body (pure). Each shortcut row pairs its <kbd> chips with a
  *  description; groups become labelled sections. */
@@ -91,7 +90,7 @@ export function openShortcuts() {
           ${rawHtml('<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>')}
         </button>
       </div>
-      <div class="shortcuts-grid">${rawHtml(renderShortcuts(SHORTCUTS))}</div>
+      <div class="shortcuts-grid">${rawHtml(renderShortcuts(allShortcutGroups()))}</div>
     </div>`;
 
   // Backdrop click (outside the panel) closes; clicks inside don't bubble out to close.
