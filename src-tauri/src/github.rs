@@ -2038,16 +2038,35 @@ pub struct MergeQueuePolicy {
     pub rates: Vec<RateLimit>,
 }
 
+#[derive(Debug)]
+pub struct RefUpdateRestrictionResult {
+    /// `None` means the active-rules endpoint was inaccessible or inconclusive.
+    pub restricted: Option<bool>,
+    pub rates: Vec<RateLimit>,
+}
+
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 struct BranchRuleItem {
     #[serde(rename = "type")]
     rule_type: String,
+    #[serde(default)]
+    ruleset_id: Option<i64>,
 }
 
 /// Whether any active branch rule requires a merge queue (`type == "merge_queue"`, per
 /// `docs.github.com/en/rest/repos/rules`).
 fn rules_indicate_merge_queue(rules: &[BranchRuleItem]) -> bool {
     rules.iter().any(|rule| rule.rule_type == "merge_queue")
+}
+
+/// Rulesets that actively restrict updates to the matching ref. A missing ruleset ID makes the
+/// result inconclusive because bypass permission cannot then be checked safely.
+fn update_rule_ruleset_ids(rules: &[BranchRuleItem]) -> Option<std::collections::BTreeSet<i64>> {
+    rules
+        .iter()
+        .filter(|rule| rule.rule_type == "update")
+        .map(|rule| rule.ruleset_id)
+        .collect()
 }
 
 enum BranchRulesOutcome {
@@ -2092,7 +2111,7 @@ async fn fetch_branch_rules(
         }
         if status == reqwest::StatusCode::FORBIDDEN {
             let body = response.text().await.unwrap_or_default();
-            if !body.to_lowercase().contains("rate limit") {
+            if !body.to_lowercase().contains("rate limit") && rate.retry_after.is_none() {
                 return Ok(BranchRulesOutcome::Inconclusive);
             }
             return Err(merge_error(status, body.trim().to_string(), &rate, rates));
@@ -2127,6 +2146,113 @@ struct MergeQueueLookupData {
 struct MergeQueueLookupRepo {
     #[serde(rename = "mergeQueue")]
     merge_queue: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RulesetBypass {
+    #[serde(default)]
+    current_user_can_bypass: Option<String>,
+}
+
+/// Fetch this actor's bypass capability for one active ruleset. Missing/inaccessible details are
+/// inconclusive; rate, network, and server failures still propagate through the normal backoff.
+async fn fetch_ruleset_bypass(
+    client: &reqwest::Client,
+    token: &str,
+    repo_full_name: &str,
+    ruleset_id: i64,
+    rates: &mut Vec<RateLimit>,
+) -> Result<Option<RulesetBypass>, MergeRemoteError> {
+    let response = authed_get(
+        client,
+        &format!("{API_BASE}/repos/{repo_full_name}/rulesets/{ruleset_id}"),
+        token,
+    )
+    .send()
+    .await
+    .map_err(|e| MergeRemoteError {
+        class: MergeErrorClass::Transient,
+        message: format!("network error: {e}"),
+        rates: std::mem::take(rates),
+    })?;
+    let status = response.status();
+    let mut rate = RateLimit::default();
+    rate.update_from(response.headers());
+    rates.push(rate.clone());
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if status == reqwest::StatusCode::FORBIDDEN {
+        let body = response.text().await.unwrap_or_default();
+        if !body.to_lowercase().contains("rate limit") && rate.retry_after.is_none() {
+            return Ok(None);
+        }
+        return Err(merge_error(status, body.trim().to_string(), &rate, rates));
+    }
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default().trim().to_string();
+        return Err(merge_error(status, body, &rate, rates));
+    }
+    response
+        .json()
+        .await
+        .map(Some)
+        .map_err(|e| MergeRemoteError {
+            class: MergeErrorClass::Transient,
+            message: format!("failed to parse ruleset bypass permission: {e}"),
+            rates: std::mem::take(rates),
+        })
+}
+
+/// Determine whether active branch rules prohibit this account from updating the target ref.
+/// The update rule alone is insufficient because bypass actors still receive it; terminalize only
+/// when its source ruleset says this actor can `never` bypass. Inaccessible rule/ruleset details
+/// are inconclusive rather than evidence that the ref is writable.
+pub async fn detect_ref_update_restriction(
+    client: &reqwest::Client,
+    token: &str,
+    repo_full_name: &str,
+    base_branch: &str,
+) -> Result<RefUpdateRestrictionResult, MergeRemoteError> {
+    let mut rates = Vec::new();
+    let rules =
+        match fetch_branch_rules(client, token, repo_full_name, base_branch, &mut rates).await? {
+            BranchRulesOutcome::Rules(rules) => rules,
+            BranchRulesOutcome::Inconclusive => {
+                return Ok(RefUpdateRestrictionResult {
+                    restricted: None,
+                    rates,
+                });
+            }
+        };
+    let Some(ruleset_ids) = update_rule_ruleset_ids(&rules) else {
+        return Ok(RefUpdateRestrictionResult {
+            restricted: None,
+            rates,
+        });
+    };
+    if ruleset_ids.is_empty() {
+        return Ok(RefUpdateRestrictionResult {
+            restricted: Some(false),
+            rates,
+        });
+    }
+    let mut inconclusive = false;
+    for ruleset_id in ruleset_ids {
+        match fetch_ruleset_bypass(client, token, repo_full_name, ruleset_id, &mut rates).await? {
+            Some(ruleset) if ruleset.current_user_can_bypass.as_deref() == Some("never") => {
+                return Ok(RefUpdateRestrictionResult {
+                    restricted: Some(true),
+                    rates,
+                });
+            }
+            Some(ruleset) if ruleset.current_user_can_bypass.is_some() => {}
+            Some(_) => inconclusive = true,
+            None => inconclusive = true,
+        }
+    }
+    let restricted = if inconclusive { None } else { Some(false) };
+    Ok(RefUpdateRestrictionResult { restricted, rates })
 }
 
 /// Detect whether `base_branch` in `repo_full_name` merges directly or requires GitHub's merge
@@ -3367,17 +3493,37 @@ mod tests {
     /* ---------------------------- merge-queue policy ------------------------- */
 
     #[test]
-    fn branch_rules_detect_merge_queue_by_type() {
-        let body = r#"[{"type": "pull_request"}, {"type": "merge_queue"}]"#;
+    fn branch_rules_detect_merge_queue_and_update_rule_sources() {
+        let body = r#"[
+            {"type": "pull_request", "ruleset_id": 1},
+            {"type": "merge_queue", "ruleset_id": 2},
+            {"type": "update", "ruleset_id": 3},
+            {"type": "update", "ruleset_id": 3}
+        ]"#;
         let rules: Vec<BranchRuleItem> = serde_json::from_str(body).unwrap();
         assert!(rules_indicate_merge_queue(&rules));
+        assert_eq!(
+            update_rule_ruleset_ids(&rules),
+            Some(std::collections::BTreeSet::from([3]))
+        );
 
         let body = r#"[{"type": "pull_request"}, {"type": "required_status_checks"}]"#;
         let rules: Vec<BranchRuleItem> = serde_json::from_str(body).unwrap();
         assert!(!rules_indicate_merge_queue(&rules));
+        assert_eq!(
+            update_rule_ruleset_ids(&rules),
+            Some(std::collections::BTreeSet::new())
+        );
 
         let rules: Vec<BranchRuleItem> = serde_json::from_str("[]").unwrap();
         assert!(!rules_indicate_merge_queue(&rules));
+        assert_eq!(
+            update_rule_ruleset_ids(&rules),
+            Some(std::collections::BTreeSet::new())
+        );
+
+        let rules: Vec<BranchRuleItem> = serde_json::from_str(r#"[{"type": "update"}]"#).unwrap();
+        assert_eq!(update_rule_ruleset_ids(&rules), None);
     }
 
     #[test]
