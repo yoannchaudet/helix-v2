@@ -254,7 +254,11 @@ test("operationFlow escapes node labels/details even though they're internal str
 
 test("operationActionLog renders a timestamped, ordered, escaped log", () => {
   const log = operationActionLog([
-    { timestamp: "2026-01-01T00:00:00Z", message: "First <b>step</b>", detail: "info" },
+    {
+      timestamp: "2026-01-01T00:00:00Z",
+      message: "First <b>step</b>",
+      detail: "<em>info</em>",
+    },
     { timestamp: "2026-01-02T00:00:00Z", message: "Second step" },
   ]);
   const firstIndex = log.indexOf("First");
@@ -262,6 +266,9 @@ test("operationActionLog renders a timestamped, ordered, escaped log", () => {
   assert.ok(firstIndex >= 0 && secondIndex > firstIndex);
   assert.ok(log.includes("&lt;b&gt;step&lt;/b&gt;"));
   assert.ok(!log.includes("<b>step</b>"));
+  assert.ok(log.includes('<span class="op-log-detail">&lt;em&gt;info&lt;/em&gt;</span>'));
+  assert.ok(!log.includes("&lt;span class=&quot;op-log-detail&quot;"));
+  assert.ok(!log.includes("<em>info</em>"));
   assert.ok(log.includes('datetime="2026-01-01T00:00:00Z"'));
 });
 

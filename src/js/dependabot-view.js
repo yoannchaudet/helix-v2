@@ -161,10 +161,11 @@ export function operationActionLog(actionLog) {
             event.timestamp,
           )}</time>`
         : html`<time class="op-log-time">—</time>`;
+      const detail = event.detail ? html`<span class="op-log-detail">${event.detail}</span>` : "";
       return html`<li class="op-log-item">
         ${rawHtml(timestamp)}
         <span class="op-log-message">${event.message}</span>
-        ${event.detail ? html`<span class="op-log-detail">${event.detail}</span>` : ""}
+        ${rawHtml(detail)}
       </li>`;
     })
     .join("");
