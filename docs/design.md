@@ -435,12 +435,13 @@ module's **sidebar + content** split:
   The PR list persists each PR's target branch from GitHub's `base.ref`, displays it on the PR
   row, and snapshots it onto the durable operation so Operations retains the same context.
   Target branches are informational and do not partition or otherwise change the repo FIFO.
-  At the head, Helix validates that the open/non-draft/non-conflicting PR and all its commits
-  are Dependabot-owned, approves the current head SHA, and auto-detects the base branch's merge
-  strategy. Direct merges update a behind branch, then revalidate and reapprove its new head;
-  expected PAT-authored update merge commits are tracked as a parent-linked chain without
-  allowing unrelated human commits. A ready direct PR is merged with the validated SHA using the
-  first repository-enabled method in preference order: squash, rebase, then merge commit. If
+  At the head, Helix verifies that the open/non-draft/non-conflicting PR is still authored by
+  Dependabot, approves the current head SHA, and auto-detects the base branch's merge strategy.
+  Helix trusts the current head of that PR regardless of whether later commits were pushed by
+  Dependabot, another workflow, or a human; it does not validate per-commit provenance. Direct
+  merges update a behind branch, then approve its new head. A ready direct PR is merged with the
+  exact accepted SHA using the first repository-enabled method in preference order: squash,
+  rebase, then merge commit. If
   GitHub rejects an advertised method as disallowed, Helix tries the next enabled method under
   the same mutation guard.
 - Queue-required branches use GitHub's GraphQL auto-merge/enqueue/dequeue operations instead:
