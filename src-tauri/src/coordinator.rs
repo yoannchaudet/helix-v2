@@ -10,7 +10,11 @@
 
 use crate::db::Db;
 use crate::sync::SyncStatus;
-use crate::{auth, github, sync, AppState, EventSink};
+use crate::{
+    auth,
+    command_error::{lock_conn, CommandResult},
+    github, sync, AppState, EventSink,
+};
 use serde::Serialize;
 use tauri::{Manager, State};
 
@@ -89,7 +93,7 @@ where
 pub async fn sync_now(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-) -> Result<SyncResult, String> {
+) -> CommandResult<SyncResult> {
     // The core returns the token it fetched with so the background resolver reuses the
     // *same* credential — matching the original (a mid-sync sign-out/token swap must not
     // make resolution run under, or silently skip because of, a different token).
@@ -124,7 +128,7 @@ async fn sync_now_core<S, Fetch, Fut>(
     db: &Db,
     sink: S,
     fetch: Fetch,
-) -> Result<(SyncResult, String), String>
+) -> CommandResult<(SyncResult, String)>
 where
     S: EventSink + Clone + Send + Sync + 'static,
     Fetch: FnOnce(String, Box<dyn Fn(u32, usize) + Send>) -> Fut,
@@ -155,29 +159,32 @@ where
                 sync::record_error(conn, &err)
             });
             sink.emit("sync:error", serde_json::json!({ "message": err.clone() }));
-            return Err(err);
+            return Err(err.into());
         }
     };
 
     // Store the fetched threads and record success. A DB failure here must also be
     // recorded in sync_state so the UI reflects the real last outcome (not stale state).
-    let store_result = (|| -> Result<sync::StoreOutcome, String> {
-        let mut guard = db.0.lock().map_err(|e| e.to_string())?;
+    let store_result = (|| -> CommandResult<sync::StoreOutcome> {
+        let mut guard = lock_conn(&db.0)?;
         let conn: &mut rusqlite::Connection = &mut guard;
-        let stored =
-            sync::store_notifications(conn, &outcome.threads).map_err(|e| e.to_string())?;
-        sync::refresh_bookmark_snapshots(conn).map_err(|e| e.to_string())?;
-        sync::record_success(conn, &outcome.rate).map_err(|e| e.to_string())?;
+        let stored = sync::store_notifications(conn, &outcome.threads)?;
+        sync::refresh_bookmark_snapshots(conn)?;
+        sync::record_success(conn, &outcome.rate)?;
         Ok(stored)
     })();
 
     let stored = match store_result {
         Ok(s) => s,
         Err(err) => {
+            let err_msg = err.to_string();
             best_effort(&db.0, "recording the sync error", |conn| {
-                sync::record_error(conn, &err)
+                sync::record_error(conn, &err_msg)
             });
-            sink.emit("sync:error", serde_json::json!({ "message": err.clone() }));
+            sink.emit(
+                "sync:error",
+                serde_json::json!({ "message": err_msg.clone() }),
+            );
             return Err(err);
         }
     };
@@ -389,23 +396,23 @@ where
 
 /// Read the current sync status (last sync, status/error, rate limit, stored count).
 #[tauri::command]
-pub fn sync_status(state: State<'_, AppState>) -> Result<SyncStatus, String> {
-    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
-    sync::read_status(&conn).map_err(|e| e.to_string())
+pub fn sync_status(state: State<'_, AppState>) -> CommandResult<SyncStatus> {
+    let conn = lock_conn(&state.db.0)?;
+    Ok(sync::read_status(&conn)?)
 }
 
 /// Read all stored notifications grouped by repository (offline-first local read).
 #[tauri::command]
-pub fn list_inbox(state: State<'_, AppState>) -> Result<Vec<sync::RepoGroup>, String> {
-    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
-    sync::list_by_repo(&conn).map_err(|e| e.to_string())
+pub fn list_inbox(state: State<'_, AppState>) -> CommandResult<Vec<sync::RepoGroup>> {
+    let conn = lock_conn(&state.db.0)?;
+    Ok(sync::list_by_repo(&conn)?)
 }
 
 /// Read all bookmarks grouped by repository (local-only; survives done/removal).
 #[tauri::command]
-pub fn list_bookmarks(state: State<'_, AppState>) -> Result<Vec<sync::RepoGroup>, String> {
-    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
-    sync::list_bookmarks(&conn).map_err(|e| e.to_string())
+pub fn list_bookmarks(state: State<'_, AppState>) -> CommandResult<Vec<sync::RepoGroup>> {
+    let conn = lock_conn(&state.db.0)?;
+    Ok(sync::list_bookmarks(&conn)?)
 }
 
 /// Bookmark or un-bookmark a thread (local-only).
@@ -414,13 +421,14 @@ pub fn set_bookmark(
     thread_id: String,
     bookmarked: bool,
     state: State<'_, AppState>,
-) -> Result<(), String> {
-    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+) -> CommandResult<()> {
+    let conn = lock_conn(&state.db.0)?;
     if bookmarked {
-        sync::add_bookmark(&conn, &thread_id).map_err(|e| e.to_string())
+        sync::add_bookmark(&conn, &thread_id)?;
     } else {
-        sync::remove_bookmark(&conn, &thread_id).map_err(|e| e.to_string())
+        sync::remove_bookmark(&conn, &thread_id)?;
     }
+    Ok(())
 }
 
 /// A single thread that failed to mutate, surfaced to the UI so partial failures are
@@ -455,7 +463,7 @@ async fn mutate_threads<C, Fut, F>(
     thread_ids: Vec<String>,
     call: C,
     apply_local: F,
-) -> Result<MutationResult, String>
+) -> CommandResult<MutationResult>
 where
     C: Fn(String, String) -> Fut + Clone + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<github::RateLimit, github::MutationError>>
@@ -532,10 +540,10 @@ where
         }
     }
 
-    let mut guard = db.0.lock().map_err(|e| e.to_string())?;
+    let mut guard = lock_conn(&db.0)?;
     let conn: &mut rusqlite::Connection = &mut guard;
     if !succeeded.is_empty() {
-        apply_local(conn, &succeeded).map_err(|e| e.to_string())?;
+        apply_local(conn, &succeeded)?;
     }
     let rate_remaining = rate.lowest_remaining();
     // The lock is already held here, so log inline rather than re-locking via `best_effort`.
@@ -558,7 +566,7 @@ where
 pub async fn mark_threads_done(
     thread_ids: Vec<String>,
     state: State<'_, AppState>,
-) -> Result<MutationResult, String> {
+) -> CommandResult<MutationResult> {
     let client = reqwest::Client::new();
     mutate_threads(
         &state.db,
@@ -787,7 +795,7 @@ mod tests {
             }
         }));
 
-        assert!(result.unwrap_err().contains("Not connected"));
+        assert!(result.unwrap_err().to_string().contains("Not connected"));
         assert!(!called, "fetch must not run when no token is stored");
         assert!(sink.names().is_empty(), "no events before the token check");
     }
@@ -803,7 +811,7 @@ mod tests {
             }));
 
         let err = result.unwrap_err();
-        assert!(err.contains("401"), "surfaced error: {err}");
+        assert!(err.to_string().contains("401"), "surfaced error: {err}");
         assert_eq!(sink.names(), vec!["sync:started", "sync:error"]);
         // The failure is persisted so the UI reflects the real last outcome.
         let st = status(&db);
@@ -827,7 +835,7 @@ mod tests {
 
         let err = result.unwrap_err();
         assert!(
-            err.contains("notification sync timed out"),
+            err.to_string().contains("notification sync timed out"),
             "surfaced error: {err}"
         );
         assert_eq!(sink.names(), vec!["sync:started", "sync:error"]);
@@ -1009,7 +1017,7 @@ mod tests {
             |_token, _id| async move { Ok(RateLimit::default()) },
             sync::mark_done_local,
         ));
-        assert!(result.unwrap_err().contains("Not connected"));
+        assert!(result.unwrap_err().to_string().contains("Not connected"));
     }
 
     /* ------------------------- resolve_pending_subjects ----------------------- */

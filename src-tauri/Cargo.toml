@@ -33,6 +33,7 @@ tauri-plugin-autostart = "2"
 # listings) so bursts don't trip a secondary rate limit (Tauri's runtime is already tokio;
 # this just lets us `sleep`).
 tokio = { version = "1", features = ["sync", "time"] }
+thiserror = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri-plugin-updater = "2.10.1"

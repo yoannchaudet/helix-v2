@@ -1426,6 +1426,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-autostart",
  "tauri-plugin-updater",
+ "thiserror 2.0.18",
  "tokio",
  "window-vibrancy 0.7.1",
 ]
