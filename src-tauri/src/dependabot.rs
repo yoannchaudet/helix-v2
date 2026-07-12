@@ -904,7 +904,6 @@ impl MergePhase {
             Self::Unknown(other) => other.as_str(),
         }
     }
-
 }
 
 impl From<&str> for MergePhase {

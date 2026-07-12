@@ -4529,7 +4529,7 @@ mod tests {
                 None,
                 Some("main"),
             )
-                .unwrap();
+            .unwrap();
             dependabot::set_queue_metadata(&conn, id, None, true).unwrap();
         }
         tick(&db, &fake);
