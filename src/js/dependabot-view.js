@@ -33,6 +33,14 @@ const OP_LABELS = {
   timed_out: "Timed out",
 };
 
+const OP_STEP_STATE_LABELS = {
+  done: "completed",
+  current: "current",
+  upcoming: "upcoming",
+  skipped: "skipped",
+  failed: "failed",
+};
+
 function operationBadge(operation) {
   const tone =
     operation.state === "merged"
@@ -126,14 +134,18 @@ const STRATEGY_BRANCH_LABELS = {
 };
 
 /** One read-only flow-graph node. The operation's current step is identified with
- *  `aria-current="step"`; per-step metadata remains available as a tooltip. */
+ *  `aria-current="step"` and each node exposes state/detail in both text and aria labels. */
 function opNodeMarkup(node) {
   const current = node.state === "current" ? rawHtml(` aria-current="step"`) : "";
+  const stateLabel = OP_STEP_STATE_LABELS[node.state] || node.state;
+  const summary = `${node.label}, ${stateLabel}${node.detail ? `. ${node.detail}` : ""}`;
   const titleAttr = node.detail ? html` title="${node.detail}"` : "";
-  return html`<li class="op-step op-step--${node.group} op-step--${node.state}"${current}>
+  const detail = node.detail ? html`<span class="op-node-detail">${node.detail}</span>` : "";
+  return html`<li class="op-step op-step--${node.group} op-step--${node.state}" aria-label="${summary}"${current}>
     <span class="op-node" data-node-id="${node.id}" ${rawHtml(titleAttr)}>
       <span class="op-node-dot" aria-hidden="true"></span>
       <span class="op-node-label">${node.label}</span>
+      ${rawHtml(detail)}
     </span>
   </li>`;
 }
@@ -204,7 +216,7 @@ export function operationDetailPanel(detail) {
   return html`
     ${rawHtml(operationFlow(model.graph))}
     ${rawHtml(metaLine)} ${rawHtml(currentExplanation)} ${rawHtml(nextAction)}
-    <h3 class="op-log-heading">Activity</h3>
+    <h4 class="op-log-heading">Activity</h4>
     ${rawHtml(operationActionLog(model.actionLog))}
   `;
 }

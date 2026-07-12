@@ -28,6 +28,19 @@ test("lists open Dependabot PRs grouped by repository", async ({ page }) => {
   );
 });
 
+test("Dependabot view is exposed as a named region", async ({ page }) => {
+  await openDependabot(page);
+
+  await expect(page.locator("#view-dependabot")).toHaveAttribute(
+    "aria-labelledby",
+    "dependabot-view-title",
+  );
+  await expect(page.getByRole("region", { name: "Dependabot" })).toHaveAttribute(
+    "id",
+    "view-dependabot",
+  );
+});
+
 test("shows merge readiness and a merge action without notification controls", async ({ page }) => {
   await openDependabot(page);
 
@@ -443,9 +456,13 @@ test("expanding an operation shows a loading state, then the fetched flow-graph 
   await expect(page.locator("#dependabot .op-panel-loading")).toHaveCount(0);
   await expect(page.locator("#dependabot .op-flow")).toBeVisible();
   await expect(page.locator("#dependabot .op-step[aria-current='step'] .op-node")).toHaveCount(1);
+  await expect(page.locator("#dependabot .op-step[aria-label*='completed']")).not.toHaveCount(0);
+  await expect(page.locator("#dependabot .op-step[aria-label*='current']")).not.toHaveCount(0);
+  await expect(page.locator("#dependabot .op-step[aria-label*='upcoming']")).not.toHaveCount(0);
   await expect(page.locator("#dependabot .op-log-message")).toContainText(
     "Merge operation queued.",
   );
+  await expect(page.locator("#dependabot .op-log-heading")).toHaveJSProperty("tagName", "H4");
 
   // Collapsing removes the whole panel and returns the disclosure to its resting state.
   await disclosure.click();
