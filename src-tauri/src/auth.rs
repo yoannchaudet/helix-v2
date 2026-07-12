@@ -16,6 +16,7 @@
 
 use rusqlite::Connection;
 
+use crate::command_error::{lock_conn, CommandError, CommandResult};
 use crate::db::Db;
 use crate::settings;
 
@@ -33,38 +34,38 @@ pub fn storage_is_unencrypted() -> bool {
 // dev/SQLite path acquires the lock, and only briefly.
 
 /// Store (or replace) the PAT.
-pub fn store_token(db: &Db, token: &str) -> Result<(), String> {
+pub fn store_token(db: &Db, token: &str) -> CommandResult<()> {
     if storage_is_unencrypted() {
-        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let conn = lock_conn(&db.0)?;
         settings::set_string(&conn, settings::KEY_DEV_GITHUB_PAT, token)
-            .map_err(|e| format!("failed to store token: {e}"))
+            .map_err(|e| CommandError::Message(format!("failed to store token: {e}")))
     } else {
         keychain::store(token)
     }
 }
 
 /// Read the PAT, returning `None` when none is stored.
-pub fn read_token(db: &Db) -> Result<Option<String>, String> {
+pub fn read_token(db: &Db) -> CommandResult<Option<String>> {
     if storage_is_unencrypted() {
-        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let conn = lock_conn(&db.0)?;
         settings::get_string(&conn, settings::KEY_DEV_GITHUB_PAT)
-            .map_err(|e| format!("failed to read token: {e}"))
+            .map_err(|e| CommandError::Message(format!("failed to read token: {e}")))
     } else {
         keychain::read()
     }
 }
 
 /// Whether a PAT is currently stored.
-pub fn has_token(db: &Db) -> Result<bool, String> {
+pub fn has_token(db: &Db) -> CommandResult<bool> {
     Ok(read_token(db)?.is_some())
 }
 
 /// Remove the stored PAT. A missing entry is treated as success.
-pub fn delete_token(db: &Db) -> Result<(), String> {
+pub fn delete_token(db: &Db) -> CommandResult<()> {
     if storage_is_unencrypted() {
-        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let conn = lock_conn(&db.0)?;
         settings::delete_key(&conn, settings::KEY_DEV_GITHUB_PAT)
-            .map_err(|e| format!("failed to delete token: {e}"))
+            .map_err(|e| CommandError::Message(format!("failed to delete token: {e}")))
     } else {
         // Keychain I/O first, with no lock held; then a brief lock only to scrub any
         // plaintext dev token a prior debug run may have left in the shared SQLite DB.
@@ -84,16 +85,18 @@ pub fn delete_token(db: &Db) -> Result<(), String> {
 /// silently carries an unencrypted token. In debug builds it is a deliberate no-op: we must
 /// not touch the Keychain (that would reintroduce the very prompt this design avoids), and
 /// a stale Keychain item is harmless — the SQLite backend is authoritative in dev.
-pub fn purge_inactive_token(conn: &Connection) -> Result<(), String> {
+pub fn purge_inactive_token(conn: &Connection) -> CommandResult<()> {
     if !storage_is_unencrypted() {
         settings::delete_key(conn, settings::KEY_DEV_GITHUB_PAT)
-            .map_err(|e| format!("failed to purge stale dev token: {e}"))?;
+            .map_err(|e| CommandError::Message(format!("failed to purge stale dev token: {e}")))?;
     }
     Ok(())
 }
 
 /// macOS Keychain backend (used by release builds).
 mod keychain {
+    use crate::command_error::{CommandError, CommandResult};
+
     use keyring_core::{Entry, Error as KeyringError};
 
     /// Keychain service identifier (matches the app bundle id for clarity in Keychain Access).
@@ -101,28 +104,31 @@ mod keychain {
     /// Account name under which the PAT is stored.
     const ACCOUNT: &str = "github-pat";
 
-    fn entry() -> Result<Entry, String> {
-        Entry::new(SERVICE, ACCOUNT).map_err(|e| format!("keychain error: {e}"))
+    fn entry() -> CommandResult<Entry> {
+        Entry::new(SERVICE, ACCOUNT)
+            .map_err(|e| CommandError::Message(format!("keychain error: {e}")))
     }
 
-    pub fn store(token: &str) -> Result<(), String> {
+    pub fn store(token: &str) -> CommandResult<()> {
         entry()?
             .set_password(token)
-            .map_err(|e| format!("failed to store token: {e}"))
+            .map_err(|e| CommandError::Message(format!("failed to store token: {e}")))
     }
 
-    pub fn read() -> Result<Option<String>, String> {
+    pub fn read() -> CommandResult<Option<String>> {
         match entry()?.get_password() {
             Ok(token) => Ok(Some(token)),
             Err(KeyringError::NoEntry) => Ok(None),
-            Err(e) => Err(format!("failed to read token: {e}")),
+            Err(e) => Err(CommandError::Message(format!("failed to read token: {e}"))),
         }
     }
 
-    pub fn delete() -> Result<(), String> {
+    pub fn delete() -> CommandResult<()> {
         match entry()?.delete_credential() {
             Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
-            Err(e) => Err(format!("failed to delete token: {e}")),
+            Err(e) => Err(CommandError::Message(format!(
+                "failed to delete token: {e}"
+            ))),
         }
     }
 }

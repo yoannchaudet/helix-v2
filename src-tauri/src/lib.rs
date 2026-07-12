@@ -7,6 +7,7 @@
 //! through the commands below, always with live, color-coded feedback (see `AGENT.md`).
 
 mod auth;
+mod command_error;
 mod coordinator;
 mod db;
 mod dependabot;
@@ -15,6 +16,7 @@ mod github;
 mod settings;
 mod sync;
 
+use command_error::{lock_conn, CommandError, CommandResult};
 use db::Db;
 use github::GitHubUser;
 use serde::Serialize;
@@ -106,10 +108,10 @@ fn apply_window_theme(window: &tauri::WebviewWindow, pref: &str) {
 
 /// Report the local database path, schema version, and tables.
 #[tauri::command]
-fn db_status(state: State<'_, AppState>) -> Result<DbStatus, String> {
-    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
-    let schema_version = db::schema_version(&conn).map_err(|e| e.to_string())?;
-    let tables = db::table_names(&conn).map_err(|e| e.to_string())?;
+fn db_status(state: State<'_, AppState>) -> CommandResult<DbStatus> {
+    let conn = lock_conn(&state.db.0)?;
+    let schema_version = db::schema_version(&conn)?;
+    let tables = db::table_names(&conn)?;
     Ok(DbStatus {
         path: state.db_path.clone(),
         schema_version,
@@ -120,12 +122,12 @@ fn db_status(state: State<'_, AppState>) -> Result<DbStatus, String> {
 /// Current auth state: whether a token is stored plus the cached login. Does not hit the
 /// network, so it works offline and loads fast.
 #[tauri::command]
-fn auth_status(state: State<'_, AppState>) -> Result<AuthStatus, String> {
+fn auth_status(state: State<'_, AppState>) -> CommandResult<AuthStatus> {
     // `has_token` may hit the Keychain (release), so don't hold the DB lock across it.
     let authenticated = auth::has_token(&state.db)?;
     let login = {
-        let conn = state.db.0.lock().map_err(|e| e.to_string())?;
-        settings::get_string(&conn, settings::KEY_GITHUB_LOGIN).map_err(|e| e.to_string())?
+        let conn = lock_conn(&state.db.0)?;
+        settings::get_string(&conn, settings::KEY_GITHUB_LOGIN)?
     };
     Ok(AuthStatus {
         authenticated,
@@ -137,10 +139,10 @@ fn auth_status(state: State<'_, AppState>) -> Result<AuthStatus, String> {
 /// Verify a PAT against GitHub, and on success store it and cache the login. Invalid tokens
 /// are rejected and nothing is stored.
 #[tauri::command]
-async fn sign_in(token: String, state: State<'_, AppState>) -> Result<GitHubUser, String> {
+async fn sign_in(token: String, state: State<'_, AppState>) -> CommandResult<GitHubUser> {
     let token = token.trim().to_string();
     if token.is_empty() {
-        return Err("Please enter a Personal Access Token.".to_string());
+        return Err("Please enter a Personal Access Token.".into());
     }
 
     // Verify before persisting anything (network call, no locks held).
@@ -150,9 +152,8 @@ async fn sign_in(token: String, state: State<'_, AppState>) -> Result<GitHubUser
     // itself only for the dev/SQLite path, so we never hold the lock across Keychain I/O).
     auth::store_token(&state.db, &token)?;
     {
-        let conn = state.db.0.lock().map_err(|e| e.to_string())?;
-        settings::set_string(&conn, settings::KEY_GITHUB_LOGIN, &user.login)
-            .map_err(|e| e.to_string())?;
+        let conn = lock_conn(&state.db.0)?;
+        settings::set_string(&conn, settings::KEY_GITHUB_LOGIN, &user.login)?;
         // New credentials may have broader scope — re-resolve all subjects on next sync.
         if let Err(e) = sync::reset_resolution(&conn) {
             eprintln!("helix: resetting subject resolution after sign-in failed: {e}");
@@ -163,27 +164,25 @@ async fn sign_in(token: String, state: State<'_, AppState>) -> Result<GitHubUser
 
 /// Remove the stored token and cached login.
 #[tauri::command]
-fn sign_out(state: State<'_, AppState>) -> Result<(), String> {
+fn sign_out(state: State<'_, AppState>) -> CommandResult<()> {
     // `delete_token` does its Keychain work without the DB lock (release).
     auth::delete_token(&state.db)?;
-    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
-    settings::delete_key(&conn, settings::KEY_GITHUB_LOGIN).map_err(|e| e.to_string())?;
+    let conn = lock_conn(&state.db.0)?;
+    settings::delete_key(&conn, settings::KEY_GITHUB_LOGIN)?;
     Ok(())
 }
 
 /// Read user-facing settings.
 #[tauri::command]
-fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
-    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+fn get_settings(state: State<'_, AppState>) -> CommandResult<Settings> {
+    let conn = lock_conn(&state.db.0)?;
     Ok(Settings {
-        poll_interval_s: settings::get_poll_interval(&conn).map_err(|e| e.to_string())?,
+        poll_interval_s: settings::get_poll_interval(&conn)?,
         min_poll_interval_s: settings::MIN_POLL_INTERVAL_S,
-        dependabot_merge_poll_interval_s: settings::get_dependabot_merge_poll_interval(&conn)
-            .map_err(|e| e.to_string())?,
+        dependabot_merge_poll_interval_s: settings::get_dependabot_merge_poll_interval(&conn)?,
         min_dependabot_merge_poll_interval_s: settings::MIN_DEPENDABOT_MERGE_POLL_INTERVAL_S,
-        github_login: settings::get_string(&conn, settings::KEY_GITHUB_LOGIN)
-            .map_err(|e| e.to_string())?,
-        theme: settings::get_theme(&conn).map_err(|e| e.to_string())?,
+        github_login: settings::get_string(&conn, settings::KEY_GITHUB_LOGIN)?,
+        theme: settings::get_theme(&conn)?,
     })
 }
 
@@ -193,31 +192,29 @@ fn save_settings(
     poll_interval_s: i64,
     dependabot_merge_poll_interval_s: i64,
     state: State<'_, AppState>,
-) -> Result<Settings, String> {
+) -> CommandResult<Settings> {
     if poll_interval_s < settings::MIN_POLL_INTERVAL_S {
-        return Err(format!(
+        return Err(CommandError::Message(format!(
             "Polling interval must be at least {} seconds.",
             settings::MIN_POLL_INTERVAL_S
-        ));
+        )));
     }
     if dependabot_merge_poll_interval_s < settings::MIN_DEPENDABOT_MERGE_POLL_INTERVAL_S {
-        return Err(format!(
+        return Err(CommandError::Message(format!(
             "Dependabot merge polling interval must be at least {} seconds.",
             settings::MIN_DEPENDABOT_MERGE_POLL_INTERVAL_S
-        ));
+        )));
     }
-    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
-    settings::set_poll_interval(&conn, poll_interval_s).map_err(|e| e.to_string())?;
-    settings::set_dependabot_merge_poll_interval(&conn, dependabot_merge_poll_interval_s)
-        .map_err(|e| e.to_string())?;
+    let conn = lock_conn(&state.db.0)?;
+    settings::set_poll_interval(&conn, poll_interval_s)?;
+    settings::set_dependabot_merge_poll_interval(&conn, dependabot_merge_poll_interval_s)?;
     Ok(Settings {
         poll_interval_s,
         min_poll_interval_s: settings::MIN_POLL_INTERVAL_S,
         dependabot_merge_poll_interval_s,
         min_dependabot_merge_poll_interval_s: settings::MIN_DEPENDABOT_MERGE_POLL_INTERVAL_S,
-        github_login: settings::get_string(&conn, settings::KEY_GITHUB_LOGIN)
-            .map_err(|e| e.to_string())?,
-        theme: settings::get_theme(&conn).map_err(|e| e.to_string())?,
+        github_login: settings::get_string(&conn, settings::KEY_GITHUB_LOGIN)?,
+        theme: settings::get_theme(&conn)?,
     })
 }
 
@@ -229,16 +226,16 @@ fn set_theme(
     theme: String,
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> CommandResult<()> {
     if !settings::is_valid_theme(&theme) {
-        return Err(format!(
+        return Err(CommandError::Message(format!(
             "Unknown theme '{theme}'. Expected one of: {}.",
             settings::THEMES.join(", ")
-        ));
+        )));
     }
     {
-        let conn = state.db.0.lock().map_err(|e| e.to_string())?;
-        settings::set_string(&conn, settings::KEY_THEME, &theme).map_err(|e| e.to_string())?;
+        let conn = lock_conn(&state.db.0)?;
+        settings::set_string(&conn, settings::KEY_THEME, &theme)?;
     }
     apply_window_theme(&window, &theme);
     Ok(())
@@ -247,16 +244,17 @@ fn set_theme(
 /// Read the last top-level module the user had open (`notifications` / `dependabot`), or
 /// null if none has been recorded yet. Used to restore the previous module on launch.
 #[tauri::command]
-fn get_last_module(state: State<'_, AppState>) -> Result<Option<String>, String> {
-    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
-    settings::get_string(&conn, settings::KEY_LAST_MODULE).map_err(|e| e.to_string())
+fn get_last_module(state: State<'_, AppState>) -> CommandResult<Option<String>> {
+    let conn = lock_conn(&state.db.0)?;
+    Ok(settings::get_string(&conn, settings::KEY_LAST_MODULE)?)
 }
 
 /// Persist the currently open top-level module so it can be restored on the next launch.
 #[tauri::command]
-fn set_last_module(module_id: String, state: State<'_, AppState>) -> Result<(), String> {
-    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
-    settings::set_string(&conn, settings::KEY_LAST_MODULE, &module_id).map_err(|e| e.to_string())
+fn set_last_module(module_id: String, state: State<'_, AppState>) -> CommandResult<()> {
+    let conn = lock_conn(&state.db.0)?;
+    settings::set_string(&conn, settings::KEY_LAST_MODULE, &module_id)?;
+    Ok(())
 }
 
 /// Reveal the main window. The window starts hidden (see `tauri.conf.json`) so the
@@ -271,22 +269,26 @@ fn show_main_window(window: tauri::WebviewWindow) {
 
 /// Whether the app is registered to start at login.
 #[tauri::command]
-fn get_start_at_login(app: tauri::AppHandle) -> Result<bool, String> {
+fn get_start_at_login(app: tauri::AppHandle) -> CommandResult<bool> {
     use tauri_plugin_autostart::ManagerExt;
-    app.autolaunch().is_enabled().map_err(|e| e.to_string())
+    app.autolaunch()
+        .is_enabled()
+        .map_err(|e| CommandError::Message(e.to_string()))
 }
 
 /// Enable/disable launching the app at login (default off). The LaunchAgent points at the
 /// currently running binary, so a dev build registers the dev binary and a release build
 /// the installed app.
 #[tauri::command]
-fn set_start_at_login(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+fn set_start_at_login(app: tauri::AppHandle, enabled: bool) -> CommandResult<()> {
     use tauri_plugin_autostart::ManagerExt;
     let mgr = app.autolaunch();
     if enabled {
-        mgr.enable().map_err(|e| e.to_string())
+        mgr.enable()
+            .map_err(|e| CommandError::Message(e.to_string()))
     } else {
-        mgr.disable().map_err(|e| e.to_string())
+        mgr.disable()
+            .map_err(|e| CommandError::Message(e.to_string()))
     }
 }
 
@@ -294,19 +296,21 @@ fn set_start_at_login(app: tauri::AppHandle, enabled: bool) -> Result<(), String
 /// Args are passed directly to `open` (no shell), so the path needs no escaping.
 #[cfg(target_os = "macos")]
 #[tauri::command]
-fn reveal_in_finder(path: String) -> Result<(), String> {
+fn reveal_in_finder(path: String) -> CommandResult<()> {
     // `open` parses leading-dash arguments as flags even without a shell, so reject
     // anything that isn't a plain, non-empty path to avoid option injection.
     let path = path.trim();
     if path.is_empty() || path.starts_with('-') {
-        return Err("invalid path to reveal".to_string());
+        return Err("invalid path to reveal".into());
     }
     let status = std::process::Command::new("open")
         .args(["-R", path])
         .status()
-        .map_err(|e| format!("failed to reveal in Finder: {e}"))?;
+        .map_err(|e| CommandError::Message(format!("failed to reveal in Finder: {e}")))?;
     if !status.success() {
-        return Err(format!("could not reveal the path in Finder ({status})"));
+        return Err(CommandError::Message(format!(
+            "could not reveal the path in Finder ({status})"
+        )));
     }
     Ok(())
 }
@@ -314,8 +318,8 @@ fn reveal_in_finder(path: String) -> Result<(), String> {
 /// Non-macOS fallback: Reveal in Finder is a macOS-only affordance.
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
-fn reveal_in_finder(_path: String) -> Result<(), String> {
-    Err("Reveal in Finder is only supported on macOS.".to_string())
+fn reveal_in_finder(_path: String) -> CommandResult<()> {
+    Err("Reveal in Finder is only supported on macOS.".into())
 }
 
 /// Open an `http(s)` URL in the user's default browser.
@@ -325,25 +329,27 @@ fn reveal_in_finder(_path: String) -> Result<(), String> {
 /// arbitrary URL handler (e.g. a custom app scheme) or be parsed as a flag.
 #[cfg(target_os = "macos")]
 #[tauri::command]
-fn open_url(url: String) -> Result<(), String> {
+fn open_url(url: String) -> CommandResult<()> {
     let url = url.trim();
     if url.is_empty() || url.starts_with('-') {
-        return Err("invalid URL to open".to_string());
+        return Err("invalid URL to open".into());
     }
     if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return Err("only http(s) URLs can be opened".to_string());
+        return Err("only http(s) URLs can be opened".into());
     }
     // A well-formed URL has no whitespace or control characters; reject them defensively
     // so nothing surprising is ever handed to `open`.
     if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return Err("URL contains invalid characters".to_string());
+        return Err("URL contains invalid characters".into());
     }
     let status = std::process::Command::new("open")
         .arg(url)
         .status()
-        .map_err(|e| format!("failed to open URL: {e}"))?;
+        .map_err(|e| CommandError::Message(format!("failed to open URL: {e}")))?;
     if !status.success() {
-        return Err(format!("could not open the URL ({status})"));
+        return Err(CommandError::Message(format!(
+            "could not open the URL ({status})"
+        )));
     }
     Ok(())
 }
@@ -351,8 +357,8 @@ fn open_url(url: String) -> Result<(), String> {
 /// Non-macOS fallback for [`open_url`].
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
-fn open_url(_url: String) -> Result<(), String> {
-    Err("Opening URLs is only supported on macOS.".to_string())
+fn open_url(_url: String) -> CommandResult<()> {
+    Err("Opening URLs is only supported on macOS.".into())
 }
 
 /// Whether in-app auto-update is available in this build. Release macOS builds ship the
@@ -389,10 +395,16 @@ struct UpdateProgress {
 /// (so this errors there) and the UI gates calls behind `updater_enabled`.
 #[cfg(target_os = "macos")]
 #[tauri::command]
-async fn check_for_update(app: tauri::AppHandle) -> Result<Option<UpdateInfo>, String> {
+async fn check_for_update(app: tauri::AppHandle) -> CommandResult<Option<UpdateInfo>> {
     use tauri_plugin_updater::UpdaterExt;
-    let updater = app.updater().map_err(|e| e.to_string())?;
-    match updater.check().await.map_err(|e| e.to_string())? {
+    let updater = app
+        .updater()
+        .map_err(|e| CommandError::Message(e.to_string()))?;
+    match updater
+        .check()
+        .await
+        .map_err(|e| CommandError::Message(e.to_string()))?
+    {
         Some(update) => Ok(Some(UpdateInfo {
             version: update.version.clone(),
             current_version: update.current_version.clone(),
@@ -407,11 +419,17 @@ async fn check_for_update(app: tauri::AppHandle) -> Result<Option<UpdateInfo>, S
 /// builds only.
 #[cfg(target_os = "macos")]
 #[tauri::command]
-async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
+async fn install_update(app: tauri::AppHandle) -> CommandResult<()> {
     use tauri_plugin_updater::UpdaterExt;
-    let updater = app.updater().map_err(|e| e.to_string())?;
-    let Some(update) = updater.check().await.map_err(|e| e.to_string())? else {
-        return Err("No update available.".to_string());
+    let updater = app
+        .updater()
+        .map_err(|e| CommandError::Message(e.to_string()))?;
+    let Some(update) = updater
+        .check()
+        .await
+        .map_err(|e| CommandError::Message(e.to_string()))?
+    else {
+        return Err("No update available.".into());
     };
     let mut downloaded: u64 = 0;
     update
@@ -427,7 +445,7 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
             || {},
         )
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| CommandError::Message(e.to_string()))?;
     let _ = Emitter::emit(&app, "update:installed", ());
     // Relaunch into the freshly installed bundle. `restart` diverges (never returns).
     app.restart();
@@ -435,14 +453,14 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
 
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
-async fn check_for_update(_app: tauri::AppHandle) -> Result<Option<UpdateInfo>, String> {
-    Err("Updates are only supported on macOS.".to_string())
+async fn check_for_update(_app: tauri::AppHandle) -> CommandResult<Option<UpdateInfo>> {
+    Err("Updates are only supported on macOS.".into())
 }
 
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
-async fn install_update(_app: tauri::AppHandle) -> Result<(), String> {
-    Err("Updates are only supported on macOS.".to_string())
+async fn install_update(_app: tauri::AppHandle) -> CommandResult<()> {
+    Err("Updates are only supported on macOS.".into())
 }
 
 /// Persist the current window size (logical px) to SQLite so the next launch restores
