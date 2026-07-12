@@ -148,7 +148,9 @@ function renderList() {
       details: operationDetails,
     });
     list.scrollTop = scrollTop;
-    if (preserved != null) applyFocus(preserved, { preventScroll: true });
+    if (preserved != null && !applyFocus(preserved, { preventScroll: true })) {
+      list.querySelector(".n-open[tabindex]")?.focus({ preventScroll: true });
+    }
     return;
   }
 

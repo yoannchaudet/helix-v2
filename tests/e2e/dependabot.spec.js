@@ -144,6 +144,40 @@ test("preserves operation control focus across live refreshes", async ({ page })
   await expect(cancel).toBeFocused();
 });
 
+test("falls back to the operation row when its focused control disappears", async ({ page }) => {
+  const operation = {
+    id: 18,
+    pr_id: 101,
+    repo_full_name: "octo/hello",
+    number: 40,
+    title: "Bump lodash",
+    html_url: "https://github.com/octo/hello/pull/40",
+    state: "delegated",
+    queue_position: 1,
+    failure_reason: null,
+    last_error: null,
+    enqueued_at: "2026-06-27T10:00:00Z",
+    delegated_at: "2026-06-27T10:01:00Z",
+    terminal_at: null,
+  };
+  await openDependabot(page, { ...defaultFixtures(), mergeOperations: [operation] });
+  await page.locator('#dependabot-filter-list [data-filter="operations"]').click();
+  await page
+    .locator('#dependabot .operation-row[data-operation-id="18"] .dep-operation-cancel')
+    .focus();
+
+  await page.evaluate(() =>
+    window.__mockSetOperation(18, {
+      state: "merged",
+      terminal_at: "2026-06-27T10:02:00Z",
+    }),
+  );
+
+  await expect(
+    page.locator('#dependabot .operation-row[data-operation-id="18"] .n-open[tabindex]'),
+  ).toBeFocused();
+});
+
 test("preserves PR merge-action focus across live refreshes", async ({ page }) => {
   await openDependabot(page);
   const action = page.locator('#dependabot .n-row[data-pr-id="101"] .dep-merge-action');
