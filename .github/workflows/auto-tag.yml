@@ -25,6 +25,7 @@ jobs:
       - name: Create and push tag
         env:
           TAG: v${{ github.event.pull_request.head.ref }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
           # bump-v0.3.0 → v0.3.0
           TAG="${TAG#vbump-}"
@@ -34,6 +35,7 @@ jobs:
             exit 1
           fi
 
-          git tag "$TAG"
+          # Tag the actual merge commit on main, not the PR merge ref.
+          git tag "$TAG" "$MERGE_SHA"
           git push origin "$TAG"
-          echo "Pushed tag $TAG"
+          echo "Pushed tag $TAG at $MERGE_SHA"

@@ -61,13 +61,16 @@ jobs:
             -f tag_name="${{ github.ref_name }}" \
             --jq '.body')
 
+          # Use a unique delimiter to avoid collisions with generated content.
+          DELIM="RELEASE_NOTES_$(uuidgen)"
+
           # Combine a fixed header with the auto-generated changelog.
           {
-            echo "RELEASE_NOTES<<EOF"
+            echo "RELEASE_NOTES<<${DELIM}"
             echo "Download the \`.dmg\` below to install. Existing installs update automatically."
             echo ""
             echo "$NOTES"
-            echo "EOF"
+            echo "${DELIM}"
           } >> "$GITHUB_ENV"
 
       - name: Build, sign, notarize & publish
