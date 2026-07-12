@@ -317,12 +317,6 @@ export function buildActionLog(events) {
     .map(({ _index, ...rest }) => rest);
 }
 
-/** The node the user has selected in the flow graph (by id), or `null` if none/unmatched. */
-export function selectedNodeDetail(graph, nodeId) {
-  if (!nodeId || !graph) return null;
-  return graph.nodes.find((node) => node.id === nodeId) ?? null;
-}
-
 /** Assemble everything the detail panel needs from the raw `{ operation, events,
  *  current_explanation, next_action }` payload: the flow graph, the ordered action log, the
  *  escapable explanation/next-action strings, and the retry/queue one-liners (`queue` is

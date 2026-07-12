@@ -7,7 +7,6 @@ import {
   operationDetailPanelId,
   operationFlow,
   operationRow,
-  operationSelectedNodeDetail,
   operationsList,
   prRow,
   repoHeader,
@@ -189,19 +188,21 @@ test("operationRow expanded with a detail payload renders the flow graph, aria-c
   assert.ok(!row.includes("Validated <ok>"));
 });
 
-test("operationFlow renders keyboard-focusable, selectable step buttons with aria-current on the active step", () => {
+test("operationFlow renders read-only steps with aria-current on the active step", () => {
   const graph = buildOperationGraph({
     state: "delegated",
     phase: PHASES.WAITING_CHECKS,
     strategy: STRATEGIES.DIRECT,
   });
-  const flow = operationFlow(graph, { selectedNodeId: "waiting_checks" });
+  const flow = operationFlow(graph);
   assert.ok(flow.includes("<ol"));
-  assert.ok(flow.match(/<button[^>]*data-node-id="waiting_checks"[^>]*aria-current="step"/));
-  assert.ok(flow.match(/<button[^>]*data-node-id="waiting_checks"[^>]*aria-pressed="true"/));
-  // Only one step is "current"/selected; another step isn't marked either way.
+  assert.ok(flow.includes('op-step--current" aria-current="step"'));
+  assert.ok(flow.includes('data-node-id="waiting_checks"'));
+  assert.ok(!flow.includes("<button"));
+  assert.ok(!flow.includes("aria-pressed"));
+  assert.ok(!flow.includes("tabindex"));
+  // Only one step is current.
   assert.ok(!flow.match(/data-node-id="queued"[^>]*aria-current/));
-  assert.ok(flow.match(/data-node-id="queued"[^>]*aria-pressed="false"/));
 });
 
 test("operationFlow marks a branch marker naming the strategy, and only that branch's steps", () => {
@@ -231,22 +232,6 @@ test("operationFlow escapes node labels/details even though they're internal str
   });
   const flow = operationFlow(graph);
   assert.ok(!flow.includes("<script>evil()"));
-});
-
-test("operationSelectedNodeDetail shows the selected node's label + detail, or a neutral prompt", () => {
-  const graph = buildOperationGraph({
-    state: "delegated",
-    phase: PHASES.RETRYING_CHECKS,
-    strategy: STRATEGIES.DIRECT,
-    retry_count: 2,
-    max_retries: 4,
-  });
-  const detail = operationSelectedNodeDetail(graph, "retrying_checks");
-  assert.ok(detail.includes("Retrying checks"));
-  assert.ok(detail.includes("Retry 2 of 4"));
-
-  const empty = operationSelectedNodeDetail(graph, null);
-  assert.ok(empty.includes("op-node-detail--empty"));
 });
 
 test("operationActionLog renders a timestamped, ordered, escaped log", () => {
@@ -296,10 +281,10 @@ test("operationsList accepts an optional rendering-options object without requir
 
   const expanded = operationsList([richOperation], {
     expandedId: richOperation.id,
-    selectedNodeId: "waiting_merge_queue",
     details: { [richOperation.id]: richDetail },
   });
   assert.ok(expanded.includes("op-panel-row"));
   assert.ok(expanded.includes("op-flow"));
-  assert.ok(expanded.match(/data-node-id="waiting_merge_queue"[^>]*aria-pressed="true"/));
+  assert.ok(expanded.includes('op-step--current" aria-current="step"'));
+  assert.ok(expanded.includes('data-node-id="waiting_merge_queue"'));
 });

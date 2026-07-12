@@ -241,7 +241,7 @@ test("expanding an operation shows a loading state, then the fetched flow-graph 
 
   await expect(page.locator("#dependabot .op-panel-loading")).toHaveCount(0);
   await expect(page.locator("#dependabot .op-flow")).toBeVisible();
-  await expect(page.locator("#dependabot .op-node[aria-current='step']")).toHaveCount(1);
+  await expect(page.locator("#dependabot .op-step[aria-current='step'] .op-node")).toHaveCount(1);
   await expect(page.locator("#dependabot .op-log-message")).toContainText(
     "Merge operation queued.",
   );
@@ -265,7 +265,7 @@ test("renders the direct-merge strategy flow graph with the current step highlig
     page.locator('#dependabot .op-node[data-node-id="enabling_auto_merge"]'),
   ).toHaveCount(0);
 
-  const current = page.locator('#dependabot .op-node[aria-current="step"]');
+  const current = page.locator('#dependabot .op-step[aria-current="step"] .op-node');
   await expect(current).toHaveCount(1);
   await expect(current).toHaveAttribute("data-node-id", "waiting_checks");
 });
@@ -283,35 +283,23 @@ test("renders the merge-queue strategy flow graph with the current step highligh
   ).toHaveCount(1);
   await expect(page.locator('#dependabot .op-node[data-node-id="merging"]')).toHaveCount(1);
 
-  const current = page.locator('#dependabot .op-node[aria-current="step"]');
+  const current = page.locator('#dependabot .op-step[aria-current="step"] .op-node');
   await expect(current).toHaveCount(1);
   await expect(current).toHaveAttribute("data-node-id", "waiting_merge_queue");
 });
 
-test("selecting a flow-graph node updates the detail readout without opening the PR", async ({
-  page,
-}) => {
+test("flow-graph nodes are read-only", async ({ page }) => {
   const operation = mergeOperation({ strategy: "direct", phase: "waiting_checks" });
   await openDependabot(page, { ...defaultFixtures(), mergeOperations: [operation] });
   await expandOperation(page, operation.id);
 
-  // Selection defaults to the operation's current phase.
-  await expect(page.locator("#dependabot .op-node-detail")).toContainText("Waiting on checks");
-
-  const queuedNode = page.locator('#dependabot .op-node[data-node-id="queued"]');
-  await queuedNode.click();
-
-  await expect(page.locator("#dependabot .op-node-detail")).toContainText("Queued");
-  await expect(page.locator("#dependabot .op-node-detail")).not.toContainText("Waiting on checks");
-  await expect(queuedNode).toHaveAttribute("aria-pressed", "true");
-
-  const calls = await page.evaluate(() => window.__TAURI_CALLS__);
-  expect(calls.some((c) => c.cmd === "open_url")).toBe(false);
+  const nodes = page.locator("#dependabot .op-node");
+  await expect(nodes.first()).toHaveJSProperty("tagName", "SPAN");
+  await expect(page.locator("#dependabot .op-node button")).toHaveCount(0);
+  await expect(page.locator("#dependabot .op-node[tabindex]")).toHaveCount(0);
 });
 
-test("Enter on a flow-graph node or the disclosure button does not open the PR", async ({
-  page,
-}) => {
+test("Enter on the disclosure button does not open the PR", async ({ page }) => {
   const operation = mergeOperation({ strategy: "direct", phase: "waiting_checks" });
   await openDependabot(page, { ...defaultFixtures(), mergeOperations: [operation] });
   await page.locator('#dependabot-filter-list [data-filter="operations"]').click();
@@ -320,11 +308,6 @@ test("Enter on a flow-graph node or the disclosure button does not open the PR",
   await disclosure.focus();
   await page.keyboard.press("Enter");
   await expect(disclosure).toHaveAttribute("aria-expanded", "true");
-
-  const node = page.locator('#dependabot .op-node[data-node-id="waiting_checks"]');
-  await node.focus();
-  await page.keyboard.press("Enter");
-  await expect(page.locator("#dependabot .op-node-detail")).toContainText("Waiting on checks");
 
   const calls = await page.evaluate(() => window.__TAURI_CALLS__);
   expect(calls.some((c) => c.cmd === "open_url")).toBe(false);
@@ -362,9 +345,7 @@ test("shows retry count from check_retry_count and distinguishes Helix's queue p
     mergeOperations: [delegatedHead, waitingHelix],
   });
   await expandOperation(page, waitingHelix.id);
-  // Selection defaults to the operation's current phase ("queued"), whose detail is Helix's
-  // own FIFO position.
-  await expect(page.locator("#dependabot .op-node-detail")).toContainText("Queue position 2");
+  await expect(page.locator("#dependabot .op-meta")).toContainText("Queue position 2");
 
   const waitingGithub = mergeOperation({
     id: 53,
@@ -396,7 +377,7 @@ test("a live operation-change event refreshes the expanded detail in place", asy
   await expect(page.locator("#dependabot .op-explanation--current")).toContainText(
     "Waiting for required status checks to finish.",
   );
-  await expect(page.locator('#dependabot .op-node[aria-current="step"]')).toHaveAttribute(
+  await expect(page.locator('#dependabot .op-step[aria-current="step"] .op-node')).toHaveAttribute(
     "data-node-id",
     "waiting_checks",
   );
@@ -421,7 +402,7 @@ test("a live operation-change event refreshes the expanded detail in place", asy
   await expect(page.locator("#dependabot .op-explanation--current")).toContainText(
     "Merging the pull request.",
   );
-  await expect(page.locator('#dependabot .op-node[aria-current="step"]')).toHaveAttribute(
+  await expect(page.locator('#dependabot .op-step[aria-current="step"] .op-node')).toHaveAttribute(
     "data-node-id",
     "merging",
   );
@@ -509,9 +490,7 @@ test("cancelling an operation while its detail is expanded keeps the panel in sy
   await expect(page.locator("#dependabot .dep-operation-cancel")).toHaveCount(0);
 });
 
-test("preserves the disclosure button's and a selected node's focus across a live refresh", async ({
-  page,
-}) => {
+test("preserves the disclosure button's focus across a live refresh", async ({ page }) => {
   const operation = mergeOperation({ phase: "waiting_checks", strategy: "direct" });
   await openDependabot(page, { ...defaultFixtures(), mergeOperations: [operation] });
   await page.locator('#dependabot-filter-list [data-filter="operations"]').click();
@@ -520,14 +499,6 @@ test("preserves the disclosure button's and a selected node's focus across a liv
   await disclosure.focus();
   await page.evaluate(() => window.__mockEmit("dependabot:operations-changed", null));
   await expect(disclosure).toBeFocused();
-
-  await disclosure.click();
-  const node = page.locator('#dependabot .op-node[data-node-id="waiting_checks"]');
-  await node.click();
-  await expect(node).toBeFocused();
-  await page.evaluate(() => window.__mockEmit("dependabot:operations-changed", null));
-  await expect(node).toBeFocused();
-  await expect(page.locator("#dependabot .op-node-detail")).toContainText("Waiting on checks");
 });
 
 test("preserves scroll position across a live whole-list rerender", async ({ page }) => {

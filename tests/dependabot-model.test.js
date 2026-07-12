@@ -13,7 +13,6 @@ import {
   queueSummary,
   repoDomId,
   retrySummary,
-  selectedNodeDetail,
   sortMergeOperations,
   STRATEGIES,
   totalPrs,
@@ -92,7 +91,7 @@ test("merge operations sort active FIFO before newest terminal history", () => {
 });
 
 /* ---------------------------------------------------------------------------------------
- * Phase 2: buildOperationGraph, buildActionLog, selectedNodeDetail, buildOperationDetailModel.
+ * Phase 2: buildOperationGraph, buildActionLog, and buildOperationDetailModel.
  * --------------------------------------------------------------------------------------- */
 
 function nodeById(graph, id) {
@@ -308,18 +307,6 @@ test("buildActionLog maps backend event fields to visible activity text", () => 
   ]);
   assert.equal(event.message, "Resolved a direct-merge strategy.");
   assert.equal(event.timestamp, "2026-01-01T00:00:00Z");
-});
-
-test("selectedNodeDetail finds a node by id, or returns null when unselected/unmatched", () => {
-  const graph = buildOperationGraph({
-    state: "delegated",
-    phase: PHASES.WAITING_CHECKS,
-    strategy: STRATEGIES.DIRECT,
-  });
-  assert.equal(selectedNodeDetail(graph, "waiting_checks").id, "waiting_checks");
-  assert.equal(selectedNodeDetail(graph, null), null);
-  assert.equal(selectedNodeDetail(graph, "does-not-exist"), null);
-  assert.equal(selectedNodeDetail(null, "waiting_checks"), null);
 });
 
 test("buildOperationDetailModel assembles the graph, action log, explanations, and retry/queue summaries", () => {

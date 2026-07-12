@@ -48,7 +48,6 @@ let operationTicking = false;
 let loadGeneration = 0;
 let pollStartGeneration = 0;
 let expandedOperationId = null;
-let selectedOperationNodeId = null;
 let operationDetails = {};
 let operationDetailGeneration = 0;
 
@@ -91,15 +90,6 @@ function captureFocus() {
   const active = document.activeElement;
   const list = $("#dependabot");
   if (!active || !list || !list.contains(active)) return null;
-  const panel = active.closest(".op-panel-row");
-  if (panel?.dataset.operationId) {
-    return {
-      kind: "operation",
-      id: panel.dataset.operationId,
-      part: "node",
-      nodeId: active.closest(".op-node")?.dataset.nodeId ?? null,
-    };
-  }
   const row = active.closest(".n-row");
   if (!row) return null;
   if (row.dataset.operationId) {
@@ -129,20 +119,14 @@ function applyFocus(target, { preventScroll = false } = {}) {
   const row = $("#dependabot")?.querySelector(
     `.n-row[data-${target.kind === "operation" ? "operation" : "pr"}-id="${safe}"]`,
   );
-  const panel = $("#dependabot")?.querySelector(`.op-panel-row[data-operation-id="${safe}"]`);
-  const nodeId = String(target.nodeId ?? "").replace(/["\\]/g, "\\$&");
   const control =
-    target.kind === "operation" && target.part === "node"
-      ? panel?.querySelector(`.op-node[data-node-id="${nodeId}"]`) ||
-        row?.querySelector(".dep-operation-disclosure")
-      : target.kind === "operation" && target.part === "cancel"
-        ? row?.querySelector(".dep-operation-cancel") || row?.querySelector(".n-open[tabindex]")
-        : target.kind === "operation" && target.part === "disclosure"
-          ? row?.querySelector(".dep-operation-disclosure") ||
-            row?.querySelector(".n-open[tabindex]")
-          : target.kind === "pr" && target.part === "action"
-            ? row?.querySelector(".dep-merge-action") || row?.querySelector(".n-open[tabindex]")
-            : row?.querySelector(".n-open[tabindex]");
+    target.kind === "operation" && target.part === "cancel"
+      ? row?.querySelector(".dep-operation-cancel") || row?.querySelector(".n-open[tabindex]")
+      : target.kind === "operation" && target.part === "disclosure"
+        ? row?.querySelector(".dep-operation-disclosure") || row?.querySelector(".n-open[tabindex]")
+        : target.kind === "pr" && target.part === "action"
+          ? row?.querySelector(".dep-merge-action") || row?.querySelector(".n-open[tabindex]")
+          : row?.querySelector(".n-open[tabindex]");
   if (!control) return false;
   control.focus({ preventScroll });
   return true;
@@ -161,7 +145,6 @@ function renderList() {
   if (activeView === "operations") {
     list.innerHTML = operationsList(sortMergeOperations(mergeOperations), {
       expandedId: expandedOperationId,
-      selectedNodeId: selectedOperationNodeId,
       details: operationDetails,
     });
     list.scrollTop = scrollTop;
@@ -353,7 +336,6 @@ async function reloadOperations() {
       !mergeOperations.some((operation) => operation.id === expandedOperationId)
     ) {
       expandedOperationId = null;
-      selectedOperationNodeId = null;
       operationDetailGeneration += 1;
     }
     renderSidebar();
@@ -382,12 +364,6 @@ function onListClick(e) {
   const disclosure = el?.closest(".dep-operation-disclosure");
   if (disclosure?.dataset.operationId) {
     toggleOperationDetail(Number(disclosure.dataset.operationId));
-    return;
-  }
-  const node = el?.closest(".op-node");
-  if (node?.dataset.nodeId && expandedOperationId != null) {
-    selectedOperationNodeId = node.dataset.nodeId;
-    renderList();
     return;
   }
   const merge = el?.closest(".dep-merge-action");
@@ -429,35 +405,27 @@ async function refreshExpandedOperationDetail() {
 
 /** Toggle one operation's inline detail disclosure — collapsing it if already expanded
  *  (only one operation's detail is ever expanded at a time), otherwise expanding it: render
- *  immediately with a loading placeholder (`detail: null`), then fetch+refresh. Selecting the
- *  flow-graph node defaults to the operation's current phase, if it has a matching node. */
+ *  immediately with a loading placeholder (`detail: null`), then fetch+refresh. */
 function toggleOperationDetail(operationId) {
   if (expandedOperationId === operationId) {
     expandedOperationId = null;
-    selectedOperationNodeId = null;
     operationDetailGeneration += 1;
     renderList();
     return;
   }
   expandedOperationId = operationId;
-  const operation = mergeOperations.find((candidate) => candidate.id === operationId);
-  selectedOperationNodeId = operation?.phase ?? null;
   operationDetails = { ...operationDetails, [operationId]: null };
   renderList();
   refreshExpandedOperationDetail();
 }
 
 /** Enter on a focused PR row → open it (links activate on Enter, not Space). Explicitly
- *  excludes the disclosure/node/cancel/merge-action buttons — they're real `<button>`s so
+ *  excludes the disclosure/cancel/merge-action buttons — they're real `<button>`s so
  *  Enter already activates their own click handler natively; this guard just keeps that
  *  activation from *also* bubbling into opening the PR link. */
 function onListKeydown(e) {
   if (e.key !== "Enter") return;
-  if (
-    e.target.closest?.(
-      ".dep-merge-action, .dep-operation-cancel, .dep-operation-disclosure, .op-node",
-    )
-  ) {
+  if (e.target.closest?.(".dep-merge-action, .dep-operation-cancel, .dep-operation-disclosure")) {
     return;
   }
   const open = e.target.closest?.(".n-open");

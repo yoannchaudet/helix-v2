@@ -12,7 +12,6 @@ import {
   buildOperationDetailModel,
   isActiveMergeOperation,
   repoDomId,
-  selectedNodeDetail,
 } from "./dependabot-model.js";
 
 /** Static "PR" subject badge — every row here is a pull request. */
@@ -116,34 +115,24 @@ const STRATEGY_BRANCH_LABELS = {
   merge_queue: "Merge queue",
 };
 
-/** One flow-graph node as a focusable, selectable `<button>` — the a11y contract is: a real
- *  button (focusable/activatable by keyboard for free), `aria-current="step"` on the node
- *  in progress, and `aria-pressed` reflecting whether it's the one currently selected for the
- *  detail readout below the graph. The step's own detail (retry count, queue position, error)
- *  doubles as its tooltip. */
-function opNodeMarkup(node, selectedNodeId) {
-  const selected = node.id === selectedNodeId;
+/** One read-only flow-graph node. The operation's current step is identified with
+ *  `aria-current="step"`; per-step metadata remains available as a tooltip. */
+function opNodeMarkup(node) {
   const current = node.state === "current" ? rawHtml(` aria-current="step"`) : "";
   const titleAttr = node.detail ? html` title="${node.detail}"` : "";
-  return html`<li class="op-step op-step--${node.group} op-step--${node.state}">
-    <button
-      type="button"
-      class="op-node${selected ? " op-node--selected" : ""}"
-      data-node-id="${node.id}"
-      aria-pressed="${selected ? "true" : "false"}"
-      ${current}${rawHtml(titleAttr)}
-    >
+  return html`<li class="op-step op-step--${node.group} op-step--${node.state}"${current}>
+    <span class="op-node" data-node-id="${node.id}" ${rawHtml(titleAttr)}>
       <span class="op-node-dot" aria-hidden="true"></span>
       <span class="op-node-label">${node.label}</span>
-    </button>
+    </span>
   </li>`;
 }
 
 /** The compact, semantic flow visualization for one operation's graph (see
  *  `buildOperationGraph`): shared preparation steps, a labeled branch marker naming the
  *  strategy (or that it's still being determined), the strategy-specific steps, then the
- *  terminal step. A plain `<ol>` of `<button>`s — no canvas/SVG/diagramming dependency. */
-export function operationFlow(graph, { selectedNodeId = null } = {}) {
+ *  terminal step. A plain read-only `<ol>` — no canvas/SVG/diagramming dependency. */
+export function operationFlow(graph) {
   const prep = graph.nodes.filter((node) => node.group === "prep" || node.group === "retry");
   const branch = graph.nodes.filter((node) => node.group === "branch");
   const terminal = graph.nodes.filter((node) => node.group === "terminal");
@@ -151,25 +140,12 @@ export function operationFlow(graph, { selectedNodeId = null } = {}) {
   const marker = branch.length
     ? html`<li class="op-flow-marker" role="presentation">${branchLabel}</li>`
     : "";
-  const steps = prep.map((node) => opNodeMarkup(node, selectedNodeId)).join("");
-  const branchSteps = branch.map((node) => opNodeMarkup(node, selectedNodeId)).join("");
-  const terminalSteps = terminal.map((node) => opNodeMarkup(node, selectedNodeId)).join("");
+  const steps = prep.map(opNodeMarkup).join("");
+  const branchSteps = branch.map(opNodeMarkup).join("");
+  const terminalSteps = terminal.map(opNodeMarkup).join("");
   return html`<ol class="op-flow" data-strategy="${graph.strategy}" aria-label="Merge pipeline">${rawHtml(
     steps,
   )}${rawHtml(marker)}${rawHtml(branchSteps)}${rawHtml(terminalSteps)}</ol>`;
-}
-
-/** The readout for whichever node is selected (or a neutral prompt if none is). */
-export function operationSelectedNodeDetail(graph, nodeId) {
-  const node = selectedNodeDetail(graph, nodeId);
-  if (!node) {
-    return html`<p class="op-node-detail op-node-detail--empty">
-      Select a step above for details.
-    </p>`;
-  }
-  return html`<p class="op-node-detail">
-    <strong>${node.label}</strong>${node.detail ? html` — ${node.detail}` : ""}
-  </p>`;
 }
 
 /** The ordered, timestamped action log for one operation's detail view. */
@@ -191,12 +167,12 @@ export function operationActionLog(actionLog) {
   return html`<ol class="op-log">${rawHtml(items)}</ol>`;
 }
 
-/** The full expanded detail panel body: flow graph, selected-step readout, retry/queue
+/** The full expanded detail panel body: flow graph, retry/queue
  *  metadata, the current/next explanation, and the action log. `detail` is the raw
  *  `{ operation, events, current_explanation, next_action }` payload for this operation (or
  *  `null` while it's still being fetched, in which case a lightweight loading state renders
  *  instead of guessing at content). */
-export function operationDetailPanel(detail, { selectedNodeId = null } = {}) {
+export function operationDetailPanel(detail) {
   if (!detail) {
     return html`<p class="op-panel-loading">Loading operation timeline…</p>`;
   }
@@ -210,8 +186,7 @@ export function operationDetailPanel(detail, { selectedNodeId = null } = {}) {
     ? html`<p class="op-explanation op-explanation--next">${model.nextAction}</p>`
     : "";
   return html`
-    ${rawHtml(operationFlow(model.graph, { selectedNodeId }))}
-    ${rawHtml(operationSelectedNodeDetail(model.graph, selectedNodeId))}
+    ${rawHtml(operationFlow(model.graph))}
     ${rawHtml(metaLine)} ${rawHtml(currentExplanation)} ${rawHtml(nextAction)}
     <h3 class="op-log-heading">Activity</h3>
     ${rawHtml(operationActionLog(model.actionLog))}
@@ -240,10 +215,9 @@ function operationDisclosureButton(operation, expanded) {
  *  before — the disclosure button is the only structural addition, so existing callers keep
  *  working unchanged. Pass `{ expanded: true, detail }` to also render the flow graph,
  *  action log, and explanations (`detail` is the raw operation-detail payload; `null` while
- *  it's loading renders a lightweight placeholder instead of blank space). `selectedNodeId`
- *  highlights one flow-graph node's detail readout. */
+ *  it's loading renders a lightweight placeholder instead of blank space). */
 export function operationRow(operation, options = {}) {
-  const { expanded = false, detail = null, selectedNodeId = null } = options;
+  const { expanded = false, detail = null } = options;
   const errorDetail =
     operation.failure_reason || operation.last_error
       ? html`<div class="operation-error">${operation.failure_reason || operation.last_error}</div>`
@@ -280,19 +254,18 @@ export function operationRow(operation, options = {}) {
     <li class="op-panel-row" id="${operationDetailPanelId(
       operation.id,
     )}" data-operation-id="${operation.id}" role="group" aria-label="Merge details for ${operation.title}">
-      ${rawHtml(operationDetailPanel(detail, { selectedNodeId }))}
+      ${rawHtml(operationDetailPanel(detail))}
     </li>`;
   return `${row}${panel}`;
 }
 
 /** `options` (all optional, defaulting to compact rendering identical to before Phase 2):
  *  - `expandedId`: id of the one operation whose row should render expanded.
- *  - `selectedNodeId`: id of the selected flow-graph node within that expanded operation.
  *  - `details`: `{ [operationId]: detailPayload }` — the raw `{ operation, events,
  *    current_explanation, next_action }` payload for the expanded operation (or omitted/
  *    `null` while it's still loading). */
 export function operationsList(operations, options = {}) {
-  const { expandedId = null, selectedNodeId = null, details = {} } = options;
+  const { expandedId = null, details = {} } = options;
   if (!operations.length) {
     return html`<div class="inbox-empty">
       <p class="inbox-empty-title">No merge operations yet.</p>
@@ -305,7 +278,6 @@ export function operationsList(operations, options = {}) {
     operationRow(operation, {
       expanded: operation.id === expandedId,
       detail: operation.id === expandedId ? (details[operation.id] ?? null) : null,
-      selectedNodeId: operation.id === expandedId ? selectedNodeId : null,
     });
   const section = (label, items) =>
     items.length

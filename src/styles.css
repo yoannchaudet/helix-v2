@@ -1039,9 +1039,9 @@ code,
 }
 
 /* ---------------------------------------------------------------------------------------
- * Operation detail panel (Phase 2): the inline flow visualization, selected-step readout,
+ * Operation detail panel (Phase 2): the inline flow visualization,
  * retry/queue metadata, current/next explanation, and action log revealed by an operation
- * row's disclosure button. Pure semantic HTML (an `<ol>` of `<button>`s) — no canvas/SVG
+ * row's disclosure button. Pure semantic HTML (a read-only `<ol>`) — no canvas/SVG
  * diagramming dependency. Colors all key off the existing themeable tokens so dark mode
  * "just works", and all transitions are covered by the app-wide `prefers-reduced-motion`
  * reset near the bottom of this file.
@@ -1109,7 +1109,6 @@ code,
 }
 
 .op-node {
-  appearance: none;
   display: inline-flex;
   align-items: center;
   gap: var(--space-6);
@@ -1120,20 +1119,6 @@ code,
   color: var(--text);
   font: inherit;
   font-size: 0.74rem;
-  cursor: pointer;
-  transition:
-    background var(--duration-fast) ease,
-    border-color var(--duration-fast) ease,
-    color var(--duration-fast) ease;
-}
-
-.op-node:hover {
-  background: var(--surface-hover);
-}
-
-.op-node:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
 }
 
 .op-node-dot {
@@ -1142,11 +1127,6 @@ code,
   height: 8px;
   border-radius: 50%;
   background: var(--border-strong);
-}
-
-.op-node--selected {
-  border-color: var(--accent);
-  background: var(--accent-tint);
 }
 
 /* done: the step happened. */
@@ -1199,16 +1179,6 @@ code,
   50% {
     opacity: 0.4;
   }
-}
-
-.op-node-detail {
-  margin: 0 0 var(--space-8);
-  font-size: 0.78rem;
-  color: var(--text);
-}
-
-.op-node-detail--empty {
-  color: var(--muted);
 }
 
 .op-meta {
