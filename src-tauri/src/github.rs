@@ -3082,7 +3082,7 @@ mod tests {
     }
 
     #[test]
-    fn repository_merge_settings_order_all_supported_methods() {
+    fn repository_merge_settings_orders_all_supported_methods() {
         let settings = |squash, merge, rebase| RepositoryMergeSettings {
             allow_squash_merge: squash,
             allow_merge_commit: merge,
