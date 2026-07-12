@@ -443,7 +443,9 @@ mod tests {
             )
             .unwrap();
         let rows = stmt
-            .query_map([table], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .query_map([table], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
             .unwrap();
         rows.collect::<Result<_, _>>().unwrap()
     }
@@ -777,16 +779,18 @@ mod tests {
         assert!(!upgraded_cols.contains(&"merge_command_at".to_string()));
         assert!(!upgraded_cols.contains(&"cancel_command_at".to_string()));
         assert!(!upgraded_cols.contains(&"last_action_at".to_string()));
-        assert!(upgraded
-            .query_row(
-                "SELECT COUNT(*) FROM dependabot_merge_operations WHERE id = ?1
+        assert!(
+            upgraded
+                .query_row(
+                    "SELECT COUNT(*) FROM dependabot_merge_operations WHERE id = ?1
                  AND pr_id = 1 AND state = 'delegated' AND phase = 'merging'
                  AND repo_full_name = 'octo/repo'",
-                [op_id],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap()
-            == 1);
+                    [op_id],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap()
+                == 1
+        );
 
         let upgraded_indexes = table_indexes(&upgraded, "dependabot_merge_operations");
         let after_index_sql = table_index_sql(&upgraded, "dependabot_merge_operations");
