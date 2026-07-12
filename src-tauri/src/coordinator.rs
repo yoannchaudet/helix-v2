@@ -68,6 +68,18 @@ pub struct SyncResult {
     rate_remaining: Option<i64>,
 }
 
+async fn fetch_notifications_with_timeout<Fut>(
+    timeout: std::time::Duration,
+    fetch: Fut,
+) -> Result<github::FetchOutcome, github::GitHubError>
+where
+    Fut: std::future::Future<Output = Result<github::FetchOutcome, github::GitHubError>>,
+{
+    tokio::time::timeout(timeout, fetch)
+        .await
+        .map_err(|_| github::GitHubError::Network("notification sync timed out".into()))?
+}
+
 /// Fetch notifications from GitHub and store them locally, emitting progress events.
 ///
 /// Emits `sync:started`, `sync:progress` ({ page, fetched }), and `sync:done` /
@@ -82,12 +94,11 @@ pub async fn sync_now(
     // *same* credential — matching the original (a mid-sync sign-out/token swap must not
     // make resolution run under, or silently skip because of, a different token).
     let (result, token) = sync_now_core(&state.db, app.clone(), |token, on_page| async move {
-        tokio::time::timeout(
+        fetch_notifications_with_timeout(
             tuning::SYNC_FETCH_TIMEOUT,
             github::fetch_all_notifications(&token, on_page),
         )
         .await
-        .map_err(|_| github::GitHubError::Network("notification sync timed out".into()))?
     })
     .await?;
 
@@ -227,15 +238,29 @@ async fn resolve_pending_subjects(app: tauri::AppHandle, token: String) {
 /// resolution as the tail of the sync and only report "synced" once the pass finishes), plus
 /// `subjects:resolved` when anything changed. `subjects:resolution-done` is emitted on **every**
 /// pass — including the no-pending, already-below-reserve, and back-off cases — so the frontend
-/// gate can never get stuck. The actual work lives in [`run_resolution_pass`].
+/// gate can never get stuck. The actual work lives in [`run_resolution_pass_with_timeout`].
 async fn resolve_pending_subjects_core<S, R, Fut>(db: &Db, sink: S, resolve: R)
 where
     S: EventSink,
     R: Fn(String) -> Fut,
     Fut: std::future::Future<Output = Result<github::ResolveResult, github::ResolveError>>,
 {
+    resolve_pending_subjects_core_with_timeout(db, sink, resolve, tuning::RESOLVE_PASS_TIMEOUT)
+        .await;
+}
+
+async fn resolve_pending_subjects_core_with_timeout<S, R, Fut>(
+    db: &Db,
+    sink: S,
+    resolve: R,
+    pass_timeout: std::time::Duration,
+) where
+    S: EventSink,
+    R: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<github::ResolveResult, github::ResolveError>>,
+{
     sink.emit("subjects:resolution-started", serde_json::Value::Null);
-    let changed = run_resolution_pass(db, &resolve).await;
+    let changed = run_resolution_pass_with_timeout(db, &resolve, pass_timeout).await;
     if changed > 0 {
         sink.emit("subjects:resolved", serde_json::json!({ "count": changed }));
     }
@@ -249,7 +274,11 @@ where
 /// whose state changed and was stored. Kept free of `AppHandle`/`github::` (the network call is
 /// injected as `resolve(url)`) so tests can drive #98's rate-limit-reserve, partial-failure, and
 /// secondary-rate-limit back-off paths with a fake resolver.
-async fn run_resolution_pass<R, Fut>(db: &Db, resolve: &R) -> usize
+async fn run_resolution_pass_with_timeout<R, Fut>(
+    db: &Db,
+    resolve: &R,
+    pass_timeout: std::time::Duration,
+) -> usize
 where
     R: Fn(String) -> Fut,
     Fut: std::future::Future<Output = Result<github::ResolveResult, github::ResolveError>>,
@@ -300,7 +329,7 @@ where
     // the classic secondary-limit trigger. Real network latency paces the loop; the reserve
     // check bounds primary-quota spend; and any back-off signal (a 403 / `Retry-After`) stops
     // the whole pass so we don't hammer into the limit — the rest resolves on a later sync.
-    let deadline = tokio::time::Instant::now() + tuning::RESOLVE_PASS_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + pass_timeout;
     for p in &pending {
         let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now()) else {
             eprintln!("subject resolution pass timed out; remaining subjects will retry later");
@@ -782,6 +811,34 @@ mod tests {
         assert!(st.last_error.unwrap().contains("401"));
     }
 
+    #[test]
+    fn sync_now_core_fetch_timeout_records_and_emits_error() {
+        let db = db_with_token();
+        let sink = RecordingSink::default();
+
+        let result =
+            tauri::async_runtime::block_on(sync_now_core(&db, sink.clone(), |_, _| async move {
+                fetch_notifications_with_timeout(
+                    std::time::Duration::ZERO,
+                    std::future::pending::<Result<FetchOutcome, GitHubError>>(),
+                )
+                .await
+            }));
+
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("notification sync timed out"),
+            "surfaced error: {err}"
+        );
+        assert_eq!(sink.names(), vec!["sync:started", "sync:error"]);
+        let st = status(&db);
+        assert_eq!(st.last_status.as_deref(), Some("error"));
+        assert!(st
+            .last_error
+            .unwrap()
+            .contains("notification sync timed out"));
+    }
+
     /* ------------------------------ mutate_threads ---------------------------- */
 
     #[test]
@@ -1026,6 +1083,41 @@ mod tests {
             sink.payload("subjects:resolution-done"),
             Some(serde_json::json!({ "changed": 0 }))
         );
+    }
+
+    #[test]
+    fn resolve_core_pass_timeout_leaves_subjects_pending_and_emits_done() {
+        let db = db_with_token();
+        store(
+            &db,
+            &[
+                thread("1", 100, "octo/repo-a", "First"),
+                thread("2", 100, "octo/repo-a", "Second"),
+            ],
+        );
+        let sink = RecordingSink::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+
+        tauri::async_runtime::block_on(resolve_pending_subjects_core_with_timeout(
+            &db,
+            sink.clone(),
+            move |_url| {
+                c.fetch_add(1, Ordering::SeqCst);
+                async move { Ok(ok_subject(4990)) }
+            },
+            std::time::Duration::ZERO,
+        ));
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(sink.count("subjects:resolved"), 0);
+        assert_eq!(sink.count("subjects:resolution-started"), 1);
+        assert_eq!(
+            sink.payload("subjects:resolution-done"),
+            Some(serde_json::json!({ "changed": 0 }))
+        );
+        let conn = db.0.lock().unwrap();
+        assert_eq!(sync::subjects_needing_resolution(&conn).unwrap().len(), 2);
     }
 
     #[test]
