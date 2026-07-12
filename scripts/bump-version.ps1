@@ -144,7 +144,7 @@ Updates the three version-tracking files per ``docs/publishing.md``:
 - ``src-tauri/Cargo.toml``
 - ``src-tauri/Cargo.lock`` (helix package line)
 
-After merging, tag ``v$new`` on ``main`` to kick off the release workflow.
+> **Merging this PR automatically tags ``v$new`` and kicks off the release build.** The draft GitHub Release will include an auto-generated changelog. Review and publish it once the build completes.
 "@
     $prUrl = gh pr create --title "Bump version to $new" --body $prBody
     if (-not $prUrl) { Fail 'gh pr create did not return a URL.' }
