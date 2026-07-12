@@ -130,15 +130,15 @@ pub async fn fetch_user(token: &str) -> Result<GitHubUser, GitHubError> {
 
 /// A notification thread (subset of the `Thread` schema Helix stores).
 ///
-/// Helix deliberately ignores read/unread state: a thread stays in the inbox until it's
-/// marked **done** (removed from GitHub's list), so the `unread`/`last_read_at` fields the
-/// API returns are not deserialized.
+/// Helix does not use read state for ordinary inbox visibility, but retains `unread` as the
+/// authoritative signal that a previously-dismissed thread has a new notification generation.
 #[derive(Debug, Deserialize)]
 pub struct NotificationThread {
     pub id: String,
     pub repository: MinimalRepo,
     pub subject: Subject,
     pub reason: String,
+    pub unread: bool,
     pub updated_at: String,
     /// API URL of the notification thread.
     pub url: String,
@@ -183,6 +183,7 @@ struct SubjectResponse {
     /// Pull requests only: set once merged.
     merged_at: Option<String>,
     html_url: Option<String>,
+    updated_at: Option<String>,
     user: Option<SubjectUser>,
     /// Pull requests only: GitHub's rolled-up mergeability/CI state
     /// (`clean` | `unstable` | `blocked` | `dirty` | `behind` | `draft` | `unknown`).
@@ -206,6 +207,9 @@ pub struct ResolvedSubject {
     pub state_reason: Option<String>,
     pub merged_at: Option<String>,
     pub html_url: Option<String>,
+    /// Subject activity timestamp from the subject endpoint. Unlike a notification thread's
+    /// user-specific timestamp, this only advances when the underlying subject changes.
+    pub updated_at: Option<String>,
     pub author: Option<String>,
     /// Pull requests only: GitHub's rolled-up `mergeable_state` (see `SubjectResponse`).
     /// Drives the PR merge-readiness pill; `None` for issues and other subjects.
@@ -227,6 +231,7 @@ impl From<SubjectResponse> for ResolvedSubject {
             state_reason: r.state_reason,
             merged_at: r.merged_at,
             html_url: r.html_url,
+            updated_at: r.updated_at,
             author: r.user.map(|u| u.login),
             mergeable_state: r.mergeable_state,
         }
@@ -459,8 +464,8 @@ pub struct FetchOutcome {
 
 /// Fetch **all** notifications (read and unread alike), following `Link` pagination.
 ///
-/// Uses `all=true`: Helix shows every notification GitHub still lists and only removes one
-/// when it's marked **done**, so read state never affects what's displayed. `on_page` is
+/// Uses `all=true`: remote read state does not control ordinary inbox visibility, but
+/// `unread` is retained to verify that a dismissed thread has a new generation. `on_page` is
 /// invoked after each page with `(page_number, total_fetched_so_far)` so the caller can
 /// surface live progress. Rate-limit headers from the last response are returned in
 /// [`FetchOutcome::rate`].
@@ -2750,6 +2755,47 @@ mod tests {
         .unwrap();
 
         assert_eq!(item.base.ref_name, "release/next");
+    }
+
+    #[test]
+    fn notification_and_subject_activity_signals_deserialize() {
+        let thread: NotificationThread = serde_json::from_str(
+            r#"{
+                "id": "42",
+                "repository": {
+                    "id": 1,
+                    "name": "repo",
+                    "full_name": "octo/repo",
+                    "owner": {"login": "octo"},
+                    "private": false,
+                    "updated_at": "2026-01-01T00:00:00Z"
+                },
+                "subject": {
+                    "title": "Issue",
+                    "url": "https://api.github.com/repos/octo/repo/issues/1",
+                    "type": "Issue"
+                },
+                "reason": "comment",
+                "unread": false,
+                "updated_at": "2026-01-02T00:00:00Z",
+                "url": "https://api.github.com/notifications/threads/42"
+            }"#,
+        )
+        .unwrap();
+        assert!(!thread.unread);
+
+        let subject: ResolvedSubject = serde_json::from_str::<SubjectResponse>(
+            r#"{
+                "number": 1,
+                "state": "open",
+                "html_url": "https://github.com/octo/repo/issues/1",
+                "updated_at": "2026-01-03T00:00:00Z",
+                "user": {"login": "octocat"}
+            }"#,
+        )
+        .unwrap()
+        .into();
+        assert_eq!(subject.updated_at.as_deref(), Some("2026-01-03T00:00:00Z"));
     }
 
     #[test]
