@@ -3288,7 +3288,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_strategy_detects_caches_then_squash_merges_across_two_ticks() {
+    fn direct_strategy_detects_caches_then_merges_across_two_ticks() {
         let db = db_with_token();
         store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
         let id = enqueue_op(&db, 1);
@@ -3321,7 +3321,7 @@ mod tests {
             assert_eq!(cached.strategy, "direct");
         }
 
-        // Tick 2: strategy is cached, so it goes straight to the squash merge.
+        // Tick 2: strategy is cached, so it goes straight to the direct merge.
         tick(&db, &fake);
         assert_eq!(op(&db, id).state, "merged");
         assert_eq!(fake.calls().policy, 1, "policy detected once, then cached");
