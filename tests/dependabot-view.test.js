@@ -241,6 +241,40 @@ test("operationFlow marks a branch marker naming the strategy, and only that bra
   assert.ok(queue.includes("Waiting in merge queue"));
 });
 
+test("operationFlow hides an unresolved strategy marker once an operation is terminal", () => {
+  const active = operationFlow(
+    buildOperationGraph({ state: "validating", phase: PHASES.VALIDATING }),
+  );
+  assert.ok(active.includes("Merge strategy not yet determined"));
+
+  for (const state of ["merged", "cancelled", "failed", "timed_out"]) {
+    const terminal = operationFlow(buildOperationGraph({ state, phase: PHASES.VALIDATING }));
+    assert.ok(!terminal.includes("Merge strategy not yet determined"));
+    assert.ok(!terminal.includes("op-flow-marker"));
+    assert.ok(terminal.includes('data-node-id="strategy_detection"'));
+  }
+
+  const direct = operationFlow(
+    buildOperationGraph({
+      state: "merged",
+      phase: PHASES.MERGING,
+      strategy: STRATEGIES.DIRECT,
+    }),
+  );
+  assert.ok(direct.includes("op-flow-marker"));
+  assert.ok(direct.includes("Direct merge"));
+
+  const queue = operationFlow(
+    buildOperationGraph({
+      state: "cancelled",
+      phase: PHASES.WAITING_MERGE_QUEUE,
+      strategy: STRATEGIES.MERGE_QUEUE,
+    }),
+  );
+  assert.ok(queue.includes("op-flow-marker"));
+  assert.ok(queue.includes("Merge queue"));
+});
+
 test("operationFlow escapes node labels/details even though they're internal strings", () => {
   const graph = buildOperationGraph({
     state: "failed",
@@ -254,7 +288,11 @@ test("operationFlow escapes node labels/details even though they're internal str
 
 test("operationActionLog renders a timestamped, ordered, escaped log", () => {
   const log = operationActionLog([
-    { timestamp: "2026-01-01T00:00:00Z", message: "First <b>step</b>", detail: "info" },
+    {
+      timestamp: "2026-01-01T00:00:00Z",
+      message: "First <b>step</b>",
+      detail: "<em>info</em>",
+    },
     { timestamp: "2026-01-02T00:00:00Z", message: "Second step" },
   ]);
   const firstIndex = log.indexOf("First");
@@ -262,6 +300,9 @@ test("operationActionLog renders a timestamped, ordered, escaped log", () => {
   assert.ok(firstIndex >= 0 && secondIndex > firstIndex);
   assert.ok(log.includes("&lt;b&gt;step&lt;/b&gt;"));
   assert.ok(!log.includes("<b>step</b>"));
+  assert.ok(log.includes('<span class="op-log-detail">&lt;em&gt;info&lt;/em&gt;</span>'));
+  assert.ok(!log.includes("&lt;span class=&quot;op-log-detail&quot;"));
+  assert.ok(!log.includes("<em>info</em>"));
   assert.ok(log.includes('datetime="2026-01-01T00:00:00Z"'));
 });
 

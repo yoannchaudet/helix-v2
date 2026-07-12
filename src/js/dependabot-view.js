@@ -12,6 +12,7 @@ import {
   buildOperationDetailModel,
   isActiveMergeOperation,
   repoDomId,
+  STRATEGIES,
 } from "./dependabot-model.js";
 
 /** Static "PR" subject badge — every row here is a pull request. */
@@ -137,10 +138,12 @@ export function operationFlow(graph) {
   const prep = graph.nodes.filter((node) => node.group === "prep" || node.group === "retry");
   const branch = graph.nodes.filter((node) => node.group === "branch");
   const terminal = graph.nodes.filter((node) => node.group === "terminal");
+  const isTerminal = terminal.some((node) => node.state === "done" || node.state === "failed");
   const branchLabel = STRATEGY_BRANCH_LABELS[graph.strategy] || "Merge strategy not yet determined";
-  const marker = branch.length
-    ? html`<li class="op-flow-marker" role="presentation">${branchLabel}</li>`
-    : "";
+  const marker =
+    branch.length && (!isTerminal || graph.strategy !== STRATEGIES.UNKNOWN)
+      ? html`<li class="op-flow-marker" role="presentation">${branchLabel}</li>`
+      : "";
   const steps = prep.map(opNodeMarkup).join("");
   const branchSteps = branch.map(opNodeMarkup).join("");
   const terminalSteps = terminal.map(opNodeMarkup).join("");
@@ -161,10 +164,11 @@ export function operationActionLog(actionLog) {
             event.timestamp,
           )}</time>`
         : html`<time class="op-log-time">—</time>`;
+      const detail = event.detail ? html`<span class="op-log-detail">${event.detail}</span>` : "";
       return html`<li class="op-log-item">
         ${rawHtml(timestamp)}
         <span class="op-log-message">${event.message}</span>
-        ${event.detail ? html`<span class="op-log-detail">${event.detail}</span>` : ""}
+        ${rawHtml(detail)}
       </li>`;
     })
     .join("");
