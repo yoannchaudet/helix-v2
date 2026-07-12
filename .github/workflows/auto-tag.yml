@@ -1,0 +1,39 @@
+name: Auto-tag release
+
+# When a bump PR merges to main, automatically create and push the version tag
+# so the release workflow kicks off without any manual intervention.
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    name: Create version tag
+    if: >-
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'bump-v')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Create and push tag
+        env:
+          TAG: v${{ github.event.pull_request.head.ref }}
+        run: |
+          # bump-v0.3.0 → v0.3.0
+          TAG="${TAG#vbump-}"
+
+          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; then
+            echo "::error::Tag $TAG already exists on the remote."
+            exit 1
+          fi
+
+          git tag "$TAG"
+          git push origin "$TAG"
+          echo "Pushed tag $TAG"

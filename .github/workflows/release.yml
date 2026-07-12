@@ -1,11 +1,13 @@
 name: Release
 
-# Cut a release by pushing a version tag, e.g. `git tag v0.2.0 && git push origin v0.2.0`.
-# The app version in `src-tauri/tauri.conf.json` must match the tag (without the leading
-# `v`). This builds a universal (Intel + Apple Silicon) macOS app, signs + notarizes it with
-# the Apple Developer ID, signs the updater bundle with the minisign key, and publishes a
-# DRAFT GitHub Release with the .dmg + updater assets (latest.json, .app.tar.gz, .sig).
-# Review the draft, then publish it — the in-app updater only sees published releases.
+# Triggered automatically when the auto-tag workflow pushes a version tag after a bump PR
+# merges (or manually via `git tag v0.2.0 && git push origin v0.2.0`). The app version in
+# `src-tauri/tauri.conf.json` must match the tag (without the leading `v`). This builds a
+# universal (Intel + Apple Silicon) macOS app, signs + notarizes it with the Apple Developer
+# ID, signs the updater bundle with the minisign key, and publishes a DRAFT GitHub Release
+# with the .dmg + updater assets (latest.json, .app.tar.gz, .sig) and an auto-generated
+# changelog. Review the draft, then publish it — the in-app updater only sees published
+# releases.
 on:
   push:
     tags:
@@ -51,6 +53,23 @@ jobs:
       - name: Install JavaScript dependencies
         run: npm ci
 
+      - name: Generate release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NOTES=$(gh api repos/${{ github.repository }}/releases/generate-notes \
+            -f tag_name="${{ github.ref_name }}" \
+            --jq '.body')
+
+          # Combine a fixed header with the auto-generated changelog.
+          {
+            echo "RELEASE_NOTES<<EOF"
+            echo "Download the \`.dmg\` below to install. Existing installs update automatically."
+            echo ""
+            echo "$NOTES"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+
       - name: Build, sign, notarize & publish
         uses: tauri-apps/tauri-action@v1
         env:
@@ -69,8 +88,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: Helix ${{ github.ref_name }}
-          releaseBody: |
-            Download the `.dmg` below to install. Existing installs update automatically.
+          releaseBody: ${{ env.RELEASE_NOTES }}
           releaseDraft: true
           prerelease: false
           # One universal binary for both Intel and Apple Silicon.

@@ -105,8 +105,7 @@ The release workflow declares `environment: release`, so it can read these; CI b
    ```
    It refuses to run on a dirty tree, syncs `main`, creates a `bump-v<X.Y.Z>` branch, edits
    the three version-tracking files, commits, pushes, and opens a PR. Requires **PowerShell
-   7.3+** (it relies on native-command error propagation) and the GitHub CLI (`gh`). Review
-   and merge that PR, then continue from step 2.
+   7.3+** (it relies on native-command error propagation) and the GitHub CLI (`gh`).
 
    The three files it edits (do it by hand if you prefer):
    - [`src-tauri/tauri.conf.json`](../src-tauri/tauri.conf.json) → `"version"` — the
@@ -116,24 +115,29 @@ The release workflow declares `environment: release`, so it can read these; CI b
      (the script edits it directly; a `cargo build` **from `src-tauri/`** also refreshes it
      without touching dependency versions).
 
-   The git tag must equal this version with a leading `v` (config `0.2.0` → tag `v0.2.0`).
-2. Merge the bump PR to `main`.
-3. **Tag and push** — this is what kicks off the release (replace `0.2.0`):
-   ```sh
-   git checkout main && git pull
-   git tag v0.2.0
-   git push origin v0.2.0
-   ```
-4. The **Release** workflow builds, signs, notarizes, and creates a **draft** GitHub
-   Release with the `.dmg` + updater assets. (If you added a required reviewer to the
-   `release` environment, the run waits for your approval before it starts.)
-5. **Review the draft**, edit the notes, then **publish** it.
+2. **Merge the bump PR** to `main`. Everything after this is automatic:
+   - The [auto-tag workflow](../.github/workflows/auto-tag.yml) detects the merged `bump-v*`
+     branch, creates the `v<X.Y.Z>` tag, and pushes it.
+   - The tag push triggers the [release workflow](../.github/workflows/release.yml), which
+     builds, signs, notarizes, and creates a **draft** GitHub Release with the `.dmg` +
+     updater assets and an **auto-generated changelog**. (If you added a required reviewer to
+     the `release` environment, the run waits for your approval before it starts.)
 
-> Don't create the release/tag from the GitHub UI — push the git tag; the workflow creates
-> the draft Release itself. The in-app updater only sees **published, non-draft,
-> non-prerelease** releases (the endpoint resolves `releases/latest`), so nothing updates
-> until you publish. To abort, delete the draft Release, then delete the tag locally and
-> remotely: `git tag -d v0.2.0 && git push origin --delete v0.2.0`.
+3. **Review the draft release** and **publish** it. The changelog is pre-populated from merged
+   PRs (categorized by label — see [`.github/release.yml`](../.github/release.yml)). Edit it
+   if you like, then publish.
+
+> The in-app updater only sees **published, non-draft, non-prerelease** releases (the
+> endpoint resolves `releases/latest`), so nothing updates until you publish. To abort a
+> release, delete the draft Release, then delete the tag locally and remotely:
+> `git tag -d v0.2.0 && git push origin --delete v0.2.0`.
+>
+> **Manual fallback** — if you need to tag by hand (e.g. the auto-tag workflow failed):
+> ```sh
+> git checkout main && git pull
+> git tag v0.2.0
+> git push origin v0.2.0
+> ```
 
 ## How auto-update reaches users
 
