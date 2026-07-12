@@ -465,6 +465,14 @@ module's **sidebar + content** split:
   cancellation's remote cleanup fails, the operation stays `cancel_requested` and retries on later
   passes — it only terminalizes as cancelled once cleanup succeeds, keeping the repo's next PR
   blocked meanwhile.
+- An open Dependabot PR can also be **discarded** from its PR row or an active operation row after
+  an explicit in-app confirmation. Discard is not a durable operation: Helix keeps only an
+  in-memory intent while the app is running, reuses the normal cancellation path (including remote
+  auto-merge/queue cleanup), then closes the PR with GitHub's pull-request update API. A restart
+  forgets a still-pending discard, so the user must request it again. Only a confirmed remote close
+  removes the cached `dependabot_prs` row; failures remain visible and retryable. Discard does not
+  delete the PR's head branch or mark its notification as done, and an already-completed merge still
+  wins the race.
 - Every operation phase and action is recorded locally. The expandable Operations visualization
   reads that durable history rather than inferring progress in the frontend.
 - Active merge operations use a dedicated frontend-driven poll loop (60 seconds by default,

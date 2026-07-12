@@ -37,6 +37,7 @@ test("shows merge readiness and a merge action without notification controls", a
 
   // Dependabot owns its own merge action, not notification controls.
   await expect(page.locator("#dependabot .dep-merge-action")).toHaveCount(3);
+  await expect(page.locator("#dependabot .dep-discard-action")).toHaveCount(3);
   await expect(page.locator("#dependabot .n-bookmark")).toHaveCount(0);
   await expect(page.locator("#dependabot .n-done")).toHaveCount(0);
   await expect(page.locator("#view-dependabot #mark-all-done-btn")).toHaveCount(0);
@@ -57,6 +58,45 @@ test("queues a merge and shows it in Operations", async ({ page }) => {
 
   const calls = await page.evaluate(() => window.__TAURI_CALLS__);
   expect(calls.some((call) => call.cmd === "enqueue_dependabot_merge")).toBe(true);
+});
+
+test("confirms a direct discard, closes the PR, and leaves notifications unchanged", async ({
+  page,
+}) => {
+  await openDependabot(page);
+  const before = await page.evaluate(() => window.__TAURI__.core.invoke("list_inbox"));
+  const row = page.locator('#dependabot .n-row[data-pr-id="101"]');
+  await row.hover();
+  await row.locator(".dep-discard-action").click();
+  await page.getByRole("menuitem", { name: "Cancel" }).click();
+  await expect(row).toHaveCount(1);
+  let calls = await page.evaluate(() => window.__TAURI_CALLS__);
+  expect(calls.some((call) => call.cmd === "discard_dependabot_pr")).toBe(false);
+
+  await row.hover();
+  await row.locator(".dep-discard-action").click();
+  await page.getByRole("menuitem", { name: /Confirm: discard and close/ }).click();
+  await expect(row).toHaveCount(0);
+
+  const after = await page.evaluate(() => window.__TAURI__.core.invoke("list_inbox"));
+  expect(after).toEqual(before);
+  calls = await page.evaluate(() => window.__TAURI_CALLS__);
+  expect(calls.some((call) => call.cmd === "discard_dependabot_pr")).toBe(true);
+  expect(calls.some((call) => call.cmd === "mark_threads_done")).toBe(false);
+});
+
+test("keeps the PR visible when GitHub rejects a discard", async ({ page }) => {
+  await openDependabot(page, {
+    ...defaultFixtures(),
+    discardError: "Pull requests: write required",
+  });
+  const row = page.locator('#dependabot .n-row[data-pr-id="101"]');
+  await row.hover();
+  await row.locator(".dep-discard-action").click();
+  await page.getByRole("menuitem", { name: /Confirm: discard and close/ }).click();
+
+  await expect(page.locator("#toast")).toContainText("Pull requests: write required");
+  await expect(row).toHaveCount(1);
 });
 
 test("groups active and recent operations by repository", async ({ page }) => {
@@ -121,6 +161,34 @@ test("cancels an active merge from Operations", async ({ page }) => {
   await expect(page.locator("#dependabot .operation-row")).toContainText(/Cancelling|Cancelled/);
   const calls = await page.evaluate(() => window.__TAURI_CALLS__);
   expect(calls.some((call) => call.cmd === "cancel_dependabot_merge")).toBe(true);
+});
+
+test("discards from an active operation after cancelling it safely", async ({ page }) => {
+  const operation = mergeOperation({
+    id: 17,
+    state: "delegated",
+    phase: "waiting_checks",
+    queue_position: 1,
+  });
+  await openDependabot(page, { ...defaultFixtures(), mergeOperations: [operation] });
+  await page.locator('#dependabot-filter-list [data-filter="operations"]').click();
+  const row = page.locator('#dependabot .operation-row[data-operation-id="17"]');
+  await expect(row.locator(".dep-operation-cancel")).toHaveCount(1);
+  await expect(row.locator(".dep-discard-action")).toHaveCount(1);
+
+  await row.locator(".dep-discard-action").click();
+  await page.getByRole("menuitem", { name: /Confirm: discard and close/ }).click();
+  await expect
+    .poll(async () => {
+      const calls = await page.evaluate(() => window.__TAURI_CALLS__);
+      return calls.filter((call) => call.cmd === "discard_dependabot_pr").length;
+    })
+    .toBeGreaterThanOrEqual(2);
+
+  await page.locator('#dependabot-filter-list [data-filter="all"]').click();
+  await expect(page.locator('#dependabot .n-row[data-pr-id="101"]')).toHaveCount(0);
+  const calls = await page.evaluate(() => window.__TAURI_CALLS__);
+  expect(calls.some((call) => call.cmd === "process_dependabot_merges")).toBe(true);
 });
 
 test("mock FIFO positions shift after the head is cancelled", async ({ page }) => {

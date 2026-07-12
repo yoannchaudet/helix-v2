@@ -339,6 +339,43 @@ export function installTauriMock(fixtures) {
       emit("dependabot:operations-changed", null);
       return { ...operation };
     },
+    discard_dependabot_pr: ({ prId }) => {
+      const operation = state.mergeOperations.find(
+        (candidate) => candidate.pr_id === prId && activeMergeStates.has(candidate.state),
+      );
+      if (operation) {
+        operation.state = operation.state === "queued" ? "cancelled" : "cancel_requested";
+        operation.queue_position = null;
+        if (operation.state === "cancelled") operation.terminal_at = new Date().toISOString();
+        recomputeMergeQueuePositions();
+        emit("dependabot:operations-changed", null);
+        if (operation.state !== "cancelled") {
+          return { status: "cancelling", pr_id: prId, operation_id: operation.id };
+        }
+      }
+      if (fixtures.discardError) throw new Error(fixtures.discardError);
+      if (fixtures.discardOutcome === "merged") {
+        throw new Error("The pull request merged before Helix could discard it.");
+      }
+      let removed = false;
+      state.dependabot = state.dependabot
+        .map((group) => {
+          const prs = group.prs.filter((pr) => {
+            if (pr.id !== prId) return true;
+            removed = true;
+            return false;
+          });
+          return { ...group, total: prs.length, prs };
+        })
+        .filter((group) => group.prs.length);
+      if (!removed) throw new Error("Dependabot PR not found");
+      emit("dependabot:changed", { pr_id: prId });
+      return {
+        status: "closed",
+        pr_id: prId,
+        operation_id: operation?.id ?? null,
+      };
+    },
     process_dependabot_merges: () => {
       const delegatedRepos = new Set(
         state.mergeOperations.filter((o) => o.state === "delegated").map((o) => o.repo_full_name),

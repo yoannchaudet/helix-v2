@@ -874,6 +874,7 @@ code,
 .repo-done,
 .n-bookmark,
 .dep-merge-action,
+.dep-discard-action,
 .dep-operation-cancel,
 .dep-operation-disclosure {
   flex: none;
@@ -918,6 +919,7 @@ code,
 }
 
 .dep-merge-action,
+.dep-discard-action,
 .dep-operation-cancel,
 .dep-operation-disclosure {
   width: var(--control-icon-md);
@@ -926,6 +928,7 @@ code,
 }
 
 .dep-operation-cancel,
+.dep-discard-action--operation,
 .dep-operation-disclosure,
 .dep-merge-action.is-on {
   opacity: 1;
@@ -952,10 +955,12 @@ code,
 .n-row--hover .n-done,
 .n-row--hover .n-bookmark,
 .n-row--hover .dep-merge-action,
+.n-row--hover .dep-discard-action,
 .repo-header--hover .repo-done,
 .n-done:focus-visible,
 .n-bookmark:focus-visible,
 .dep-merge-action:focus-visible,
+.dep-discard-action:focus-visible,
 .dep-operation-cancel:focus-visible,
 .dep-operation-disclosure:focus-visible,
 .repo-done:focus-visible {
@@ -984,6 +989,18 @@ code,
   background: var(--surface-hover);
 }
 
+.dep-discard-action:hover,
+.dep-discard-action.is-pending {
+  color: var(--error);
+  background: var(--surface-hover);
+}
+
+.dep-discard-action:disabled {
+  cursor: wait;
+  opacity: 1;
+  pointer-events: none;
+}
+
 .n-bookmark:hover {
   color: var(--accent-strong);
   background: var(--surface-hover);
@@ -992,6 +1009,7 @@ code,
 .n-done:focus-visible,
 .n-bookmark:focus-visible,
 .dep-merge-action:focus-visible,
+.dep-discard-action:focus-visible,
 .dep-operation-cancel:focus-visible,
 .dep-operation-disclosure:focus-visible,
 .repo-done:focus-visible {

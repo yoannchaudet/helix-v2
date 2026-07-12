@@ -5,13 +5,14 @@ import { relTime } from "./format.js";
 import {
   activeMergeCount,
   filterDependabotGroups,
+  isActiveMergeOperation,
   sortMergeOperations,
   totalPrs,
 } from "./dependabot-model.js";
 import { operationsList, repoSection } from "./dependabot-view.js";
 import { sourceButton } from "./ui.js";
 import { isAuthenticated } from "./account.js";
-import { isMenuOpen } from "./menu.js";
+import { closeMenu, isMenuOpen, openContextMenu } from "./menu.js";
 import { isShortcutsOpen } from "./shortcuts.js";
 import { dependabotMergePoll } from "./state.js";
 
@@ -50,6 +51,8 @@ let pollStartGeneration = 0;
 let expandedOperationId = null;
 let operationDetails = {};
 let operationDetailGeneration = 0;
+const pendingDiscardPrIds = new Set();
+const discardRequestsInFlight = new Set();
 
 /** Auto-sync-on-open only fires if we've never synced this session or it's been at least
  *  this long since the last sync — so repeated opens don't re-scan the repo list every time. */
@@ -96,18 +99,24 @@ function captureFocus() {
     return {
       kind: "operation",
       id: row.dataset.operationId,
-      part: active.classList.contains("dep-operation-cancel")
-        ? "cancel"
-        : active.classList.contains("dep-operation-disclosure")
-          ? "disclosure"
-          : "open",
+      part: active.classList.contains("dep-discard-action")
+        ? "discard"
+        : active.classList.contains("dep-operation-cancel")
+          ? "cancel"
+          : active.classList.contains("dep-operation-disclosure")
+            ? "disclosure"
+            : "open",
     };
   }
   return row.dataset.prId
     ? {
         kind: "pr",
         id: row.dataset.prId,
-        part: active.classList.contains("dep-merge-action") ? "action" : "open",
+        part: active.classList.contains("dep-discard-action")
+          ? "discard"
+          : active.classList.contains("dep-merge-action")
+            ? "action"
+            : "open",
       }
     : null;
 }
@@ -120,13 +129,16 @@ function applyFocus(target, { preventScroll = false } = {}) {
     `.n-row[data-${target.kind === "operation" ? "operation" : "pr"}-id="${safe}"]`,
   );
   const control =
-    target.kind === "operation" && target.part === "cancel"
-      ? row?.querySelector(".dep-operation-cancel") || row?.querySelector(".n-open[tabindex]")
-      : target.kind === "operation" && target.part === "disclosure"
-        ? row?.querySelector(".dep-operation-disclosure") || row?.querySelector(".n-open[tabindex]")
-        : target.kind === "pr" && target.part === "action"
-          ? row?.querySelector(".dep-merge-action") || row?.querySelector(".n-open[tabindex]")
-          : row?.querySelector(".n-open[tabindex]");
+    target.part === "discard"
+      ? row?.querySelector(".dep-discard-action") || row?.querySelector(".n-open[tabindex]")
+      : target.kind === "operation" && target.part === "cancel"
+        ? row?.querySelector(".dep-operation-cancel") || row?.querySelector(".n-open[tabindex]")
+        : target.kind === "operation" && target.part === "disclosure"
+          ? row?.querySelector(".dep-operation-disclosure") ||
+            row?.querySelector(".n-open[tabindex]")
+          : target.kind === "pr" && target.part === "action"
+            ? row?.querySelector(".dep-merge-action") || row?.querySelector(".n-open[tabindex]")
+            : row?.querySelector(".n-open[tabindex]");
   if (!control) return false;
   control.focus({ preventScroll });
   return true;
@@ -151,6 +163,7 @@ function renderList() {
     if (preserved != null && !applyFocus(preserved, { preventScroll: true })) {
       list.querySelector(".n-open[tabindex]")?.focus({ preventScroll: true });
     }
+    applyPendingDiscardState();
     return;
   }
 
@@ -164,11 +177,76 @@ function renderList() {
   if (preserved != null && !applyFocus(preserved, { preventScroll: true })) {
     list.querySelector(".n-open[tabindex]")?.focus({ preventScroll: true });
   }
+  applyPendingDiscardState();
+}
+
+function applyPendingDiscardState() {
+  for (const button of $("#dependabot")?.querySelectorAll(".dep-discard-action") ?? []) {
+    const pending = pendingDiscardPrIds.has(Number(button.dataset.prId));
+    button.disabled = pending;
+    button.classList.toggle("is-pending", pending);
+    if (pending) button.title = "Waiting to close pull request";
+  }
 }
 
 function clearDependabotHover() {
   for (const row of $("#dependabot")?.querySelectorAll(".n-row--hover") ?? []) {
     row.classList.remove("n-row--hover");
+  }
+}
+
+function confirmDiscard(button) {
+  const prId = Number(button.dataset.prId);
+  if (!Number.isFinite(prId) || pendingDiscardPrIds.has(prId)) return;
+  const title = button.dataset.prTitle || "this pull request";
+  const rect = button.getBoundingClientRect();
+  openContextMenu(rect.left, rect.bottom + 4, [
+    {
+      label: `Confirm: discard and close ${title}`,
+      danger: true,
+      action: () => beginDiscard(prId),
+    },
+    { label: "Cancel", action: () => {} },
+  ]);
+}
+
+function beginDiscard(prId) {
+  pendingDiscardPrIds.add(prId);
+  applyPendingDiscardState();
+  continueDiscard(prId);
+}
+
+async function continueDiscard(prId) {
+  if (!pendingDiscardPrIds.has(prId) || discardRequestsInFlight.has(prId)) return;
+  discardRequestsInFlight.add(prId);
+  try {
+    const result = await invoke("discard_dependabot_pr", { prId });
+    if (result.status === "closed") {
+      pendingDiscardPrIds.delete(prId);
+      announce("Pull request discarded and closed.");
+      await loadDependabot();
+      return;
+    }
+    announce("Cancelling merge before closing pull request.");
+    await reloadOperations();
+    operationPollElapsed = Number.POSITIVE_INFINITY;
+    processMergeOperations();
+  } catch (err) {
+    pendingDiscardPrIds.delete(prId);
+    toast(String(err), "error");
+    await loadDependabot();
+  } finally {
+    discardRequestsInFlight.delete(prId);
+    applyPendingDiscardState();
+  }
+}
+
+function resumePendingDiscards() {
+  for (const prId of pendingDiscardPrIds) {
+    const active = mergeOperations.some(
+      (operation) => operation.pr_id === prId && isActiveMergeOperation(operation),
+    );
+    if (!active) continueDiscard(prId);
   }
 }
 
@@ -295,6 +373,7 @@ function selectOperations() {
   renderTitle();
   renderSidebar();
   renderList();
+  resumePendingDiscards();
   announceView();
 }
 
@@ -344,6 +423,7 @@ async function reloadOperations() {
     renderSidebar();
     if (!$("#view-dependabot")?.hidden) renderList();
     if (expandedOperationId != null) refreshExpandedOperationDetail();
+    resumePendingDiscards();
   } catch (err) {
     console.error(`failed to load Dependabot merge operations: ${err}`);
   }
@@ -367,6 +447,11 @@ function onListClick(e) {
   const disclosure = el?.closest(".dep-operation-disclosure");
   if (disclosure?.dataset.operationId) {
     toggleOperationDetail(Number(disclosure.dataset.operationId));
+    return;
+  }
+  const discard = el?.closest(".dep-discard-action");
+  if (discard?.dataset.prId) {
+    confirmDiscard(discard);
     return;
   }
   const merge = el?.closest(".dep-merge-action");
@@ -428,7 +513,11 @@ function toggleOperationDetail(operationId) {
  *  activation from *also* bubbling into opening the PR link. */
 function onListKeydown(e) {
   if (e.key !== "Enter") return;
-  if (e.target.closest?.(".dep-merge-action, .dep-operation-cancel, .dep-operation-disclosure")) {
+  if (
+    e.target.closest?.(
+      ".dep-merge-action, .dep-discard-action, .dep-operation-cancel, .dep-operation-disclosure",
+    )
+  ) {
     return;
   }
   const open = e.target.closest?.(".n-open");
@@ -509,7 +598,7 @@ async function operationPollTick() {
 }
 
 export async function startDependabotMergePolling() {
-  stopDependabotMergePolling();
+  stopDependabotMergePolling(false);
   const pollGeneration = ++pollStartGeneration;
   const generation = ++loadGeneration;
   try {
@@ -525,6 +614,7 @@ export async function startDependabotMergePolling() {
       applyMergeStatus(status);
       renderSidebar();
       if (!$("#view-dependabot")?.hidden) renderList();
+      resumePendingDiscards();
     }
   } catch (err) {
     if (pollGeneration !== pollStartGeneration) return;
@@ -536,11 +626,15 @@ export async function startDependabotMergePolling() {
   if (activeMergeCount(mergeOperations)) processMergeOperations();
 }
 
-export function stopDependabotMergePolling() {
+export function stopDependabotMergePolling(clearPendingDiscards = true) {
   pollStartGeneration += 1;
   if (operationPollTimer) clearInterval(operationPollTimer);
   operationPollTimer = null;
   operationPollElapsed = 0;
+  if (clearPendingDiscards) {
+    pendingDiscardPrIds.clear();
+    discardRequestsInFlight.clear();
+  }
 }
 
 /** The row the keyboard cursor is on, or null. */
@@ -711,6 +805,7 @@ export function initDependabot() {
     list.addEventListener("mouseover", onDependabotMouseOver);
     list.addEventListener("mouseleave", clearDependabotHover);
     list.addEventListener("scroll", clearDependabotHover, { passive: true });
+    list.addEventListener("scroll", closeMenu, true);
   }
   window.addEventListener("blur", clearDependabotHover);
   document.addEventListener("keydown", onCommandKeydown);
@@ -740,5 +835,8 @@ export function initDependabot() {
   });
   listen("dependabot:operations-changed", () => {
     reloadOperations();
+  });
+  listen("dependabot:changed", () => {
+    loadDependabot();
   });
 }

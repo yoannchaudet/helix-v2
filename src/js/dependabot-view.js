@@ -19,6 +19,7 @@ import {
 const PR_BADGE = pill("PR", "badge badge--pr");
 const MERGE_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 3v6a3 3 0 003 3h2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="4" cy="3" r="1.5" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="11" cy="12" r="1.5" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M9 3h3v3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 const CANCEL_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4.5 4.5l7 7m0-7l-7 7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`;
+const DISCARD_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3.5 5h9M6 5V3.5h4V5m1.5 0-.5 8H5L4.5 5M6.5 7.5v3M9.5 7.5v3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 const CHEVRON_ICON = `<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
 const OP_LABELS = {
@@ -72,6 +73,13 @@ export function prRow(pr) {
         label: `Queue merge for "${pr.title}"`,
         attrs: html`data-pr-id="${pr.id}"`,
       });
+  const discard = iconButton({
+    icon: DISCARD_ICON,
+    className: "dep-discard-action",
+    title: "Discard and close pull request",
+    label: `Discard and close "${pr.title}"`,
+    attrs: html`data-pr-id="${pr.id}" data-pr-title="${pr.title}"`,
+  });
   return html`
     <li class="n-row n-row--openable${operation ? " n-row--operation" : ""}" data-pr-id="${pr.id}">
       <div class="n-open" data-url="${pr.html_url}" role="link" tabindex="0">
@@ -83,7 +91,7 @@ export function prRow(pr) {
         </div>
         ${rawHtml(author)}
       </div>
-      ${rawHtml(action)}
+      ${rawHtml(action)} ${rawHtml(discard)}
     </li>`;
 }
 
@@ -244,6 +252,14 @@ export function operationRow(operation, options = {}) {
         attrs: html`data-operation-id="${operation.id}"`,
       })
     : "";
+  const discard = isActiveMergeOperation(operation)
+    ? iconButton({
+        icon: DISCARD_ICON,
+        className: "dep-discard-action dep-discard-action--operation",
+        label: `Discard and close "${operation.title}"`,
+        attrs: html`data-pr-id="${operation.pr_id}" data-pr-title="${operation.title}"`,
+      })
+    : "";
   const disclosure = operationDisclosureButton(operation, expanded);
   const row = html`
     <li class="n-row n-row--openable operation-row" data-operation-id="${operation.id}">
@@ -257,6 +273,7 @@ export function operationRow(operation, options = {}) {
       </div>
       ${rawHtml(disclosure)}
       ${rawHtml(cancel)}
+      ${rawHtml(discard)}
     </li>`;
   if (!expanded) return row;
   const panel = html`
