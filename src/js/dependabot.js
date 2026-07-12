@@ -836,7 +836,4 @@ export function initDependabot() {
   listen("dependabot:operations-changed", () => {
     reloadOperations();
   });
-  listen("dependabot:changed", () => {
-    loadDependabot();
-  });
 }
