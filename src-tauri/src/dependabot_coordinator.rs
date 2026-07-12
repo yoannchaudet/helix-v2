@@ -341,6 +341,1798 @@ where
     }
 }
 
+/* ------------------------- Durable merge operations ------------------------ */
+
+/// Current queue runtime and cadence contract for the frontend. `backoff_until` is an ISO UTC
+/// timestamp so it survives restarts and can be displayed without reconstructing a duration.
+#[derive(Debug, Clone, Serialize)]
+pub struct DependabotMergeStatus {
+    pub active_count: i64,
+    pub poll_interval_s: i64,
+    pub min_poll_interval_s: i64,
+    pub github_poll_floor_s: Option<i64>,
+    pub backoff_until: Option<String>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DependabotMergeProcessResult {
+    pub status: DependabotMergeStatus,
+    pub processed: usize,
+    pub changed: bool,
+}
+
+fn merge_status(conn: &rusqlite::Connection) -> Result<DependabotMergeStatus, String> {
+    let active_count = conn
+        .query_row(
+            "SELECT COUNT(*) FROM dependabot_merge_operations
+             WHERE state IN ('queued', 'validating', 'delegated', 'cancel_requested')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let runtime = dependabot::merge_runtime(conn).map_err(|e| e.to_string())?;
+    Ok(DependabotMergeStatus {
+        active_count,
+        poll_interval_s: settings::get_dependabot_merge_poll_interval(conn)
+            .map_err(|e| e.to_string())?,
+        min_poll_interval_s: settings::MIN_DEPENDABOT_MERGE_POLL_INTERVAL_S,
+        github_poll_floor_s: runtime.github_poll_floor_s,
+        backoff_until: runtime.backoff_until,
+        last_error: runtime.last_error,
+    })
+}
+
+#[tauri::command]
+pub fn enqueue_dependabot_merge(
+    pr_id: i64,
+    state: State<'_, AppState>,
+) -> Result<dependabot::DependabotMergeOperation, String> {
+    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+    dependabot::enqueue_merge_operation(&conn, pr_id).map_err(|e| {
+        if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
+            "This Dependabot PR is not in the local cache. Sync Dependabot and try again."
+                .to_string()
+        } else {
+            e.to_string()
+        }
+    })
+}
+
+#[tauri::command]
+pub async fn cancel_dependabot_merge(
+    operation_id: i64,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<dependabot::DependabotMergeOperation, String> {
+    let _mutation_lease = state.dependabot_merge_mutation_guard.lock().await;
+    let operation = {
+        let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+        dependabot::request_cancel(&conn, operation_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Dependabot merge operation was not found.".to_string())?
+    };
+    EventSink::emit(
+        &app,
+        "dependabot:operations-changed",
+        serde_json::json!({ "operation_id": operation_id }),
+    );
+    Ok(operation)
+}
+
+#[tauri::command]
+pub fn list_dependabot_merge_operations(
+    state: State<'_, AppState>,
+) -> Result<Vec<dependabot::DependabotMergeOperation>, String> {
+    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+    dependabot::list_merge_operations(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn dependabot_merge_status(
+    state: State<'_, AppState>,
+) -> Result<DependabotMergeStatus, String> {
+    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+    merge_status(&conn)
+}
+
+/// The operation-detail IPC view: `dependabot::MergeOperationDetail` (persistence) carries only
+/// the operation row plus its raw narration trail. This pairs that with a user-facing
+/// explanation of where the operation currently stands and what Helix (or GitHub) does next —
+/// presentation concerns that belong in the coordinator, not the SQLite-only persistence layer.
+/// Field names are already the shape the frontend expects (`dependabot-model.js`'s
+/// `buildOperationDetailModel`): `{ operation, events, current_explanation, next_action }`.
+#[derive(Debug, Clone, Serialize)]
+pub struct DependabotMergeOperationDetail {
+    pub operation: dependabot::DependabotMergeOperation,
+    pub events: Vec<dependabot::MergeOperationEvent>,
+    pub current_explanation: String,
+    pub next_action: String,
+}
+
+/// Tauri-free core: reads the operation + its event trail from SQLite (never touches the
+/// network) and enriches it with `phase_explanation`. `Ok(None)` when the id doesn't exist, so
+/// the command wrapper can turn that into a user-facing "not found" error.
+fn operation_detail_core(
+    conn: &rusqlite::Connection,
+    operation_id: i64,
+) -> rusqlite::Result<Option<DependabotMergeOperationDetail>> {
+    let Some(detail) = dependabot::get_operation_detail(conn, operation_id)? else {
+        return Ok(None);
+    };
+    let (current_explanation, next_action) = phase_explanation(&detail.operation);
+    Ok(Some(DependabotMergeOperationDetail {
+        operation: detail.operation,
+        events: detail.events,
+        current_explanation,
+        next_action,
+    }))
+}
+
+/// User-facing narration of an operation's current step and what happens next — exhaustive over
+/// every phase the processor can plan through (`dependabot-model.js`'s `PHASES`) plus every
+/// terminal outcome. Terminal `state`s (and `cancel_requested`, which can interrupt any phase)
+/// take priority over `phase`: once an operation has stopped or is stopping, its last-recorded
+/// phase is just where it happened to be, not itself meaningful to narrate. An unrecognized
+/// phase (e.g. a future addition this function hasn't been updated for) degrades to a generic
+/// but still informative message rather than panicking or leaving the UI blank.
+fn phase_explanation(operation: &dependabot::DependabotMergeOperation) -> (String, String) {
+    match operation.state.as_str() {
+        "merged" => {
+            return (
+                "The pull request has been merged.".to_string(),
+                "No further action — this operation is complete.".to_string(),
+            );
+        }
+        "cancelled" => {
+            return (
+                "This merge operation was cancelled.".to_string(),
+                "No further action — this operation is complete. Re-enqueue the pull request if it should still be merged.".to_string(),
+            );
+        }
+        "timed_out" => {
+            return (
+                "Helix stopped waiting for this pull request to become mergeable within the allotted time.".to_string(),
+                "No further action from this operation — re-enqueue the pull request to try again.".to_string(),
+            );
+        }
+        "failed" => {
+            let reason = operation
+                .failure_reason
+                .as_deref()
+                .or(operation.last_error.as_deref())
+                .unwrap_or("an unspecified error");
+            return (
+                format!("The merge operation failed: {reason}."),
+                "No further action from this operation — resolve the issue, then re-enqueue the pull request.".to_string(),
+            );
+        }
+        "cancel_requested" => {
+            return (
+                "Cancellation requested; Helix will stop processing this pull request at the next safe point.".to_string(),
+                "Wait for the in-flight step to finish — the operation will then move to cancelled.".to_string(),
+            );
+        }
+        _ => {}
+    }
+
+    match operation.phase.as_str() {
+        "queued" => (
+            "Waiting for Helix to start processing this pull request.".to_string(),
+            "Validate that the pull request is still open and mergeable.".to_string(),
+        ),
+        "validating" => (
+            "Confirming the pull request is still open, mergeable, and matches the last observed commit.".to_string(),
+            "Resolve the merge strategy for this repository and branch.".to_string(),
+        ),
+        "approving" => (
+            "Requesting the approvals this pull request needs before it can merge.".to_string(),
+            "Check whether the branch needs to be updated with the base branch before merging.".to_string(),
+        ),
+        "updating_branch" => (
+            "Updating the pull request's branch with the latest changes from its base branch.".to_string(),
+            "Wait for status checks to run against the updated branch.".to_string(),
+        ),
+        "waiting_requirements" => (
+            "GitHub still reports this pull request as blocked, but no pending or failing checks are visible yet.".to_string(),
+            "Wait for GitHub to publish the remaining requirement or allow the merge.".to_string(),
+        ),
+        "waiting_checks" => (
+            "Waiting for required status checks to finish on the pull request.".to_string(),
+            "Once checks succeed, continue toward merging; retry them if any fail.".to_string(),
+        ),
+        "retry_scheduled" => (
+            "A required check failed or hasn't started; Helix has scheduled a retry.".to_string(),
+            "Re-run the failed checks once the retry delay elapses.".to_string(),
+        ),
+        "retrying_checks" => (
+            "Re-running the status checks that previously failed.".to_string(),
+            "Wait for the retried checks to complete.".to_string(),
+        ),
+        "enabling_auto_merge" => (
+            "Enabling GitHub's native auto-merge for this pull request.".to_string(),
+            "Wait for the pull request to enter (or clear) the merge queue.".to_string(),
+        ),
+        "waiting_merge_queue" => (
+            "Waiting in GitHub's merge queue for this pull request.".to_string(),
+            "GitHub will merge the pull request automatically once the queue processes it.".to_string(),
+        ),
+        "merging" => (
+            "Merging the pull request.".to_string(),
+            "No further action — Helix is completing the merge.".to_string(),
+        ),
+        other => (
+            format!("Processing this pull request (phase: {other})."),
+            "Waiting for Helix to make further progress.".to_string(),
+        ),
+    }
+}
+
+/// Read one merge operation's full detail (operation + narration trail + a user-facing
+/// explanation of its current phase and what happens next) for the expanded row in the UI.
+#[tauri::command]
+pub fn get_dependabot_merge_operation_detail(
+    operation_id: i64,
+    state: State<'_, AppState>,
+) -> Result<DependabotMergeOperationDetail, String> {
+    let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+    operation_detail_core(&conn, operation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Dependabot merge operation was not found.".to_string())
+}
+
+fn persist_merge_rates(conn: &rusqlite::Connection, rates: Vec<github::RateLimit>) {
+    let mut tracker = sync::RateTracker::default();
+    for rate in rates {
+        tracker.observe(rate);
+    }
+    if let Err(error) = tracker.persist(conn) {
+        eprintln!("helix: persisting Dependabot merge rate metadata failed: {error}");
+    }
+}
+
+fn merge_rates_below_reserve(conn: &rusqlite::Connection) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs() as i64);
+    sync::read_rate_buckets(conn)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|bucket| bucket.resource == "core" || bucket.resource == "graphql")
+        .filter(|bucket| bucket.reset_at.is_none_or(|reset| reset > now))
+        .any(|bucket| match (bucket.remaining, bucket.limit) {
+            (Some(remaining), Some(limit)) if limit > 0 => {
+                (remaining as f64) <= 0.25 * (limit as f64)
+            }
+            _ => false,
+        })
+}
+
+fn rate_floor_and_backoff(rates: &[github::RateLimit]) -> (Option<i64>, Option<i64>) {
+    let floor = rates.iter().filter_map(github::RateLimit::poll_floor).max();
+    let backoff = rates.iter().filter_map(|rate| rate.retry_after).max();
+    (floor, backoff)
+}
+
+/// Tauri-free queue processor. Work is snapshotted under SQLite, every network operation runs
+/// with no lock held, then its result is persisted before the next (serial) call. The injected
+/// function keeps all transition logic testable without HTTP.
+async fn process_dependabot_merges_core<S, Process, Fut>(
+    db: &Db,
+    sink: S,
+    process: Process,
+) -> Result<DependabotMergeProcessResult, String>
+where
+    S: EventSink,
+    Process: Fn(dependabot::MergeWork, bool) -> Fut,
+    Fut: std::future::Future<Output = Result<github::MergeRemoteResult, github::MergeRemoteError>>,
+{
+    let heads = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        dependabot::record_merge_tick(&conn).map_err(|e| e.to_string())?;
+        if dependabot::runtime_is_backing_off(&conn).map_err(|e| e.to_string())? {
+            return Ok(DependabotMergeProcessResult {
+                status: merge_status(&conn)?,
+                processed: 0,
+                changed: false,
+            });
+        }
+        dependabot::merge_operation_heads(&conn).map_err(|e| e.to_string())?
+    };
+
+    let mut processed = 0usize;
+    let mut changed = false;
+    for work in heads {
+        let was_cancel_requested = work.operation.state == "cancel_requested";
+        {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            if merge_rates_below_reserve(&conn) {
+                break;
+            }
+        }
+        {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            if !dependabot::begin_merge_processing(&conn, work.operation.id)
+                .map_err(|e| e.to_string())?
+            {
+                continue;
+            }
+        }
+        let timed_out = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            dependabot::merge_processing_timed_out(&conn, work.operation.id)
+                .map_err(|e| e.to_string())?
+        };
+        // A queue timeout may need remote disable/dequeue cleanup. Any error while confirming or
+        // removing that enrollment must keep the operation active so the next same-repo FIFO item
+        // cannot advance while GitHub might still merge this PR.
+        let timeout_cleanup_in_flight = if timed_out {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            let cached_queue_strategy = work
+                .operation
+                .base_ref
+                .as_deref()
+                .map(|base| {
+                    dependabot::get_merge_policy(&conn, &work.operation.repo_full_name, base, None)
+                })
+                .transpose()
+                .map_err(|e| e.to_string())?
+                .flatten()
+                .is_some_and(|policy| policy.strategy == "merge_queue");
+            work.operation.strategy == "merge_queue" || cached_queue_strategy
+        } else {
+            false
+        };
+        let id = work.operation.id;
+        match process(work, timed_out).await {
+            Ok(result) => {
+                let (floor, _) = rate_floor_and_backoff(&result.rates);
+                let conn = db.0.lock().map_err(|e| e.to_string())?;
+                persist_merge_rates(&conn, result.rates);
+                dependabot::clear_merge_runtime_error(&conn, floor).map_err(|e| e.to_string())?;
+                let cancel_arrived_during_request = !was_cancel_requested
+                    && dependabot::get_operation(&conn, id)
+                        .map_err(|e| e.to_string())?
+                        .is_some_and(|operation| {
+                            matches!(operation.state.as_str(), "cancel_requested" | "cancelled")
+                        });
+                // A queue operation that has native auto-merge enabled (or a live queue entry)
+                // must not be terminated locally while GitHub could still merge it: leave it in
+                // `cancel_requested` so the next orchestrator pass disables auto-merge / dequeues
+                // remotely under the mutation guard before the terminal cancel. A merged result
+                // still wins the race (handled by the `Merged` guard below).
+                let needs_remote_cancel_cleanup = dependabot::get_operation(&conn, id)
+                    .map_err(|e| e.to_string())?
+                    .is_some_and(|operation| {
+                        operation.auto_merge_enabled || operation.merge_queue_position.is_some()
+                    });
+                if (was_cancel_requested || cancel_arrived_during_request)
+                    && !matches!(
+                        &result.outcome,
+                        github::MergeRemoteOutcome::Merged { .. }
+                            | github::MergeRemoteOutcome::Cancelled
+                    )
+                {
+                    if !needs_remote_cancel_cleanup {
+                        dependabot::mark_cancelled_or_timed_out(&conn, id, false)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    // When remote cleanup is still owed, deliberately leave the row in
+                    // `cancel_requested` (do not run the state-mutating match below, which would
+                    // resurrect it to `delegated`) so the next pass's orchestrator disables
+                    // auto-merge / dequeues before the terminal cancel.
+                    processed += 1;
+                    changed = true;
+                    continue;
+                }
+                match result.outcome {
+                    github::MergeRemoteOutcome::Merged { head_sha } => {
+                        dependabot::terminalize(
+                            &conn,
+                            id,
+                            "merged",
+                            None,
+                            Some("Merged on GitHub."),
+                            None,
+                        )
+                        .map_err(|e| e.to_string())?;
+                        if let Some(head_sha) = head_sha {
+                            dependabot::record_observation(
+                                &conn,
+                                id,
+                                Some(&head_sha),
+                                false,
+                                false,
+                                "merged",
+                                Some("Merged on GitHub."),
+                            )
+                            .map_err(|e| e.to_string())?;
+                        }
+                    }
+                    github::MergeRemoteOutcome::Pending {
+                        head_sha,
+                        approved,
+                        branch_update_requested,
+                        reason,
+                    } => {
+                        dependabot::mark_merge_progress(
+                            &conn,
+                            id,
+                            &head_sha,
+                            approved,
+                            branch_update_requested,
+                            reason.as_deref(),
+                        )
+                        .map_err(|e| e.to_string())?;
+                    }
+                    github::MergeRemoteOutcome::Cancelled => {
+                        dependabot::mark_cancelled_or_timed_out(&conn, id, timed_out)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    github::MergeRemoteOutcome::PermanentFailure { code, reason } => {
+                        dependabot::record_merge_error(&conn, id, code, &reason, true)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    // The orchestrator consumes `Prepared` internally and never hands it back to
+                    // the FIFO loop; treat it defensively like `Waiting` (leave the row as-is)
+                    // rather than forcing a state transition on an unexpected value.
+                    github::MergeRemoteOutcome::Prepared { .. }
+                    | github::MergeRemoteOutcome::Blocked { .. }
+                    | github::MergeRemoteOutcome::Waiting => {}
+                }
+                processed += 1;
+                changed = true;
+            }
+            Err(error) => {
+                let (floor, retry_after) = rate_floor_and_backoff(&error.rates);
+                let conn = db.0.lock().map_err(|e| e.to_string())?;
+                persist_merge_rates(&conn, error.rates);
+                // A cancellation in flight whose remote cleanup (disable auto-merge / dequeue)
+                // failed must NOT be terminalized here: doing so would abandon an operation that
+                // may still be enrolled on GitHub. Instead keep it in `cancel_requested`, surface
+                // the error/backoff, and let a later pass reconcile — retrying cleanup until it
+                // succeeds (only then does the Ok(Cancelled) path terminalize cancelled). This
+                // deliberately keeps the row the repo's FIFO head so the next same-repo PR stays
+                // blocked rather than allowing two remotely active operations. Even a "permanent"
+                // cleanup failure stays active for this reason; auth/rate still break globally.
+                let cancel_cleanup_in_flight =
+                    dependabot::merge_cancel_requested(&conn, id).map_err(|e| e.to_string())?;
+                let (code, terminal) = match error.class {
+                    github::MergeErrorClass::Auth => ("auth", false),
+                    github::MergeErrorClass::Rate => ("rate_limited", false),
+                    github::MergeErrorClass::Transient => ("transient", false),
+                    github::MergeErrorClass::Permanent => ("github_permanent", true),
+                };
+                let terminal = terminal && !cancel_cleanup_in_flight && !timeout_cleanup_in_flight;
+                dependabot::record_merge_error(&conn, id, code, &error.message, terminal)
+                    .map_err(|e| e.to_string())?;
+                dependabot::record_merge_runtime_error(
+                    &conn,
+                    &error.message,
+                    floor,
+                    if error.class == github::MergeErrorClass::Rate {
+                        Some(retry_after.unwrap_or(60))
+                    } else {
+                        None
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+                processed += 1;
+                changed = true;
+                // Auth and rate failure apply globally to the PAT/bucket; preserve all FIFO
+                // heads and stop this pass rather than pointlessly trying another repository.
+                if matches!(
+                    error.class,
+                    github::MergeErrorClass::Auth | github::MergeErrorClass::Rate
+                ) {
+                    break;
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+    let status = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        merge_status(&conn)?
+    };
+    if changed {
+        sink.emit(
+            "dependabot:operations-changed",
+            serde_json::json!({ "processed": processed }),
+        );
+    }
+    Ok(DependabotMergeProcessResult {
+        status,
+        processed,
+        changed,
+    })
+}
+
+struct MergeTickGuard<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for MergeTickGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+#[tauri::command]
+pub async fn process_dependabot_merges(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<DependabotMergeProcessResult, String> {
+    use std::sync::atomic::Ordering;
+    if state
+        .dependabot_merge_tick_running
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+        return Ok(DependabotMergeProcessResult {
+            status: merge_status(&conn)?,
+            processed: 0,
+            changed: false,
+        });
+    }
+    let _running = MergeTickGuard(&state.dependabot_merge_tick_running);
+    // Keychain I/O happens before any DB lock and only once per processor tick.
+    let token = match auth::read_token(&state.db)? {
+        Some(token) => token,
+        None => {
+            let message = "Not connected — add a GitHub token first.";
+            {
+                let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+                dependabot::record_merge_runtime_error(&conn, message, None, None)
+                    .map_err(|e| e.to_string())?;
+            }
+            EventSink::emit(
+                &app,
+                "dependabot:operations-changed",
+                serde_json::json!({ "error": message }),
+            );
+            return Err(message.to_string());
+        }
+    };
+    let client = reqwest::Client::new();
+    let db = &state.db;
+    let mutation_guard = &state.dependabot_merge_mutation_guard;
+    process_dependabot_merges_core(&state.db, app, move |work, timed_out| {
+        let backend = RealMergeBackend {
+            client: client.clone(),
+            token: token.clone(),
+            mutation_guard,
+            db,
+            operation_id: work.operation.id,
+        };
+        async move { orchestrate_operation(db, &backend, work, timed_out).await }
+    })
+    .await
+}
+
+/* --------------------------- Durable phase orchestrator --------------------- */
+
+/// How long a cached repo+base merge policy stays fresh before the orchestrator re-derives it
+/// (requirement 2: refresh stale cache). One hour balances catching a repo that turns its merge
+/// queue on/off against re-running detection on every poll.
+const POLICY_MAX_AGE_S: i64 = 3600;
+
+/// The five-minute backoff before re-running failed GitHub Actions jobs (requirement 4/5).
+const CHECK_RETRY_DELAY_S: i64 = 300;
+
+/// Headroom (minutes) a freshly scheduled retry needs inside the 90-minute deadline; below this
+/// the orchestrator stops scheduling new retries and lets the timeout take over.
+const RETRY_DEADLINE_CUSHION_MIN: i64 = 6;
+
+/// Backoff before retrying strategy detection when the policy is still `Unknown` — keeps an
+/// ambiguous/unreadable policy visible and retryable (requirement 2) without hammering.
+const UNKNOWN_POLICY_RETRY_S: i64 = 300;
+
+fn strategy_str(strategy: github::MergeQueueStrategy) -> &'static str {
+    match strategy {
+        github::MergeQueueStrategy::Direct => "direct",
+        github::MergeQueueStrategy::MergeQueue => "merge_queue",
+        github::MergeQueueStrategy::Unknown => "unknown",
+    }
+}
+
+fn strategy_from_str(strategy: Option<&str>) -> github::MergeQueueStrategy {
+    match strategy {
+        Some("direct") => github::MergeQueueStrategy::Direct,
+        Some("merge_queue") => github::MergeQueueStrategy::MergeQueue,
+        _ => github::MergeQueueStrategy::Unknown,
+    }
+}
+
+/// The network surface the durable orchestrator drives, one thin wrapper per GitHub primitive.
+/// Abstracting it as a trait keeps the whole phase machine — strategy detection, direct
+/// retry cycles, and the merge-queue flow — testable with an injected fake, no HTTP or Tauri
+/// runtime (requirement 10). Every method returns its captured rate snapshots (both `core` and
+/// `graphql` buckets) so the orchestrator can persist them (requirement 7). Cancellation and the
+/// shared mutation guard are the implementation's concern, not part of the trait surface.
+#[allow(async_fn_in_trait)]
+trait MergeBackend {
+    async fn process_operation(
+        &self,
+        work: &dependabot::MergeWork,
+        timed_out: bool,
+        strategy: github::MergeQueueStrategy,
+    ) -> Result<github::MergeRemoteResult, github::MergeRemoteError>;
+
+    async fn detect_policy(
+        &self,
+        repo: &str,
+        base: &str,
+    ) -> Result<github::MergeQueuePolicy, github::MergeRemoteError>;
+
+    async fn diagnose(
+        &self,
+        repo: &str,
+        head: &str,
+    ) -> Result<github::ExactHeadCheckDiagnosis, github::MergeRemoteError>;
+
+    async fn compare_branch(
+        &self,
+        repo: &str,
+        base: &str,
+        head: &str,
+    ) -> Result<github::BranchComparisonResult, github::MergeRemoteError>;
+
+    async fn update_branch(
+        &self,
+        repo: &str,
+        number: i64,
+        head: &str,
+    ) -> Result<github::MutationResult, github::MergeRemoteError>;
+
+    async fn rerun(
+        &self,
+        repo: &str,
+        run_id: i64,
+    ) -> Result<github::MutationResult, github::MergeRemoteError>;
+
+    async fn queue_status(
+        &self,
+        repo: &str,
+        number: i64,
+    ) -> Result<github::PrQueueStatusResult, github::MergeRemoteError>;
+
+    async fn enable_auto_merge(
+        &self,
+        node_id: &str,
+        head: &str,
+    ) -> Result<github::MutationResult, github::MergeRemoteError>;
+
+    async fn disable_auto_merge(
+        &self,
+        node_id: &str,
+    ) -> Result<github::MutationResult, github::MergeRemoteError>;
+
+    async fn enqueue(
+        &self,
+        node_id: &str,
+        head: &str,
+    ) -> Result<github::MutationResult, github::MergeRemoteError>;
+
+    async fn dequeue(
+        &self,
+        node_id: &str,
+    ) -> Result<github::MutationResult, github::MergeRemoteError>;
+}
+
+/// Production [`MergeBackend`] over real HTTP. Cancellation is read from SQLite for this exact
+/// operation, so every guarded mutation still checks cancellation after acquiring the shared
+/// mutation guard and before dispatch (a request already sent to GitHub wins the race).
+struct RealMergeBackend<'a> {
+    client: reqwest::Client,
+    token: String,
+    mutation_guard: &'a tokio::sync::Mutex<()>,
+    db: &'a Db,
+    operation_id: i64,
+}
+
+impl RealMergeBackend<'_> {
+    fn is_cancelled(&self) -> impl Fn() -> bool + '_ {
+        move || {
+            let Ok(conn) = self.db.0.lock() else {
+                return true;
+            };
+            dependabot::merge_cancel_requested(&conn, self.operation_id).unwrap_or(true)
+        }
+    }
+}
+
+impl MergeBackend for RealMergeBackend<'_> {
+    async fn process_operation(
+        &self,
+        work: &dependabot::MergeWork,
+        timed_out: bool,
+        strategy: github::MergeQueueStrategy,
+    ) -> Result<github::MergeRemoteResult, github::MergeRemoteError> {
+        github::process_dependabot_merge_operation(
+            &self.client,
+            &self.token,
+            work,
+            timed_out,
+            strategy,
+            self.mutation_guard,
+            self.is_cancelled(),
+        )
+        .await
+    }
+
+    async fn detect_policy(
+        &self,
+        repo: &str,
+        base: &str,
+    ) -> Result<github::MergeQueuePolicy, github::MergeRemoteError> {
+        github::detect_merge_queue_policy(&self.client, &self.token, repo, base).await
+    }
+
+    async fn diagnose(
+        &self,
+        repo: &str,
+        head: &str,
+    ) -> Result<github::ExactHeadCheckDiagnosis, github::MergeRemoteError> {
+        github::diagnose_exact_head_checks(&self.client, &self.token, repo, head).await
+    }
+
+    async fn compare_branch(
+        &self,
+        repo: &str,
+        base: &str,
+        head: &str,
+    ) -> Result<github::BranchComparisonResult, github::MergeRemoteError> {
+        github::compare_pull_request_branch(&self.client, &self.token, repo, base, head).await
+    }
+
+    async fn update_branch(
+        &self,
+        repo: &str,
+        number: i64,
+        head: &str,
+    ) -> Result<github::MutationResult, github::MergeRemoteError> {
+        github::update_pull_request_branch(
+            &self.client,
+            &self.token,
+            repo,
+            number,
+            head,
+            self.mutation_guard,
+            self.is_cancelled(),
+        )
+        .await
+    }
+
+    async fn rerun(
+        &self,
+        repo: &str,
+        run_id: i64,
+    ) -> Result<github::MutationResult, github::MergeRemoteError> {
+        github::rerun_failed_jobs(
+            &self.client,
+            &self.token,
+            repo,
+            run_id,
+            self.mutation_guard,
+            self.is_cancelled(),
+        )
+        .await
+    }
+
+    async fn queue_status(
+        &self,
+        repo: &str,
+        number: i64,
+    ) -> Result<github::PrQueueStatusResult, github::MergeRemoteError> {
+        github::fetch_pr_queue_status(&self.client, &self.token, repo, number).await
+    }
+
+    async fn enable_auto_merge(
+        &self,
+        node_id: &str,
+        head: &str,
+    ) -> Result<github::MutationResult, github::MergeRemoteError> {
+        github::enable_pr_auto_merge(
+            &self.client,
+            &self.token,
+            node_id,
+            head,
+            self.mutation_guard,
+            self.is_cancelled(),
+        )
+        .await
+    }
+
+    async fn disable_auto_merge(
+        &self,
+        node_id: &str,
+    ) -> Result<github::MutationResult, github::MergeRemoteError> {
+        // This mutation implements cancellation itself. Reusing the operation cancellation
+        // predicate would suppress the cleanup precisely when the row is `cancel_requested`.
+        github::disable_pr_auto_merge(
+            &self.client,
+            &self.token,
+            node_id,
+            self.mutation_guard,
+            || false,
+        )
+        .await
+    }
+
+    async fn enqueue(
+        &self,
+        node_id: &str,
+        head: &str,
+    ) -> Result<github::MutationResult, github::MergeRemoteError> {
+        github::enqueue_pr(
+            &self.client,
+            &self.token,
+            node_id,
+            head,
+            self.mutation_guard,
+            self.is_cancelled(),
+        )
+        .await
+    }
+
+    async fn dequeue(
+        &self,
+        node_id: &str,
+    ) -> Result<github::MutationResult, github::MergeRemoteError> {
+        // Like disable-auto-merge above, deliberate remote cleanup must run after cancellation.
+        github::dequeue_pr(
+            &self.client,
+            &self.token,
+            node_id,
+            self.mutation_guard,
+            || false,
+        )
+        .await
+    }
+}
+
+/// Accumulate the rate snapshots from one backend call into `rates`; on failure, prepend the
+/// running total to the error's own snapshots and bail. Keeps every bucket the orchestrator
+/// touched (across all its serial calls) in one place for persistence (requirement 7).
+macro_rules! net {
+    ($rates:expr, $call:expr) => {{
+        match $call.await {
+            Ok(value) => {
+                $rates.extend(value.rates.iter().cloned());
+                value
+            }
+            Err(mut error) => {
+                let mut all = std::mem::take(&mut $rates);
+                all.append(&mut error.rates);
+                error.rates = all;
+                return Err(error);
+            }
+        }
+    }};
+}
+
+/// Take the DB lock briefly for one synchronous persistence step, mapping a poisoned lock to a
+/// `MergeRemoteError` so no SQLite lock is ever held across a network call.
+fn with_conn<T>(
+    db: &Db,
+    rates: &[github::RateLimit],
+    f: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>,
+) -> Result<T, github::MergeRemoteError> {
+    let conn = db.0.lock().map_err(|e| github::MergeRemoteError {
+        class: github::MergeErrorClass::Transient,
+        message: format!("database lock poisoned: {e}"),
+        rates: rates.to_vec(),
+    })?;
+    f(&conn).map_err(|e| github::MergeRemoteError {
+        class: github::MergeErrorClass::Transient,
+        message: format!("database write failed: {e}"),
+        rates: rates.to_vec(),
+    })
+}
+
+/// Durable, phase-driven processor for one FIFO head. Reuses the shared exact-head validation +
+/// approval processor for both strategies, resolves and caches the repo+base merge strategy,
+/// runs the direct retry cycle (diagnose → schedule → rerun → wait) and the merge-queue flow
+/// (auto-merge/enqueue/poll), and records a phase + narration event for every meaningful action.
+/// Network calls run with no SQLite lock held; each persistence step takes the lock only briefly.
+/// Returns one of the FIFO loop's terminal/active outcomes; `Prepared` is consumed internally.
+async fn orchestrate_operation<B: MergeBackend>(
+    db: &Db,
+    backend: &B,
+    work: dependabot::MergeWork,
+    timed_out: bool,
+) -> Result<github::MergeRemoteResult, github::MergeRemoteError> {
+    use github::MergeRemoteOutcome as Outcome;
+    let mut rates: Vec<github::RateLimit> = Vec::new();
+    let op_id = work.operation.id;
+    let repo = work.operation.repo_full_name.clone();
+
+    // 0. Cancellation already requested before this pass: for a queue operation, reconcile the
+    //    live GitHub state before cleanup. This covers a process crash between a successful queue
+    //    mutation and persisting its local metadata, and lets a merge completed during the race win.
+    if work.operation.state == "cancel_requested" {
+        if work.operation.strategy == "merge_queue" {
+            let queue = net!(rates, backend.queue_status(&repo, work.operation.number));
+            if let Some(status) = queue.status {
+                if status.merged || status.state.eq_ignore_ascii_case("MERGED") {
+                    return Ok(github::MergeRemoteResult {
+                        outcome: Outcome::Merged {
+                            head_sha: Some(status.head_oid),
+                        },
+                        rates,
+                    });
+                }
+                let node_id = status.node_id.as_str();
+                if work.operation.auto_merge_enabled || status.auto_merge_enabled {
+                    net!(rates, backend.disable_auto_merge(node_id));
+                }
+                if work.operation.merge_queue_position.is_some()
+                    || status.merge_queue_entry.is_some()
+                {
+                    net!(rates, backend.dequeue(node_id));
+                }
+            } else if let Some(node_id) = work.operation.pull_node_id.as_deref() {
+                // The PR vanished from the status query. Use durable enrollment metadata for a
+                // final idempotent cleanup attempt before releasing the local FIFO head.
+                if work.operation.auto_merge_enabled {
+                    net!(rates, backend.disable_auto_merge(node_id));
+                }
+                if work.operation.merge_queue_position.is_some() {
+                    net!(rates, backend.dequeue(node_id));
+                }
+            }
+        } else if let Some(node_id) = work.operation.pull_node_id.as_deref() {
+            if work.operation.auto_merge_enabled {
+                net!(rates, backend.disable_auto_merge(node_id));
+            }
+            if work.operation.merge_queue_position.is_some() {
+                net!(rates, backend.dequeue(node_id));
+            }
+        }
+        with_conn(db, &rates, |conn| {
+            dependabot::append_operation_event(
+                conn,
+                op_id,
+                "queued",
+                "lifecycle",
+                "cancelled",
+                "Disabled auto-merge / left the merge queue before cancelling.",
+                None,
+                None,
+                None,
+            )
+        })?;
+        return Ok(github::MergeRemoteResult {
+            outcome: Outcome::Cancelled,
+            rates,
+        });
+    }
+
+    // 1. Backoff gate: a scheduled retry/poll that isn't due yet makes no network call and leaves
+    //    the durable state exactly as it was (strict per-repo FIFO keeps this row the head).
+    let due = with_conn(db, &rates, |conn| {
+        dependabot::is_next_action_due(conn, op_id)
+    })?;
+    if !due {
+        return Ok(github::MergeRemoteResult {
+            outcome: Outcome::Waiting,
+            rates,
+        });
+    }
+
+    // 2. Dispatch any check retries that were scheduled for this operation and are now due (their
+    //    backoff elapsed because the gate above passed). Each unique failed run is rerun once.
+    let pending_retries = with_conn(db, &rates, |conn| {
+        dependabot::list_check_retries(conn, op_id)
+    })?
+    .into_iter()
+    .filter(|retry| retry.outcome.is_none())
+    .collect::<Vec<_>>();
+    if !pending_retries.is_empty() {
+        with_conn(db, &rates, |conn| {
+            dependabot::set_phase(conn, op_id, "retrying_checks", None, None, None)?;
+            dependabot::append_operation_event(
+                conn,
+                op_id,
+                "retrying_checks",
+                "retry",
+                "start",
+                "Re-running the GitHub Actions jobs that previously failed.",
+                None,
+                None,
+                None,
+            )
+        })?;
+        for retry in &pending_retries {
+            let result = net!(rates, backend.rerun(&repo, retry.workflow_run_id));
+            let outcome = match result.outcome {
+                github::MutationOutcome::Applied => "requested",
+                github::MutationOutcome::Cancelled => "cancelled",
+            };
+            let head = retry.head_sha.clone();
+            let run_id = retry.workflow_run_id;
+            let retry_id = retry.id;
+            with_conn(db, &rates, |conn| {
+                dependabot::mark_check_retry(conn, retry_id, outcome)?;
+                dependabot::append_operation_event(
+                    conn,
+                    op_id,
+                    "retrying_checks",
+                    "retry",
+                    outcome,
+                    &format!("Requested a re-run of workflow run {run_id}."),
+                    None,
+                    Some(&head),
+                    Some(&run_id.to_string()),
+                )
+            })?;
+        }
+        // Reruns dispatched: clear the backoff and wait for the fresh checks to report.
+        let head = work.operation.observed_head_sha.clone().unwrap_or_default();
+        with_conn(db, &rates, |conn| {
+            dependabot::set_phase(conn, op_id, "waiting_checks", None, None, None)?;
+            dependabot::schedule_next_action(conn, op_id, None)
+        })?;
+        return Ok(github::MergeRemoteResult {
+            outcome: Outcome::Pending {
+                head_sha: head,
+                approved: true,
+                branch_update_requested: false,
+                reason: Some("Re-running failed checks; waiting for the results.".to_string()),
+            },
+            rates,
+        });
+    }
+
+    // 3. Resolve the strategy hint from the cache (only possible once the base ref is known).
+    let (_base_ref_opt, cached_strategy) = with_conn(db, &rates, |conn| {
+        let operation = dependabot::get_operation(conn, op_id)?;
+        let base = operation.and_then(|operation| operation.base_ref);
+        let cached = match &base {
+            Some(base) => dependabot::get_merge_policy(conn, &repo, base, Some(POLICY_MAX_AGE_S))?
+                .map(|policy| policy.strategy),
+            None => None,
+        };
+        Ok((base, cached))
+    })?;
+    let strategy_hint = strategy_from_str(cached_strategy.as_deref());
+
+    // 3a. Merge-queue polling fast path: once a queue operation has been validated and enrolled
+    //     (its node id and validated head are known), subsequent passes only poll/drive the queue
+    //     over GraphQL — they must never re-issue the direct validation/merge REST processor.
+    if strategy_hint == github::MergeQueueStrategy::MergeQueue {
+        if let (Some(node_id), Some(head)) = (
+            work.operation.pull_node_id.clone(),
+            work.operation.observed_head_sha.clone(),
+        ) {
+            let outcome =
+                queue_flow(db, backend, &work, &head, &node_id, timed_out, &mut rates).await?;
+            return Ok(github::MergeRemoteResult { outcome, rates });
+        }
+    }
+
+    with_conn(db, &rates, |conn| {
+        dependabot::set_phase(conn, op_id, "validating", None, None, None)?;
+        dependabot::append_operation_event(
+            conn,
+            op_id,
+            "validating",
+            "lifecycle",
+            "start",
+            "Validating the pull request at its current head.",
+            None,
+            None,
+            None,
+        )
+    })?;
+
+    // 4. Shared validation/approval (and, for a confirmed direct branch, the direct merge/update).
+    let result = net!(
+        rates,
+        backend.process_operation(&work, timed_out, strategy_hint)
+    );
+
+    match result.outcome {
+        Outcome::Merged { head_sha } => {
+            with_conn(db, &rates, |conn| {
+                dependabot::set_phase(conn, op_id, "merging", None, None, None)?;
+                dependabot::append_operation_event(
+                    conn,
+                    op_id,
+                    "merging",
+                    "lifecycle",
+                    "merged",
+                    "Merged the pull request on GitHub.",
+                    None,
+                    head_sha.as_deref(),
+                    None,
+                )
+            })?;
+            Ok(github::MergeRemoteResult {
+                outcome: Outcome::Merged { head_sha },
+                rates,
+            })
+        }
+        Outcome::Cancelled => Ok(github::MergeRemoteResult {
+            outcome: Outcome::Cancelled,
+            rates,
+        }),
+        Outcome::Waiting => Ok(github::MergeRemoteResult {
+            outcome: Outcome::Waiting,
+            rates,
+        }),
+        Outcome::PermanentFailure { code, reason } => {
+            let detail = reason.clone();
+            with_conn(db, &rates, |conn| {
+                dependabot::append_operation_event(
+                    conn,
+                    op_id,
+                    "validating",
+                    "lifecycle",
+                    "failed",
+                    &format!("Stopped: {detail}"),
+                    Some(&detail),
+                    None,
+                    None,
+                )
+            })?;
+            Ok(github::MergeRemoteResult {
+                outcome: Outcome::PermanentFailure { code, reason },
+                rates,
+            })
+        }
+        Outcome::Blocked { head_sha, base_ref } => {
+            let outcome = direct_await_checks(
+                db,
+                backend,
+                &work,
+                &head_sha,
+                Some(&base_ref),
+                timed_out,
+                &mut rates,
+            )
+            .await?;
+            Ok(github::MergeRemoteResult { outcome, rates })
+        }
+        Outcome::Pending {
+            head_sha,
+            approved,
+            branch_update_requested,
+            reason,
+        } => {
+            if branch_update_requested {
+                with_conn(db, &rates, |conn| {
+                    dependabot::set_phase(conn, op_id, "updating_branch", None, None, None)?;
+                    dependabot::schedule_next_action(conn, op_id, None)?;
+                    dependabot::append_operation_event(
+                        conn,
+                        op_id,
+                        "updating_branch",
+                        "branch",
+                        "requested",
+                        "Updating the branch with its base before re-checking.",
+                        None,
+                        Some(&head_sha),
+                        None,
+                    )
+                })?;
+                return Ok(github::MergeRemoteResult {
+                    outcome: Outcome::Pending {
+                        head_sha,
+                        approved,
+                        branch_update_requested,
+                        reason,
+                    },
+                    rates,
+                });
+            }
+            // Direct strategy, head validated + approved, but not mergeable yet → diagnose checks.
+            let outcome =
+                direct_await_checks(db, backend, &work, &head_sha, None, timed_out, &mut rates)
+                    .await?;
+            Ok(github::MergeRemoteResult { outcome, rates })
+        }
+        Outcome::Prepared {
+            head_sha,
+            base_ref,
+            node_id,
+            mergeable_state,
+        } => {
+            let approved = mergeable_state.as_deref() != Some("behind");
+            {
+                let base_ref = base_ref.clone();
+                let node_id = node_id.clone();
+                let head = head_sha.clone();
+                with_conn(db, &rates, |conn| {
+                    dependabot::set_phase(
+                        conn,
+                        op_id,
+                        "validating",
+                        None,
+                        Some(&node_id),
+                        Some(&base_ref),
+                    )?;
+                    dependabot::append_operation_event(
+                        conn,
+                        op_id,
+                        "validating",
+                        "check",
+                        "ok",
+                        "Validated the head commit as Dependabot-owned.",
+                        None,
+                        Some(&head),
+                        None,
+                    )
+                })?;
+            }
+
+            // Resolve strategy: cache hit, otherwise detect and cache (requirement 2).
+            let strategy = match strategy_from_str(cached_strategy.as_deref()) {
+                github::MergeQueueStrategy::Unknown => {
+                    let policy = net!(rates, backend.detect_policy(&repo, &base_ref));
+                    let resolved = policy.strategy;
+                    let strategy_label = strategy_str(resolved);
+                    let base_ref = base_ref.clone();
+                    with_conn(db, &rates, |conn| {
+                        if resolved != github::MergeQueueStrategy::Unknown {
+                            dependabot::cache_merge_policy(conn, &repo, &base_ref, strategy_label)?;
+                        }
+                        dependabot::set_phase(
+                            conn,
+                            op_id,
+                            "validating",
+                            Some(strategy_label),
+                            None,
+                            None,
+                        )
+                    })?;
+                    resolved
+                }
+                cached => cached,
+            };
+
+            match strategy {
+                github::MergeQueueStrategy::Direct => {
+                    with_conn(db, &rates, |conn| {
+                        dependabot::set_phase(
+                            conn,
+                            op_id,
+                            "validating",
+                            Some("direct"),
+                            None,
+                            None,
+                        )?;
+                        dependabot::schedule_next_action(conn, op_id, None)?;
+                        dependabot::append_operation_event(
+                            conn,
+                            op_id,
+                            "validating",
+                            "strategy",
+                            "direct",
+                            "Merge strategy: direct merge.",
+                            None,
+                            None,
+                            None,
+                        )
+                    })?;
+                    Ok(github::MergeRemoteResult {
+                        outcome: Outcome::Pending {
+                            head_sha,
+                            approved,
+                            branch_update_requested: false,
+                            reason: Some("Resolved a direct-merge strategy.".to_string()),
+                        },
+                        rates,
+                    })
+                }
+                github::MergeQueueStrategy::MergeQueue => {
+                    with_conn(db, &rates, |conn| {
+                        dependabot::set_phase(
+                            conn,
+                            op_id,
+                            "validating",
+                            Some("merge_queue"),
+                            None,
+                            None,
+                        )?;
+                        dependabot::append_operation_event(
+                            conn,
+                            op_id,
+                            "validating",
+                            "strategy",
+                            "merge_queue",
+                            "Merge strategy: GitHub merge queue.",
+                            None,
+                            None,
+                            None,
+                        )
+                    })?;
+                    let outcome = queue_flow(
+                        db, backend, &work, &head_sha, &node_id, timed_out, &mut rates,
+                    )
+                    .await?;
+                    Ok(github::MergeRemoteResult { outcome, rates })
+                }
+                github::MergeQueueStrategy::Unknown => {
+                    with_conn(db, &rates, |conn| {
+                        dependabot::set_phase(
+                            conn,
+                            op_id,
+                            "validating",
+                            Some("unknown"),
+                            None,
+                            None,
+                        )?;
+                        dependabot::schedule_next_action_in(conn, op_id, UNKNOWN_POLICY_RETRY_S)?;
+                        dependabot::append_operation_event(
+                            conn,
+                            op_id,
+                            "validating",
+                            "strategy",
+                            "pending",
+                            "Could not determine the repository's merge strategy yet; will retry.",
+                            None,
+                            None,
+                            None,
+                        )
+                    })?;
+                    Ok(github::MergeRemoteResult {
+                        outcome: Outcome::Pending {
+                            head_sha,
+                            approved,
+                            branch_update_requested: false,
+                            reason: Some(
+                                "Waiting to determine the repository's merge strategy.".to_string(),
+                            ),
+                        },
+                        rates,
+                    })
+                }
+            }
+        }
+    }
+}
+
+/// Direct-strategy check handling for a validated+approved head that GitHub still reports as not
+/// mergeable: any non-retryable external CI failure ends the operation as "needs attention" with
+/// the failing check names; failed GitHub Actions runs are each scheduled (once per
+/// run+attempt) for a five-minute rerun; otherwise Helix keeps waiting for pending checks.
+/// The 90-minute deadline is evaluated before scheduling any new retry (requirement 4).
+async fn direct_await_checks<B: MergeBackend>(
+    db: &Db,
+    backend: &B,
+    work: &dependabot::MergeWork,
+    head_sha: &str,
+    blocked_base_ref: Option<&str>,
+    timed_out: bool,
+    rates: &mut Vec<github::RateLimit>,
+) -> Result<github::MergeRemoteOutcome, github::MergeRemoteError> {
+    use github::MergeRemoteOutcome as Outcome;
+    let op_id = work.operation.id;
+    let repo = work.operation.repo_full_name.clone();
+
+    let diagnosis = net!(*rates, backend.diagnose(&repo, head_sha));
+
+    if !diagnosis.external_failures.is_empty() {
+        let names = diagnosis
+            .external_failures
+            .iter()
+            .map(|failure| failure.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let detail = format!("External check(s) need attention: {names}");
+        let head = head_sha.to_string();
+        with_conn(db, rates, |conn| {
+            dependabot::append_operation_event(
+                conn,
+                op_id,
+                "waiting_checks",
+                "check",
+                "failed",
+                &detail,
+                Some(&detail),
+                Some(&head),
+                None,
+            )
+        })?;
+        return Ok(Outcome::PermanentFailure {
+            code: "external_check_failed",
+            reason: detail,
+        });
+    }
+
+    if !diagnosis.actions_failures.is_empty() {
+        let deadline_exhausted = with_conn(db, rates, |conn| {
+            dependabot::merge_deadline_exhausted(conn, op_id, RETRY_DEADLINE_CUSHION_MIN)
+        })?;
+        if deadline_exhausted {
+            let head = head_sha.to_string();
+            with_conn(db, rates, |conn| {
+                dependabot::append_operation_event(
+                    conn,
+                    op_id,
+                    "waiting_checks",
+                    "check",
+                    "failed",
+                    "A check failed with too little time left to retry before the deadline.",
+                    None,
+                    Some(&head),
+                    None,
+                )
+            })?;
+            return Ok(Outcome::Pending {
+                head_sha: head_sha.to_string(),
+                approved: true,
+                branch_update_requested: false,
+                reason: Some("A check failed near the deadline; letting it time out.".to_string()),
+            });
+        }
+        let failures = diagnosis.actions_failures.clone();
+        let head = head_sha.to_string();
+        with_conn(db, rates, |conn| {
+            for failure in &failures {
+                dependabot::schedule_check_retry(
+                    conn,
+                    op_id,
+                    &head,
+                    failure.run_id,
+                    failure.run_attempt,
+                )?;
+            }
+            dependabot::set_phase(conn, op_id, "retry_scheduled", None, None, None)?;
+            dependabot::schedule_next_action_in(conn, op_id, CHECK_RETRY_DELAY_S)?;
+            dependabot::append_operation_event(
+                conn,
+                op_id,
+                "retry_scheduled",
+                "retry",
+                "scheduled",
+                &format!(
+                    "Scheduled a re-run of {} failed GitHub Actions run(s) in five minutes.",
+                    failures.len()
+                ),
+                None,
+                Some(&head),
+                None,
+            )
+        })?;
+        // A merge already dispatched to GitHub still wins, but nothing was dispatched here; the
+        // deadline is re-checked by the FIFO loop before the next pass regardless of `timed_out`.
+        let _ = timed_out;
+        return Ok(Outcome::Pending {
+            head_sha: head_sha.to_string(),
+            approved: true,
+            branch_update_requested: false,
+            reason: Some("A required check failed; a re-run is scheduled.".to_string()),
+        });
+    }
+
+    if diagnosis.pending.is_empty() {
+        if let Some(base_ref) = blocked_base_ref {
+            if base_ref.is_empty() {
+                return Ok(Outcome::PermanentFailure {
+                    code: "blocked_by_repository_rule",
+                    reason:
+                        "GitHub blocks this pull request, but did not identify its base branch."
+                            .to_string(),
+                });
+            }
+            let comparison = net!(*rates, backend.compare_branch(&repo, base_ref, head_sha));
+            if comparison.behind {
+                let update = net!(
+                    *rates,
+                    backend.update_branch(&repo, work.operation.number, head_sha)
+                );
+                if update.outcome == github::MutationOutcome::Cancelled {
+                    return Ok(Outcome::Cancelled);
+                }
+                let head = head_sha.to_string();
+                with_conn(db, rates, |conn| {
+                    dependabot::set_phase(conn, op_id, "updating_branch", None, None, None)?;
+                    dependabot::schedule_next_action(conn, op_id, None)?;
+                    dependabot::append_operation_event(
+                        conn,
+                        op_id,
+                        "updating_branch",
+                        "branch",
+                        "requested",
+                        "The branch is behind its base; requested an exact-head branch update.",
+                        None,
+                        Some(&head),
+                        None,
+                    )
+                })?;
+                return Ok(Outcome::Pending {
+                    head_sha: head,
+                    approved: false,
+                    branch_update_requested: true,
+                    reason: Some(
+                        "Updating the stale branch and waiting for fresh checks.".to_string(),
+                    ),
+                });
+            }
+            let head = head_sha.to_string();
+            let summary = "GitHub still blocks the merge; no pending or failing checks were found.";
+            with_conn(db, rates, |conn| {
+                dependabot::set_phase(conn, op_id, "waiting_requirements", None, None, None)?;
+                dependabot::schedule_next_action(conn, op_id, None)?;
+                dependabot::append_operation_event(
+                    conn,
+                    op_id,
+                    "waiting_requirements",
+                    "requirement",
+                    "pending",
+                    summary,
+                    Some(
+                        "The branch is current. GitHub may still be registering a required check or enforcing another repository rule.",
+                    ),
+                    Some(&head),
+                    None,
+                )
+            })?;
+            return Ok(Outcome::Pending {
+                head_sha: head,
+                approved: true,
+                branch_update_requested: false,
+                reason: Some(summary.to_string()),
+            });
+        }
+    }
+
+    // Only pending checks remain: keep waiting, re-polling on the next FIFO pass.
+    let head = head_sha.to_string();
+    let pending_count = diagnosis.pending.len();
+    let summary = if pending_count > 0 {
+        format!("Waiting for {pending_count} status check(s) to finish.")
+    } else {
+        "Waiting for required status checks to finish.".to_string()
+    };
+    with_conn(db, rates, |conn| {
+        dependabot::set_phase(conn, op_id, "waiting_checks", None, None, None)?;
+        dependabot::schedule_next_action(conn, op_id, None)?;
+        dependabot::append_operation_event(
+            conn,
+            op_id,
+            "waiting_checks",
+            "check",
+            "pending",
+            &summary,
+            None,
+            Some(&head),
+            None,
+        )
+    })?;
+    Ok(Outcome::Pending {
+        head_sha: head_sha.to_string(),
+        approved: true,
+        branch_update_requested: false,
+        reason: Some("Waiting for required status checks to finish.".to_string()),
+    })
+}
+
+/// Merge-queue-strategy flow for a validated+approved head. Never issues a direct merge or REST
+/// update-branch (requirement 5): it queries the PR's queue status over GraphQL and, depending on
+/// what it finds, records a merged terminal, persists the live queue position while it waits,
+/// idempotently enables native auto-merge while requirements are still pending, or enqueues an
+/// eligible PR (at the back, `jump:false`). If the PR was previously enrolled but has since left
+/// the queue without merging, its checks are diagnosed the same way as the direct flow (failed
+/// Actions runs are rescheduled — re-enrollment then happens naturally on the next pass).
+async fn queue_flow<B: MergeBackend>(
+    db: &Db,
+    backend: &B,
+    work: &dependabot::MergeWork,
+    head_sha: &str,
+    node_id: &str,
+    timed_out: bool,
+    rates: &mut Vec<github::RateLimit>,
+) -> Result<github::MergeRemoteOutcome, github::MergeRemoteError> {
+    use github::MergeRemoteOutcome as Outcome;
+    let op_id = work.operation.id;
+    let repo = work.operation.repo_full_name.clone();
+    let number = work.operation.number;
+
+    let status = net!(*rates, backend.queue_status(&repo, number)).status;
+    let Some(status) = status else {
+        with_conn(db, rates, |conn| {
+            dependabot::set_phase(conn, op_id, "waiting_merge_queue", None, None, None)?;
+            dependabot::schedule_next_action(conn, op_id, None)?;
+            dependabot::append_operation_event(
+                conn,
+                op_id,
+                "waiting_merge_queue",
+                "queue",
+                "pending",
+                "Waiting for GitHub to report the pull request's queue status.",
+                None,
+                None,
+                None,
+            )
+        })?;
+        return Ok(Outcome::Pending {
+            head_sha: head_sha.to_string(),
+            approved: true,
+            branch_update_requested: false,
+            reason: Some("Waiting for GitHub to report the queue status.".to_string()),
+        });
+    };
+
+    // A merged PR wins every race — record it as the terminal outcome immediately.
+    if status.merged {
+        let head = status.head_oid.clone();
+        with_conn(db, rates, |conn| {
+            dependabot::set_phase(conn, op_id, "merging", None, None, None)?;
+            dependabot::append_operation_event(
+                conn,
+                op_id,
+                "merging",
+                "queue",
+                "merged",
+                "The merge queue merged the pull request.",
+                None,
+                Some(&head),
+                None,
+            )
+        })?;
+        return Ok(Outcome::Merged {
+            head_sha: Some(status.head_oid),
+        });
+    }
+
+    // A merged PR always wins the race above, but once the operation's 90-minute deadline has
+    // passed and GitHub has not merged it, Helix stops actively driving the queue and terminates
+    // the operation as `timed_out` so the per-repo FIFO head is released (a perpetually pending or
+    // never-satisfied requirement must not block the repository forever). Before terminalizing it
+    // first undoes the remote enrollment it created — disabling native auto-merge and dequeuing
+    // under the mutation guard — so a timed-out PR is never left silently enrolled on GitHub. Each
+    // mutation runs with no SQLite lock held; if cleanup fails, the `net!` error bubbles up as an
+    // active (non-terminal) failure, keeping this row the FIFO head for a later retry rather than
+    // releasing the next same-repo item. A merge GitHub completes still wins — it was checked
+    // above.
+    if timed_out {
+        if work.operation.auto_merge_enabled || status.auto_merge_enabled {
+            net!(*rates, backend.disable_auto_merge(node_id));
+        }
+        if work.operation.merge_queue_position.is_some() || status.merge_queue_entry.is_some() {
+            net!(*rates, backend.dequeue(node_id));
+        }
+        with_conn(db, rates, |conn| {
+            dependabot::set_queue_metadata(conn, op_id, None, false)?;
+            dependabot::append_operation_event(
+                conn,
+                op_id,
+                "waiting_merge_queue",
+                "queue",
+                "timed_out",
+                "The 90-minute deadline passed; disabled auto-merge and left the merge queue before timing out.",
+                None,
+                Some(head_sha),
+                None,
+            )
+        })?;
+        return Ok(Outcome::Cancelled);
+    }
+    if let Some(entry) = &status.merge_queue_entry {
+        let position = entry.position;
+        let head = head_sha.to_string();
+        with_conn(db, rates, |conn| {
+            dependabot::set_queue_metadata(conn, op_id, position, true)?;
+            dependabot::set_phase(conn, op_id, "waiting_merge_queue", None, None, None)?;
+            dependabot::schedule_next_action(conn, op_id, None)?;
+            dependabot::append_operation_event(
+                conn,
+                op_id,
+                "waiting_merge_queue",
+                "queue",
+                "waiting",
+                &match position {
+                    Some(position) => format!("Waiting in the merge queue at position {position}."),
+                    None => "Waiting in the merge queue.".to_string(),
+                },
+                None,
+                Some(&head),
+                None,
+            )
+        })?;
+        return Ok(Outcome::Pending {
+            head_sha: head_sha.to_string(),
+            approved: true,
+            branch_update_requested: false,
+            reason: Some("Waiting in GitHub's merge queue.".to_string()),
+        });
+    }
+
+    // Not merged and not in the queue. If it was previously enrolled and its checks have failed,
+    // it was ejected — diagnose (failed Actions runs reschedule and re-enroll on the next pass).
+    let was_enrolled =
+        work.operation.auto_merge_enabled || work.operation.merge_queue_position.is_some();
+    let checks_failed = matches!(
+        status.check_status.as_deref(),
+        Some("FAILURE") | Some("ERROR")
+    );
+    if was_enrolled && checks_failed {
+        with_conn(db, rates, |conn| {
+            dependabot::append_operation_event(
+                conn,
+                op_id,
+                "waiting_merge_queue",
+                "queue",
+                "ejected",
+                "The pull request left the merge queue without merging; diagnosing its checks.",
+                None,
+                Some(head_sha),
+                None,
+            )
+        })?;
+        return direct_await_checks(db, backend, work, head_sha, None, false, rates).await;
+    }
+
+    // Requirements still pending (not yet approved / checks not green) → idempotently enable
+    // native auto-merge so GitHub enqueues it automatically once everything is satisfied.
+    let requirements_pending = status.review_decision.as_deref() != Some("APPROVED")
+        || matches!(
+            status.check_status.as_deref(),
+            None | Some("PENDING") | Some("EXPECTED")
+        );
+    if requirements_pending {
+        let mutation = net!(*rates, backend.enable_auto_merge(node_id, head_sha));
+        if mutation.outcome == github::MutationOutcome::Cancelled {
+            return Ok(Outcome::Cancelled);
+        }
+        let head = head_sha.to_string();
+        with_conn(db, rates, |conn| {
+            dependabot::set_queue_metadata(conn, op_id, None, true)?;
+            dependabot::set_phase(conn, op_id, "enabling_auto_merge", None, None, None)?;
+            dependabot::schedule_next_action(conn, op_id, None)?;
+            dependabot::append_operation_event(
+                conn,
+                op_id,
+                "enabling_auto_merge",
+                "queue",
+                "enabled",
+                "Enabled native auto-merge; waiting for requirements to pass.",
+                None,
+                Some(&head),
+                None,
+            )
+        })?;
+        return Ok(Outcome::Pending {
+            head_sha: head_sha.to_string(),
+            approved: true,
+            branch_update_requested: false,
+            reason: Some("Enabled auto-merge; waiting for requirements.".to_string()),
+        });
+    }
+
+    // Eligible and not queued → enqueue at the back with the validated head OID.
+    let mutation = net!(*rates, backend.enqueue(node_id, head_sha));
+    if mutation.outcome == github::MutationOutcome::Cancelled {
+        return Ok(Outcome::Cancelled);
+    }
+    let head = head_sha.to_string();
+    with_conn(db, rates, |conn| {
+        dependabot::set_queue_metadata(conn, op_id, None, true)?;
+        dependabot::set_phase(conn, op_id, "waiting_merge_queue", None, None, None)?;
+        dependabot::schedule_next_action(conn, op_id, None)?;
+        dependabot::append_operation_event(
+            conn,
+            op_id,
+            "waiting_merge_queue",
+            "queue",
+            "enqueued",
+            "Enqueued the pull request in the merge queue.",
+            None,
+            Some(&head),
+            None,
+        )
+    })?;
+    Ok(Outcome::Pending {
+        head_sha: head_sha.to_string(),
+        approved: true,
+        branch_update_requested: false,
+        reason: Some("Enqueued in GitHub's merge queue.".to_string()),
+    })
+}
+
 #[cfg(all(test, debug_assertions))]
 mod tests {
     //! Orchestration tests for the Dependabot coordinator — same shape as
@@ -790,5 +2582,1715 @@ mod tests {
         let pending = dependabot::prs_needing_merge_state(&conn).unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, 2);
+    }
+
+    #[test]
+    fn merge_processor_advances_one_fifo_head_per_repo_with_injected_network() {
+        let db = db_with_token();
+        store(
+            &db,
+            &[
+                pr(1, "octo/repo-a", 10, "first"),
+                pr(2, "octo/repo-a", 11, "second"),
+                pr(3, "octo/repo-b", 12, "independent"),
+            ],
+        );
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::enqueue_merge_operation(&conn, 1).unwrap();
+            dependabot::enqueue_merge_operation(&conn, 2).unwrap();
+            dependabot::enqueue_merge_operation(&conn, 3).unwrap();
+        }
+        let sink = RecordingSink::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+
+        let result = tauri::async_runtime::block_on(process_dependabot_merges_core(
+            &db,
+            sink.clone(),
+            move |work, _| {
+                count.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    Ok(github::MergeRemoteResult {
+                        outcome: github::MergeRemoteOutcome::Pending {
+                            head_sha: format!("sha-{}", work.operation.pr_id),
+                            approved: true,
+                            branch_update_requested: false,
+                            reason: None,
+                        },
+                        rates: vec![rate("core", 4990, 5000)],
+                    })
+                }
+            },
+        ))
+        .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(result.processed, 2);
+        assert!(result.changed);
+        let conn = db.0.lock().unwrap();
+        let operations = dependabot::list_merge_operations(&conn).unwrap();
+        assert_eq!(
+            operations
+                .iter()
+                .find(|operation| operation.pr_id == 1)
+                .unwrap()
+                .state,
+            "delegated"
+        );
+        assert_eq!(
+            operations
+                .iter()
+                .find(|operation| operation.pr_id == 2)
+                .unwrap()
+                .state,
+            "queued"
+        );
+        assert_eq!(sink.count("dependabot:operations-changed"), 1);
+    }
+
+    #[test]
+    fn completed_native_merge_wins_a_concurrent_local_cancel() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "first")]);
+        let operation_id = {
+            let conn = db.0.lock().unwrap();
+            dependabot::enqueue_merge_operation(&conn, 1).unwrap().id
+        };
+
+        tauri::async_runtime::block_on(process_dependabot_merges_core(
+            &db,
+            RecordingSink::default(),
+            |_, _| async {
+                let conn = db.0.lock().unwrap();
+                dependabot::request_cancel(&conn, operation_id).unwrap();
+                Ok(github::MergeRemoteResult {
+                    outcome: github::MergeRemoteOutcome::Merged {
+                        head_sha: Some("validated-head".to_string()),
+                    },
+                    rates: vec![rate("core", 4990, 5000)],
+                })
+            },
+        ))
+        .unwrap();
+
+        let conn = db.0.lock().unwrap();
+        assert_eq!(
+            dependabot::get_operation(&conn, operation_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            "merged"
+        );
+    }
+
+    #[test]
+    fn concurrent_cancel_discards_a_stale_pending_result() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "first")]);
+        let operation_id = {
+            let conn = db.0.lock().unwrap();
+            dependabot::enqueue_merge_operation(&conn, 1).unwrap().id
+        };
+
+        tauri::async_runtime::block_on(process_dependabot_merges_core(
+            &db,
+            RecordingSink::default(),
+            |_, _| async {
+                let conn = db.0.lock().unwrap();
+                dependabot::request_cancel(&conn, operation_id).unwrap();
+                Ok(github::MergeRemoteResult {
+                    outcome: github::MergeRemoteOutcome::Pending {
+                        head_sha: "validated-head".to_string(),
+                        approved: true,
+                        branch_update_requested: false,
+                        reason: None,
+                    },
+                    rates: vec![rate("core", 4990, 5000)],
+                })
+            },
+        ))
+        .unwrap();
+
+        let conn = db.0.lock().unwrap();
+        assert_eq!(
+            dependabot::get_operation(&conn, operation_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            "cancelled"
+        );
+    }
+
+    #[test]
+    fn merge_reserve_gates_both_core_and_graphql() {
+        let db = db_with_token();
+        // Both buckets healthy → the processor keeps resolving work.
+        seed_rate(&db, rate("core", 4990, 5000));
+        seed_rate(&db, rate("graphql", 4980, 5000));
+        {
+            let conn = db.0.lock().unwrap();
+            assert!(!merge_rates_below_reserve(&conn));
+        }
+        // GraphQL alone dropping under the ~25% reserve trips the gate (not just core).
+        seed_rate(&db, rate("graphql", 100, 5000));
+        {
+            let conn = db.0.lock().unwrap();
+            assert!(
+                merge_rates_below_reserve(&conn),
+                "graphql under the reserve gates the processor"
+            );
+        }
+        // Restore graphql; now core under the reserve trips it.
+        seed_rate(&db, rate("graphql", 4980, 5000));
+        seed_rate(&db, rate("core", 100, 5000));
+        let conn = db.0.lock().unwrap();
+        assert!(
+            merge_rates_below_reserve(&conn),
+            "core under the reserve gates the processor"
+        );
+    }
+
+    #[test]
+    fn merge_reserve_ignores_expired_and_unrelated_buckets() {
+        let db = db_with_token();
+        // Expired core/graphql buckets (reset in the past) are ignored even at 0 remaining, and a
+        // non-expired but unrelated bucket (search) never gates the merge processor.
+        let mut expired_core = rate("core", 0, 5000);
+        expired_core.reset = Some(1);
+        let mut expired_graphql = rate("graphql", 0, 5000);
+        expired_graphql.reset = Some(1);
+        seed_rate(&db, expired_core);
+        seed_rate(&db, expired_graphql);
+        seed_rate(&db, rate("search", 0, 5000));
+        {
+            let conn = db.0.lock().unwrap();
+            assert!(!merge_rates_below_reserve(&conn));
+        }
+        // A fresh (non-expired) graphql bucket under the reserve does gate it.
+        seed_rate(&db, rate("graphql", 100, 5000));
+        let conn = db.0.lock().unwrap();
+        assert!(merge_rates_below_reserve(&conn));
+    }
+
+    #[test]
+    fn merge_processor_persists_auth_failure_and_keeps_fifo_slot() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "first")]);
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::enqueue_merge_operation(&conn, 1).unwrap();
+        }
+        let sink = RecordingSink::default();
+        let result = tauri::async_runtime::block_on(process_dependabot_merges_core(
+            &db,
+            sink,
+            |_work, _| async move {
+                Err(github::MergeRemoteError {
+                    class: github::MergeErrorClass::Auth,
+                    message: "Invalid or expired token — GitHub returned 401.".to_string(),
+                    rates: vec![rate("core", 4990, 5000)],
+                })
+            },
+        ))
+        .unwrap();
+
+        assert_eq!(result.processed, 1);
+        assert_eq!(
+            result.status.last_error.as_deref(),
+            Some("Invalid or expired token — GitHub returned 401.")
+        );
+        let conn = db.0.lock().unwrap();
+        let operation = dependabot::list_merge_operations(&conn).unwrap().remove(0);
+        assert_eq!(operation.state, "validating");
+        assert_eq!(
+            operation.last_error.as_deref(),
+            Some("Invalid or expired token — GitHub returned 401.")
+        );
+    }
+
+    /* -------------------------- operation_detail_core -------------------------- */
+
+    #[test]
+    fn operation_detail_core_returns_none_for_an_unknown_id() {
+        let db = mem_db();
+        let conn = db.0.lock().unwrap();
+        assert!(operation_detail_core(&conn, 12345).unwrap().is_none());
+    }
+
+    #[test]
+    fn operation_detail_core_finds_an_existing_operation_with_its_event_in_order() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "first")]);
+        let conn = db.0.lock().unwrap();
+        let operation = dependabot::enqueue_merge_operation(&conn, 1).unwrap();
+        dependabot::append_operation_event(
+            &conn,
+            operation.id,
+            "validating",
+            "check",
+            "ok",
+            "Validated head commit.",
+            None,
+            Some("abc123"),
+            None,
+        )
+        .unwrap();
+
+        let detail = operation_detail_core(&conn, operation.id).unwrap().unwrap();
+        assert_eq!(detail.operation.id, operation.id);
+        // Events come back oldest-first (the initial "queued" event, then the appended one).
+        assert_eq!(detail.events.len(), 2);
+        assert_eq!(detail.events[0].status, "queued");
+        assert_eq!(detail.events[1].status, "ok");
+        assert_eq!(detail.events[1].summary, "Validated head commit.");
+    }
+
+    #[test]
+    fn phase_explanations_are_exhaustive_and_non_empty_for_every_planned_phase() {
+        let phases = [
+            "queued",
+            "validating",
+            "approving",
+            "updating_branch",
+            "waiting_requirements",
+            "waiting_checks",
+            "retry_scheduled",
+            "retrying_checks",
+            "enabling_auto_merge",
+            "waiting_merge_queue",
+            "merging",
+        ];
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "first")]);
+        let conn = db.0.lock().unwrap();
+        let operation = dependabot::enqueue_merge_operation(&conn, 1).unwrap();
+
+        for phase in phases {
+            dependabot::set_phase(&conn, operation.id, phase, None, None, None).unwrap();
+            let refreshed = dependabot::get_operation(&conn, operation.id)
+                .unwrap()
+                .unwrap();
+            let (current_explanation, next_action) = phase_explanation(&refreshed);
+            assert!(
+                !current_explanation.is_empty() && !next_action.is_empty(),
+                "phase {phase} should have a non-empty explanation and next action"
+            );
+            // Every planned phase gets bespoke copy, not the generic "phase: <name>" fallback.
+            assert!(
+                !current_explanation.contains("phase:"),
+                "phase {phase} unexpectedly hit the generic fallback: {current_explanation}"
+            );
+        }
+    }
+
+    #[test]
+    fn phase_explanation_falls_back_gracefully_for_an_unrecognized_phase() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "first")]);
+        let conn = db.0.lock().unwrap();
+        let operation = dependabot::enqueue_merge_operation(&conn, 1).unwrap();
+        dependabot::set_phase(&conn, operation.id, "some_future_phase", None, None, None).unwrap();
+        let refreshed = dependabot::get_operation(&conn, operation.id)
+            .unwrap()
+            .unwrap();
+
+        let (current_explanation, next_action) = phase_explanation(&refreshed);
+        assert!(current_explanation.contains("some_future_phase"));
+        assert!(!next_action.is_empty());
+    }
+
+    #[test]
+    fn phase_explanation_prioritizes_terminal_state_over_a_stale_phase() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "first")]);
+        let conn = db.0.lock().unwrap();
+        let operation = dependabot::enqueue_merge_operation(&conn, 1).unwrap();
+        dependabot::set_phase(&conn, operation.id, "waiting_checks", None, None, None).unwrap();
+
+        dependabot::terminalize(
+            &conn,
+            operation.id,
+            "failed",
+            Some("checks_failed"),
+            Some("Required check did not pass."),
+            Some("Required check did not pass."),
+        )
+        .unwrap();
+        let refreshed = dependabot::get_operation(&conn, operation.id)
+            .unwrap()
+            .unwrap();
+        let (current_explanation, next_action) = phase_explanation(&refreshed);
+        assert!(current_explanation.contains("Required check did not pass."));
+        assert!(!next_action.is_empty());
+        // The stale "waiting_checks" phase must not leak into the terminal explanation.
+        assert!(!current_explanation.contains("status checks"));
+    }
+
+    #[test]
+    fn phase_explanation_covers_every_terminal_state_and_cancel_requested() {
+        let db = db_with_token();
+        store(
+            &db,
+            &[
+                pr(1, "octo/repo-a", 10, "merged-pr"),
+                pr(2, "octo/repo-a", 11, "cancelled-pr"),
+                pr(3, "octo/repo-a", 12, "timed-out-pr"),
+                pr(4, "octo/repo-a", 13, "cancel-requested-pr"),
+            ],
+        );
+        let conn = db.0.lock().unwrap();
+
+        let merged = dependabot::enqueue_merge_operation(&conn, 1).unwrap();
+        dependabot::terminalize(&conn, merged.id, "merged", None, None, None).unwrap();
+        let (explanation, _) = phase_explanation(
+            &dependabot::get_operation(&conn, merged.id)
+                .unwrap()
+                .unwrap(),
+        );
+        assert!(explanation.contains("merged"));
+
+        let cancelled = dependabot::enqueue_merge_operation(&conn, 2).unwrap();
+        dependabot::terminalize(&conn, cancelled.id, "cancelled", None, None, None).unwrap();
+        let (explanation, _) = phase_explanation(
+            &dependabot::get_operation(&conn, cancelled.id)
+                .unwrap()
+                .unwrap(),
+        );
+        assert!(explanation.contains("cancelled"));
+
+        let timed_out = dependabot::enqueue_merge_operation(&conn, 3).unwrap();
+        dependabot::terminalize(&conn, timed_out.id, "timed_out", None, None, None).unwrap();
+        let (explanation, _) = phase_explanation(
+            &dependabot::get_operation(&conn, timed_out.id)
+                .unwrap()
+                .unwrap(),
+        );
+        assert!(explanation.contains("stopped waiting"));
+
+        let cancel_requested = dependabot::enqueue_merge_operation(&conn, 4).unwrap();
+        conn.execute(
+            "UPDATE dependabot_merge_operations SET state = 'cancel_requested' WHERE id = ?1",
+            [cancel_requested.id],
+        )
+        .unwrap();
+        let (explanation, next_action) = phase_explanation(
+            &dependabot::get_operation(&conn, cancel_requested.id)
+                .unwrap()
+                .unwrap(),
+        );
+        assert!(explanation.contains("Cancellation requested"));
+        assert!(next_action.contains("cancelled"));
+    }
+
+    /* --------------------------- durable orchestrator ------------------------ */
+
+    use github::{
+        ActionsRunFailure, BranchComparisonResult, ExactHeadCheckDiagnosis, ExternalCheckFailure,
+        MergeQueueEntryStatus, MergeQueuePolicy, MergeQueueStrategy, MergeRemoteError,
+        MergeRemoteOutcome, MergeRemoteResult, MutationOutcome, MutationResult, PrQueueStatus,
+        PrQueueStatusResult,
+    };
+    use std::collections::VecDeque;
+
+    fn rates_core() -> Vec<RateLimit> {
+        vec![rate("core", 4990, 5000)]
+    }
+
+    fn rates_graphql() -> Vec<RateLimit> {
+        vec![rate("core", 4990, 5000), rate("graphql", 4980, 5000)]
+    }
+
+    type NetResult<T> = Result<T, MergeRemoteError>;
+
+    #[derive(Default)]
+    struct Script {
+        process: VecDeque<NetResult<MergeRemoteResult>>,
+        policy: VecDeque<NetResult<MergeQueuePolicy>>,
+        diagnose: VecDeque<NetResult<ExactHeadCheckDiagnosis>>,
+        compare: VecDeque<NetResult<BranchComparisonResult>>,
+        update_branch: VecDeque<NetResult<MutationResult>>,
+        rerun: VecDeque<NetResult<MutationResult>>,
+        queue: VecDeque<NetResult<PrQueueStatusResult>>,
+        enable: VecDeque<NetResult<MutationResult>>,
+        disable: VecDeque<NetResult<MutationResult>>,
+        enqueue: VecDeque<NetResult<MutationResult>>,
+        dequeue: VecDeque<NetResult<MutationResult>>,
+    }
+
+    #[derive(Default, Clone)]
+    struct Calls {
+        process: usize,
+        policy: usize,
+        diagnose: usize,
+        compare: usize,
+        update_branch: usize,
+        rerun: usize,
+        rerun_ids: Vec<i64>,
+        queue: usize,
+        enable: usize,
+        disable: usize,
+        enqueue: usize,
+        dequeue: usize,
+    }
+
+    struct FakeBackend {
+        script: Mutex<Script>,
+        calls: Mutex<Calls>,
+    }
+
+    impl FakeBackend {
+        fn new(script: Script) -> Self {
+            Self {
+                script: Mutex::new(script),
+                calls: Mutex::new(Calls::default()),
+            }
+        }
+
+        fn calls(&self) -> Calls {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn pop<T>(deque: &mut VecDeque<NetResult<T>>, what: &str) -> NetResult<T> {
+            deque
+                .pop_front()
+                .unwrap_or_else(|| panic!("FakeBackend: unexpected extra call to {what}"))
+        }
+    }
+
+    impl MergeBackend for FakeBackend {
+        async fn process_operation(
+            &self,
+            _work: &dependabot::MergeWork,
+            _timed_out: bool,
+            _strategy: MergeQueueStrategy,
+        ) -> NetResult<MergeRemoteResult> {
+            self.calls.lock().unwrap().process += 1;
+            Self::pop(
+                &mut self.script.lock().unwrap().process,
+                "process_operation",
+            )
+        }
+
+        async fn detect_policy(&self, _repo: &str, _base: &str) -> NetResult<MergeQueuePolicy> {
+            self.calls.lock().unwrap().policy += 1;
+            Self::pop(&mut self.script.lock().unwrap().policy, "detect_policy")
+        }
+
+        async fn diagnose(&self, _repo: &str, _head: &str) -> NetResult<ExactHeadCheckDiagnosis> {
+            self.calls.lock().unwrap().diagnose += 1;
+            Self::pop(&mut self.script.lock().unwrap().diagnose, "diagnose")
+        }
+
+        async fn compare_branch(
+            &self,
+            _repo: &str,
+            _base: &str,
+            _head: &str,
+        ) -> NetResult<BranchComparisonResult> {
+            self.calls.lock().unwrap().compare += 1;
+            Self::pop(&mut self.script.lock().unwrap().compare, "compare_branch")
+        }
+
+        async fn update_branch(
+            &self,
+            _repo: &str,
+            _number: i64,
+            _head: &str,
+        ) -> NetResult<MutationResult> {
+            self.calls.lock().unwrap().update_branch += 1;
+            Self::pop(
+                &mut self.script.lock().unwrap().update_branch,
+                "update_branch",
+            )
+        }
+
+        async fn rerun(&self, _repo: &str, run_id: i64) -> NetResult<MutationResult> {
+            {
+                let mut calls = self.calls.lock().unwrap();
+                calls.rerun += 1;
+                calls.rerun_ids.push(run_id);
+            }
+            Self::pop(&mut self.script.lock().unwrap().rerun, "rerun")
+        }
+
+        async fn queue_status(&self, _repo: &str, _number: i64) -> NetResult<PrQueueStatusResult> {
+            self.calls.lock().unwrap().queue += 1;
+            Self::pop(&mut self.script.lock().unwrap().queue, "queue_status")
+        }
+
+        async fn enable_auto_merge(
+            &self,
+            _node_id: &str,
+            _head: &str,
+        ) -> NetResult<MutationResult> {
+            self.calls.lock().unwrap().enable += 1;
+            Self::pop(&mut self.script.lock().unwrap().enable, "enable_auto_merge")
+        }
+
+        async fn disable_auto_merge(&self, _node_id: &str) -> NetResult<MutationResult> {
+            self.calls.lock().unwrap().disable += 1;
+            Self::pop(
+                &mut self.script.lock().unwrap().disable,
+                "disable_auto_merge",
+            )
+        }
+
+        async fn enqueue(&self, _node_id: &str, _head: &str) -> NetResult<MutationResult> {
+            self.calls.lock().unwrap().enqueue += 1;
+            Self::pop(&mut self.script.lock().unwrap().enqueue, "enqueue")
+        }
+
+        async fn dequeue(&self, _node_id: &str) -> NetResult<MutationResult> {
+            self.calls.lock().unwrap().dequeue += 1;
+            Self::pop(&mut self.script.lock().unwrap().dequeue, "dequeue")
+        }
+    }
+
+    fn prepared(head: &str, base: &str, node: &str, mergeable: Option<&str>) -> MergeRemoteResult {
+        MergeRemoteResult {
+            outcome: MergeRemoteOutcome::Prepared {
+                head_sha: head.to_string(),
+                base_ref: base.to_string(),
+                node_id: node.to_string(),
+                mergeable_state: mergeable.map(str::to_string),
+            },
+            rates: rates_core(),
+        }
+    }
+
+    fn pending(head: &str, branch_update: bool) -> MergeRemoteResult {
+        MergeRemoteResult {
+            outcome: MergeRemoteOutcome::Pending {
+                head_sha: head.to_string(),
+                approved: true,
+                branch_update_requested: branch_update,
+                reason: None,
+            },
+            rates: rates_core(),
+        }
+    }
+
+    fn blocked(head: &str, base: &str) -> MergeRemoteResult {
+        MergeRemoteResult {
+            outcome: MergeRemoteOutcome::Blocked {
+                head_sha: head.to_string(),
+                base_ref: base.to_string(),
+            },
+            rates: rates_core(),
+        }
+    }
+
+    fn policy(strategy: MergeQueueStrategy) -> MergeQueuePolicy {
+        MergeQueuePolicy {
+            strategy,
+            rates: rates_core(),
+        }
+    }
+
+    fn applied() -> MutationResult {
+        MutationResult {
+            outcome: MutationOutcome::Applied,
+            rates: rates_graphql(),
+        }
+    }
+
+    fn transient_err(message: &str) -> MergeRemoteError {
+        MergeRemoteError {
+            class: github::MergeErrorClass::Transient,
+            message: message.to_string(),
+            rates: rates_graphql(),
+        }
+    }
+
+    fn permanent_err(message: &str) -> MergeRemoteError {
+        MergeRemoteError {
+            class: github::MergeErrorClass::Permanent,
+            message: message.to_string(),
+            rates: rates_graphql(),
+        }
+    }
+
+    fn queue_result(status: Option<PrQueueStatus>) -> PrQueueStatusResult {
+        PrQueueStatusResult {
+            status,
+            rates: rates_graphql(),
+        }
+    }
+
+    fn pr_status(head: &str) -> PrQueueStatus {
+        PrQueueStatus {
+            node_id: "PR_node".to_string(),
+            head_oid: head.to_string(),
+            state: "OPEN".to_string(),
+            merged: false,
+            mergeable: Some("MERGEABLE".to_string()),
+            review_decision: Some("APPROVED".to_string()),
+            check_status: Some("SUCCESS".to_string()),
+            auto_merge_enabled: false,
+            merge_queue_entry: None,
+        }
+    }
+
+    fn enqueue_op(db: &Db, pr_id: i64) -> i64 {
+        let conn = db.0.lock().unwrap();
+        dependabot::enqueue_merge_operation(&conn, pr_id)
+            .unwrap()
+            .id
+    }
+
+    fn op(db: &Db, op_id: i64) -> dependabot::DependabotMergeOperation {
+        let conn = db.0.lock().unwrap();
+        dependabot::get_operation(&conn, op_id).unwrap().unwrap()
+    }
+
+    fn events(db: &Db, op_id: i64) -> Vec<dependabot::MergeOperationEvent> {
+        let conn = db.0.lock().unwrap();
+        dependabot::list_operation_events(&conn, op_id).unwrap()
+    }
+
+    fn statuses(db: &Db, op_id: i64) -> Vec<String> {
+        events(db, op_id).into_iter().map(|e| e.status).collect()
+    }
+
+    fn phases(db: &Db, op_id: i64) -> Vec<String> {
+        events(db, op_id).into_iter().map(|e| e.phase).collect()
+    }
+
+    fn force_due(db: &Db, op_id: i64) {
+        let conn = db.0.lock().unwrap();
+        dependabot::schedule_next_action(&conn, op_id, None).unwrap();
+    }
+
+    fn set_delegated_at(db: &Db, op_id: i64, sql_offset: &str) {
+        let conn = db.0.lock().unwrap();
+        conn.execute(
+            "UPDATE dependabot_merge_operations
+             SET delegated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now', ?2), state = 'delegated'
+             WHERE id = ?1",
+            rusqlite::params![op_id, sql_offset],
+        )
+        .unwrap();
+    }
+
+    /// Run one processor tick through the real FIFO loop with the orchestrator wired to a fake
+    /// backend — exercises begin/timeout/rate-reserve/FIFO bookkeeping and the orchestrator's
+    /// durable persistence together, no HTTP.
+    fn tick(db: &Db, fake: &FakeBackend) -> DependabotMergeProcessResult {
+        let sink = RecordingSink::default();
+        tauri::async_runtime::block_on(process_dependabot_merges_core(
+            db,
+            sink,
+            |work, timed_out| orchestrate_operation(db, fake, work, timed_out),
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn direct_strategy_detects_caches_then_squash_merges_across_two_ticks() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        let fake = FakeBackend::new(Script {
+            process: VecDeque::from([
+                Ok(prepared("sha1", "main", "PR_1", Some("clean"))),
+                Ok(MergeRemoteResult {
+                    outcome: MergeRemoteOutcome::Merged {
+                        head_sha: Some("sha1".to_string()),
+                    },
+                    rates: rates_core(),
+                }),
+            ]),
+            policy: VecDeque::from([Ok(policy(MergeQueueStrategy::Direct))]),
+            ..Default::default()
+        });
+
+        // Tick 1: validate + approve, detect + cache the strategy, then delegate.
+        tick(&db, &fake);
+        let after_one = op(&db, id);
+        assert_eq!(after_one.state, "delegated");
+        assert_eq!(after_one.strategy, "direct");
+        assert_eq!(after_one.base_ref.as_deref(), Some("main"));
+        assert_eq!(after_one.pull_node_id.as_deref(), Some("PR_1"));
+        {
+            let conn = db.0.lock().unwrap();
+            let cached = dependabot::get_merge_policy(&conn, "octo/repo-a", "main", None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(cached.strategy, "direct");
+        }
+
+        // Tick 2: strategy is cached, so it goes straight to the squash merge.
+        tick(&db, &fake);
+        assert_eq!(op(&db, id).state, "merged");
+        assert_eq!(fake.calls().policy, 1, "policy detected once, then cached");
+        assert!(statuses(&db, id).contains(&"direct".to_string()));
+        assert!(phases(&db, id).contains(&"merging".to_string()));
+    }
+
+    #[test]
+    fn direct_pending_checks_wait_without_scheduling_a_retry() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        let fake = FakeBackend::new(Script {
+            process: VecDeque::from([Ok(blocked("sha1", "main"))]),
+            diagnose: VecDeque::from([Ok(ExactHeadCheckDiagnosis {
+                pending: vec![github::PendingCheck {
+                    name: "build".to_string(),
+                    source: github::CheckSource::Actions,
+                }],
+                rates: rates_core(),
+                ..Default::default()
+            })]),
+            ..Default::default()
+        });
+        // Seed a cached direct policy + base ref so process is entered on the direct branch.
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "direct").unwrap();
+            dependabot::set_phase(&conn, id, "queued", Some("direct"), None, Some("main")).unwrap();
+        }
+        tick(&db, &fake);
+        let after = op(&db, id);
+        assert_eq!(after.phase, "waiting_checks");
+        assert_eq!(after.check_retry_count, 0);
+        assert_eq!(fake.calls().rerun, 0);
+        assert_eq!(fake.calls().compare, 0);
+        assert!(statuses(&db, id).contains(&"pending".to_string()));
+    }
+
+    #[test]
+    fn direct_blocked_with_complete_checks_updates_a_stale_branch() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        let fake = FakeBackend::new(Script {
+            process: VecDeque::from([Ok(blocked("sha1", "main"))]),
+            diagnose: VecDeque::from([Ok(ExactHeadCheckDiagnosis {
+                rates: rates_core(),
+                ..Default::default()
+            })]),
+            compare: VecDeque::from([Ok(BranchComparisonResult {
+                behind: true,
+                rates: rates_core(),
+            })]),
+            update_branch: VecDeque::from([Ok(MutationResult {
+                outcome: MutationOutcome::Applied,
+                rates: rates_core(),
+            })]),
+            ..Default::default()
+        });
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "direct").unwrap();
+            dependabot::set_phase(&conn, id, "queued", Some("direct"), None, Some("main")).unwrap();
+        }
+
+        tick(&db, &fake);
+
+        let after = op(&db, id);
+        assert_eq!(after.state, "delegated");
+        assert_eq!(after.phase, "updating_branch");
+        let update_from: Option<String> =
+            db.0.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT update_branch_from_sha FROM dependabot_merge_operations WHERE id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+        assert_eq!(update_from.as_deref(), Some("sha1"));
+        assert_eq!(fake.calls().compare, 1);
+        assert_eq!(fake.calls().update_branch, 1);
+        assert!(statuses(&db, id).contains(&"requested".to_string()));
+    }
+
+    #[test]
+    fn direct_blocked_with_no_visible_checks_and_current_branch_keeps_waiting() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        let fake = FakeBackend::new(Script {
+            process: VecDeque::from([Ok(blocked("sha1", "main"))]),
+            diagnose: VecDeque::from([Ok(ExactHeadCheckDiagnosis {
+                rates: rates_core(),
+                ..Default::default()
+            })]),
+            compare: VecDeque::from([Ok(BranchComparisonResult {
+                behind: false,
+                rates: rates_core(),
+            })]),
+            ..Default::default()
+        });
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "direct").unwrap();
+            dependabot::set_phase(&conn, id, "queued", Some("direct"), None, Some("main")).unwrap();
+        }
+
+        tick(&db, &fake);
+
+        let after = op(&db, id);
+        assert_eq!(after.state, "delegated");
+        assert_eq!(after.phase, "waiting_requirements");
+        let failure_code: Option<String> =
+            db.0.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT failure_code FROM dependabot_merge_operations WHERE id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+        assert_eq!(failure_code, None);
+        assert_eq!(fake.calls().compare, 1);
+        assert_eq!(fake.calls().update_branch, 0);
+        assert!(statuses(&db, id).contains(&"pending".to_string()));
+    }
+
+    #[test]
+    fn direct_external_ci_failure_terminates_as_needs_attention_with_names() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        let fake = FakeBackend::new(Script {
+            process: VecDeque::from([Ok(pending("sha1", false))]),
+            diagnose: VecDeque::from([Ok(ExactHeadCheckDiagnosis {
+                external_failures: vec![ExternalCheckFailure {
+                    name: "Third-party CI".to_string(),
+                    conclusion: Some("failure".to_string()),
+                    details_url: None,
+                }],
+                rates: rates_core(),
+                ..Default::default()
+            })]),
+            ..Default::default()
+        });
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "direct").unwrap();
+            dependabot::set_phase(&conn, id, "queued", Some("direct"), None, Some("main")).unwrap();
+        }
+        tick(&db, &fake);
+        let after = op(&db, id);
+        assert_eq!(after.state, "failed");
+        assert!(after
+            .failure_reason
+            .as_deref()
+            .unwrap()
+            .contains("Third-party CI"));
+    }
+
+    #[test]
+    fn direct_actions_failure_schedules_then_reruns_each_unique_run() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        let fake = FakeBackend::new(Script {
+            process: VecDeque::from([Ok(pending("sha1", false)), Ok(pending("sha1", false))]),
+            diagnose: VecDeque::from([Ok(ExactHeadCheckDiagnosis {
+                actions_failures: vec![
+                    ActionsRunFailure {
+                        run_id: 100,
+                        run_attempt: 1,
+                        name: Some("ci".to_string()),
+                        conclusion: Some("failure".to_string()),
+                    },
+                    ActionsRunFailure {
+                        run_id: 200,
+                        run_attempt: 1,
+                        name: Some("lint".to_string()),
+                        conclusion: Some("failure".to_string()),
+                    },
+                ],
+                rates: rates_core(),
+                ..Default::default()
+            })]),
+            rerun: VecDeque::from([Ok(applied()), Ok(applied())]),
+            ..Default::default()
+        });
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "direct").unwrap();
+            dependabot::set_phase(&conn, id, "queued", Some("direct"), None, Some("main")).unwrap();
+        }
+
+        // Tick 1: both failed runs scheduled; a five-minute backoff is set.
+        tick(&db, &fake);
+        let after_one = op(&db, id);
+        assert_eq!(after_one.phase, "retry_scheduled");
+        assert_eq!(after_one.check_retry_count, 2);
+        assert!(after_one.next_action_at.is_some());
+
+        // Not due yet → the next tick is a no-op backoff (no diagnose/rerun network).
+        tick(&db, &fake);
+        assert_eq!(fake.calls().rerun, 0);
+        assert_eq!(op(&db, id).phase, "retry_scheduled");
+
+        // Force the backoff due → both scheduled runs are rerun exactly once.
+        force_due(&db, id);
+        tick(&db, &fake);
+        let calls = fake.calls();
+        assert_eq!(calls.rerun, 2);
+        let mut reran = calls.rerun_ids.clone();
+        reran.sort_unstable();
+        assert_eq!(reran, vec![100, 200]);
+        assert_eq!(op(&db, id).phase, "waiting_checks");
+        let conn = db.0.lock().unwrap();
+        let retries = dependabot::list_check_retries(&conn, id).unwrap();
+        assert!(retries
+            .iter()
+            .all(|r| r.outcome.as_deref() == Some("requested")));
+    }
+
+    #[test]
+    fn direct_actions_failure_repeats_new_attempts_until_the_deadline() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        // Every diagnose pass reports a fresh failed attempt of the same run.
+        let mut process = VecDeque::new();
+        let mut diagnose = VecDeque::new();
+        let mut rerun = VecDeque::new();
+        for attempt in 1..=3 {
+            process.push_back(Ok(pending("sha1", false)));
+            diagnose.push_back(Ok(ExactHeadCheckDiagnosis {
+                actions_failures: vec![ActionsRunFailure {
+                    run_id: 100,
+                    run_attempt: attempt,
+                    name: Some("ci".to_string()),
+                    conclusion: Some("failure".to_string()),
+                }],
+                rates: rates_core(),
+                ..Default::default()
+            }));
+            rerun.push_back(Ok(applied()));
+        }
+        let fake = FakeBackend::new(Script {
+            process,
+            diagnose,
+            rerun,
+            ..Default::default()
+        });
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "direct").unwrap();
+            dependabot::set_phase(&conn, id, "queued", Some("direct"), None, Some("main")).unwrap();
+        }
+        // Three failure→schedule→rerun cycles, no numeric cap.
+        for _ in 0..3 {
+            tick(&db, &fake); // diagnose → schedule
+            force_due(&db, id);
+            tick(&db, &fake); // rerun
+            force_due(&db, id);
+        }
+        assert_eq!(fake.calls().rerun, 3);
+        assert_eq!(op(&db, id).check_retry_count, 3);
+    }
+
+    #[test]
+    fn direct_actions_failure_near_deadline_is_not_scheduled() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        let fake = FakeBackend::new(Script {
+            process: VecDeque::from([Ok(pending("sha1", false))]),
+            diagnose: VecDeque::from([Ok(ExactHeadCheckDiagnosis {
+                actions_failures: vec![ActionsRunFailure {
+                    run_id: 100,
+                    run_attempt: 1,
+                    name: Some("ci".to_string()),
+                    conclusion: Some("failure".to_string()),
+                }],
+                rates: rates_core(),
+                ..Default::default()
+            })]),
+            ..Default::default()
+        });
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "direct").unwrap();
+            dependabot::set_phase(&conn, id, "queued", Some("direct"), None, Some("main")).unwrap();
+        }
+        // Delegated 89 minutes ago: too little of the 90-minute deadline remains to retry.
+        set_delegated_at(&db, id, "-89 minutes");
+        tick(&db, &fake);
+        assert_eq!(op(&db, id).check_retry_count, 0);
+        let conn = db.0.lock().unwrap();
+        assert!(dependabot::list_check_retries(&conn, id)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn direct_branch_update_moves_to_updating_branch_phase() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        let fake = FakeBackend::new(Script {
+            process: VecDeque::from([Ok(pending("sha1", true))]),
+            ..Default::default()
+        });
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "direct").unwrap();
+            dependabot::set_phase(&conn, id, "queued", Some("direct"), None, Some("main")).unwrap();
+        }
+        tick(&db, &fake);
+        assert_eq!(op(&db, id).phase, "updating_branch");
+        assert_eq!(fake.calls().diagnose, 0);
+    }
+
+    #[test]
+    fn unknown_policy_stays_retryable_and_never_silently_direct() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        let fake = FakeBackend::new(Script {
+            process: VecDeque::from([Ok(prepared("sha1", "main", "PR_1", Some("blocked")))]),
+            policy: VecDeque::from([Ok(policy(MergeQueueStrategy::Unknown))]),
+            ..Default::default()
+        });
+        tick(&db, &fake);
+        let after = op(&db, id);
+        assert_eq!(after.strategy, "unknown");
+        assert!(
+            after.state == "delegated" && after.next_action_at.is_some(),
+            "unknown policy stays active and paced for retry, not terminal"
+        );
+        // Nothing was cached, so it is re-derived (never assumed direct) next time.
+        let conn = db.0.lock().unwrap();
+        assert!(
+            dependabot::get_merge_policy(&conn, "octo/repo-a", "main", None)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn queue_strategy_enables_auto_merge_when_requirements_are_pending() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        let mut status = pr_status("sha1");
+        status.review_decision = Some("REVIEW_REQUIRED".to_string());
+        status.check_status = Some("PENDING".to_string());
+        let fake = FakeBackend::new(Script {
+            process: VecDeque::from([Ok(prepared("sha1", "main", "PR_1", Some("blocked")))]),
+            policy: VecDeque::from([Ok(policy(MergeQueueStrategy::MergeQueue))]),
+            queue: VecDeque::from([Ok(queue_result(Some(status)))]),
+            enable: VecDeque::from([Ok(applied())]),
+            ..Default::default()
+        });
+        tick(&db, &fake);
+        let after = op(&db, id);
+        assert_eq!(after.strategy, "merge_queue");
+        assert_eq!(after.phase, "enabling_auto_merge");
+        assert!(after.auto_merge_enabled);
+        let calls = fake.calls();
+        assert_eq!(calls.enable, 1);
+        assert_eq!(calls.enqueue, 0);
+    }
+
+    #[test]
+    fn queue_strategy_enqueues_an_eligible_pr_then_tracks_its_position() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        let mut queued = pr_status("sha1");
+        queued.merge_queue_entry = Some(MergeQueueEntryStatus {
+            id: "entry".to_string(),
+            position: Some(3),
+            state: Some("QUEUED".to_string()),
+        });
+        let fake = FakeBackend::new(Script {
+            process: VecDeque::from([Ok(prepared("sha1", "main", "PR_1", Some("clean")))]),
+            policy: VecDeque::from([Ok(policy(MergeQueueStrategy::MergeQueue))]),
+            queue: VecDeque::from([
+                Ok(queue_result(Some(pr_status("sha1")))),
+                Ok(queue_result(Some(queued))),
+            ]),
+            enqueue: VecDeque::from([Ok(applied())]),
+            ..Default::default()
+        });
+        // Tick 1: eligible + not queued → enqueue.
+        tick(&db, &fake);
+        assert_eq!(op(&db, id).phase, "waiting_merge_queue");
+        assert_eq!(fake.calls().enqueue, 1);
+
+        // Tick 2: now in the queue → its live position is persisted.
+        force_due(&db, id);
+        tick(&db, &fake);
+        assert_eq!(op(&db, id).merge_queue_position, Some(3));
+    }
+
+    #[test]
+    fn queue_strategy_records_a_merged_terminal() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        let mut merged = pr_status("sha1");
+        merged.merged = true;
+        merged.state = "MERGED".to_string();
+        let fake = FakeBackend::new(Script {
+            process: VecDeque::from([Ok(prepared("sha1", "main", "PR_1", Some("clean")))]),
+            policy: VecDeque::from([Ok(policy(MergeQueueStrategy::MergeQueue))]),
+            queue: VecDeque::from([Ok(queue_result(Some(merged)))]),
+            ..Default::default()
+        });
+        tick(&db, &fake);
+        assert_eq!(op(&db, id).state, "merged");
+    }
+
+    #[test]
+    fn queue_ejection_diagnoses_and_schedules_a_retry() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        // Simulate an operation already enrolled (auto-merge on) whose checks then failed.
+        let mut ejected = pr_status("sha1");
+        ejected.check_status = Some("FAILURE".to_string());
+        ejected.review_decision = Some("APPROVED".to_string());
+        let fake = FakeBackend::new(Script {
+            process: VecDeque::from([Ok(prepared("sha1", "main", "PR_1", Some("blocked")))]),
+            queue: VecDeque::from([Ok(queue_result(Some(ejected)))]),
+            diagnose: VecDeque::from([Ok(ExactHeadCheckDiagnosis {
+                actions_failures: vec![ActionsRunFailure {
+                    run_id: 55,
+                    run_attempt: 1,
+                    name: Some("ci".to_string()),
+                    conclusion: Some("failure".to_string()),
+                }],
+                rates: rates_core(),
+                ..Default::default()
+            })]),
+            ..Default::default()
+        });
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "merge_queue").unwrap();
+            dependabot::set_phase(&conn, id, "queued", Some("merge_queue"), None, Some("main"))
+                .unwrap();
+            dependabot::set_queue_metadata(&conn, id, None, true).unwrap();
+        }
+        tick(&db, &fake);
+        let after = op(&db, id);
+        assert_eq!(after.phase, "retry_scheduled");
+        assert_eq!(after.check_retry_count, 1);
+        assert_eq!(fake.calls().diagnose, 1);
+    }
+
+    #[test]
+    fn queue_cancellation_disables_auto_merge_and_dequeues_before_terminal_cancel() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        {
+            let conn = db.0.lock().unwrap();
+            // Put the operation in a delegated, enrolled state, then request cancellation.
+            dependabot::mark_merge_progress(&conn, id, "sha1", true, false, None).unwrap();
+            dependabot::set_phase(
+                &conn,
+                id,
+                "waiting_merge_queue",
+                Some("merge_queue"),
+                Some("PR_1"),
+                Some("main"),
+            )
+            .unwrap();
+            dependabot::set_queue_metadata(&conn, id, Some(2), true).unwrap();
+            dependabot::request_cancel(&conn, id).unwrap();
+        }
+        let mut queued = pr_status("sha1");
+        queued.auto_merge_enabled = true;
+        queued.merge_queue_entry = Some(MergeQueueEntryStatus {
+            id: "entry".to_string(),
+            position: Some(2),
+            state: Some("QUEUED".to_string()),
+        });
+        let fake = FakeBackend::new(Script {
+            queue: VecDeque::from([Ok(queue_result(Some(queued)))]),
+            disable: VecDeque::from([Ok(applied())]),
+            dequeue: VecDeque::from([Ok(applied())]),
+            ..Default::default()
+        });
+        tick(&db, &fake);
+        let after = op(&db, id);
+        assert_eq!(after.state, "cancelled");
+        let calls = fake.calls();
+        assert_eq!(calls.disable, 1, "auto-merge disabled before cancelling");
+        assert_eq!(calls.dequeue, 1, "dequeued before cancelling");
+        assert_eq!(
+            calls.process, 0,
+            "no validation/merge attempted while cancelling"
+        );
+    }
+
+    #[test]
+    fn queue_cancellation_reconciles_remote_enrollment_missing_from_local_metadata() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "merge_queue").unwrap();
+            dependabot::mark_merge_progress(&conn, id, "sha1", true, false, None).unwrap();
+            dependabot::set_phase(
+                &conn,
+                id,
+                "waiting_merge_queue",
+                Some("merge_queue"),
+                Some("PR_1"),
+                Some("main"),
+            )
+            .unwrap();
+            dependabot::request_cancel(&conn, id).unwrap();
+        }
+        let mut queued = pr_status("sha1");
+        queued.auto_merge_enabled = true;
+        queued.merge_queue_entry = Some(MergeQueueEntryStatus {
+            id: "entry".to_string(),
+            position: Some(1),
+            state: Some("QUEUED".to_string()),
+        });
+        let fake = FakeBackend::new(Script {
+            queue: VecDeque::from([Ok(queue_result(Some(queued)))]),
+            disable: VecDeque::from([Ok(applied())]),
+            dequeue: VecDeque::from([Ok(applied())]),
+            ..Default::default()
+        });
+
+        tick(&db, &fake);
+
+        assert_eq!(op(&db, id).state, "cancelled");
+        let calls = fake.calls();
+        assert_eq!(calls.queue, 1);
+        assert_eq!(calls.disable, 1);
+        assert_eq!(calls.dequeue, 1);
+    }
+
+    #[test]
+    fn queue_cancellation_records_a_concurrent_remote_merge() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::mark_merge_progress(&conn, id, "sha1", true, false, None).unwrap();
+            dependabot::set_phase(
+                &conn,
+                id,
+                "waiting_merge_queue",
+                Some("merge_queue"),
+                Some("PR_1"),
+                Some("main"),
+            )
+            .unwrap();
+            dependabot::request_cancel(&conn, id).unwrap();
+        }
+        let mut merged = pr_status("sha1");
+        merged.merged = true;
+        merged.state = "MERGED".to_string();
+        let fake = FakeBackend::new(Script {
+            queue: VecDeque::from([Ok(queue_result(Some(merged)))]),
+            ..Default::default()
+        });
+
+        tick(&db, &fake);
+
+        assert_eq!(op(&db, id).state, "merged");
+        let calls = fake.calls();
+        assert_eq!(calls.disable, 0);
+        assert_eq!(calls.dequeue, 0);
+    }
+
+    #[test]
+    fn queue_operation_honors_the_90_minute_deadline_and_releases_the_fifo_head() {
+        let db = db_with_token();
+        store(
+            &db,
+            &[
+                pr(1, "octo/repo-a", 10, "Bump one"),
+                pr(2, "octo/repo-a", 11, "Bump two"),
+            ],
+        );
+        let head_id = enqueue_op(&db, 1);
+        let next_id = enqueue_op(&db, 2);
+        // Enroll the head in the merge queue (auto-merge on, node id + validated head known) so it
+        // takes the queue-polling fast path, then age it past the 90-minute deadline.
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "merge_queue").unwrap();
+            dependabot::mark_merge_progress(&conn, head_id, "sha1", true, false, None).unwrap();
+            dependabot::set_phase(
+                &conn,
+                head_id,
+                "waiting_merge_queue",
+                Some("unknown"),
+                Some("PR_1"),
+                Some("main"),
+            )
+            .unwrap();
+            dependabot::set_queue_metadata(&conn, head_id, Some(2), true).unwrap();
+        }
+        set_delegated_at(&db, head_id, "-91 minutes");
+        force_due(&db, head_id);
+        // Still sitting in the queue (never merged) when the deadline elapses.
+        let mut queued = pr_status("sha1");
+        queued.merge_queue_entry = Some(MergeQueueEntryStatus {
+            id: "entry".to_string(),
+            position: Some(2),
+            state: Some("QUEUED".to_string()),
+        });
+        let fake = FakeBackend::new(Script {
+            queue: VecDeque::from([Ok(queue_result(Some(queued)))]),
+            disable: VecDeque::from([Ok(applied())]),
+            dequeue: VecDeque::from([Ok(applied())]),
+            ..Default::default()
+        });
+        tick(&db, &fake);
+        // The timed-out head first undoes the enrollment it created (disable auto-merge + dequeue)
+        // under the mutation guard, then terminates as `timed_out`. It never re-enqueues/enables
+        // (a merge GitHub completes still wins above).
+        let after = op(&db, head_id);
+        assert_eq!(after.state, "timed_out");
+        let calls = fake.calls();
+        assert_eq!(calls.enqueue, 0);
+        assert_eq!(calls.enable, 0);
+        assert_eq!(calls.disable, 1, "auto-merge disabled before timing out");
+        assert_eq!(calls.dequeue, 1, "dequeued before timing out");
+        assert!(
+            statuses(&db, head_id).iter().any(|s| s == "timed_out"),
+            "the timeout is narrated in the durable event log"
+        );
+        // The per-repo FIFO head is released so the next queued PR can proceed.
+        let heads = {
+            let conn = db.0.lock().unwrap();
+            dependabot::merge_operation_heads(&conn).unwrap()
+        };
+        assert_eq!(heads.len(), 1);
+        assert_eq!(
+            heads[0].operation.id, next_id,
+            "the next PR in the repo becomes the FIFO head after the timeout"
+        );
+    }
+
+    #[test]
+    fn queue_merged_wins_even_after_the_deadline() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "merge_queue").unwrap();
+            dependabot::mark_merge_progress(&conn, id, "sha1", true, false, None).unwrap();
+            dependabot::set_phase(
+                &conn,
+                id,
+                "waiting_merge_queue",
+                Some("merge_queue"),
+                Some("PR_1"),
+                Some("main"),
+            )
+            .unwrap();
+            dependabot::set_queue_metadata(&conn, id, Some(1), true).unwrap();
+        }
+        set_delegated_at(&db, id, "-91 minutes");
+        force_due(&db, id);
+        // GitHub merged it right at the deadline: the merged result is checked before the timeout.
+        let mut merged = pr_status("sha1");
+        merged.merged = true;
+        merged.state = "MERGED".to_string();
+        let fake = FakeBackend::new(Script {
+            queue: VecDeque::from([Ok(queue_result(Some(merged)))]),
+            ..Default::default()
+        });
+        tick(&db, &fake);
+        assert_eq!(
+            op(&db, id).state,
+            "merged",
+            "a merge GitHub completed wins over the 90-minute deadline"
+        );
+    }
+
+    #[test]
+    fn queue_timeout_reconciles_remote_auto_merge_missing_from_local_metadata() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "merge_queue").unwrap();
+            dependabot::mark_merge_progress(&conn, id, "sha1", true, false, None).unwrap();
+            dependabot::set_phase(
+                &conn,
+                id,
+                "waiting_merge_queue",
+                Some("merge_queue"),
+                Some("PR_1"),
+                Some("main"),
+            )
+            .unwrap();
+        }
+        set_delegated_at(&db, id, "-91 minutes");
+        force_due(&db, id);
+        let mut status = pr_status("sha1");
+        status.auto_merge_enabled = true;
+        let fake = FakeBackend::new(Script {
+            process: VecDeque::from([Ok(prepared("sha1", "main", "PR_1", Some("clean")))]),
+            queue: VecDeque::from([Ok(queue_result(Some(status)))]),
+            disable: VecDeque::from([Ok(applied())]),
+            ..Default::default()
+        });
+
+        tick(&db, &fake);
+
+        assert_eq!(op(&db, id).state, "timed_out");
+        let calls = fake.calls();
+        assert_eq!(calls.queue, 1);
+        assert_eq!(calls.disable, 1);
+        assert_eq!(calls.dequeue, 0);
+    }
+
+    #[test]
+    fn queue_timeout_cleanup_failure_keeps_the_operation_active_and_the_fifo_head() {
+        let db = db_with_token();
+        store(
+            &db,
+            &[
+                pr(1, "octo/repo-a", 10, "Bump one"),
+                pr(2, "octo/repo-a", 11, "Bump two"),
+            ],
+        );
+        let head_id = enqueue_op(&db, 1);
+        let next_id = enqueue_op(&db, 2);
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "merge_queue").unwrap();
+            dependabot::mark_merge_progress(&conn, head_id, "sha1", true, false, None).unwrap();
+            dependabot::set_phase(
+                &conn,
+                head_id,
+                "waiting_merge_queue",
+                Some("merge_queue"),
+                Some("PR_1"),
+                Some("main"),
+            )
+            .unwrap();
+            dependabot::set_queue_metadata(&conn, head_id, Some(2), true).unwrap();
+        }
+        set_delegated_at(&db, head_id, "-91 minutes");
+        force_due(&db, head_id);
+        let mut queued = pr_status("sha1");
+        queued.merge_queue_entry = Some(MergeQueueEntryStatus {
+            id: "entry".to_string(),
+            position: Some(2),
+            state: Some("QUEUED".to_string()),
+        });
+        // Even with a stale per-operation strategy, the durable queue policy must prevent a
+        // nominally permanent cleanup failure from releasing the FIFO while GitHub may still have
+        // the PR enrolled.
+        let fake = FakeBackend::new(Script {
+            queue: VecDeque::from([Ok(queue_result(Some(queued)))]),
+            disable: VecDeque::from([Err(permanent_err("GitHub rejected disabling auto-merge."))]),
+            ..Default::default()
+        });
+        tick(&db, &fake);
+        // Cleanup failed → the operation is NOT terminalized: it stays active for a later retry,
+        // and its per-repo FIFO head is deliberately NOT released (no dequeue was reached either).
+        let after = op(&db, head_id);
+        assert_ne!(
+            after.state, "timed_out",
+            "cleanup failure must not terminalize"
+        );
+        assert_eq!(
+            after.state, "delegated",
+            "the timed-out op stays active to retry cleanup"
+        );
+        assert_eq!(
+            after.last_error.as_deref(),
+            Some("GitHub rejected disabling auto-merge.")
+        );
+        let calls = fake.calls();
+        assert_eq!(calls.disable, 1, "disable was attempted");
+        assert_eq!(
+            calls.dequeue, 0,
+            "dequeue not reached after the disable error"
+        );
+        let heads = {
+            let conn = db.0.lock().unwrap();
+            dependabot::merge_operation_heads(&conn).unwrap()
+        };
+        assert_eq!(
+            heads[0].operation.id, head_id,
+            "the timed-out op remains the FIFO head; the next same-repo PR stays blocked"
+        );
+        assert!(
+            heads.iter().all(|h| h.operation.id != next_id) || heads[0].operation.id == head_id,
+            "the next PR does not become the head while cleanup is still owed"
+        );
+    }
+
+    #[test]
+    fn cancel_cleanup_transient_failure_retains_cancel_requested_then_succeeds() {
+        let db = db_with_token();
+        store(
+            &db,
+            &[
+                pr(1, "octo/repo-a", 10, "Bump one"),
+                pr(2, "octo/repo-a", 11, "Bump two"),
+            ],
+        );
+        let id = enqueue_op(&db, 1);
+        let next_id = enqueue_op(&db, 2);
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::mark_merge_progress(&conn, id, "sha1", true, false, None).unwrap();
+            dependabot::set_phase(
+                &conn,
+                id,
+                "waiting_merge_queue",
+                Some("merge_queue"),
+                Some("PR_1"),
+                Some("main"),
+            )
+            .unwrap();
+            dependabot::set_queue_metadata(&conn, id, Some(2), true).unwrap();
+            dependabot::request_cancel(&conn, id).unwrap();
+        }
+        // First pass: disable auto-merge fails transiently.
+        let mut queued = pr_status("sha1");
+        queued.auto_merge_enabled = true;
+        queued.merge_queue_entry = Some(MergeQueueEntryStatus {
+            id: "entry".to_string(),
+            position: Some(2),
+            state: Some("QUEUED".to_string()),
+        });
+        let fake = FakeBackend::new(Script {
+            queue: VecDeque::from([
+                Ok(queue_result(Some(queued.clone()))),
+                Ok(queue_result(Some(queued))),
+            ]),
+            disable: VecDeque::from([
+                Err(transient_err("GitHub 502 while disabling auto-merge.")),
+                Ok(applied()),
+            ]),
+            dequeue: VecDeque::from([Ok(applied())]),
+            ..Default::default()
+        });
+        tick(&db, &fake);
+        // The cleanup error is surfaced but the operation stays in `cancel_requested` (never
+        // terminalized) so a later pass can retry — and it keeps blocking the next same-repo PR.
+        let after = op(&db, id);
+        assert_eq!(
+            after.state, "cancel_requested",
+            "cleanup failure keeps it active"
+        );
+        assert_eq!(
+            after.last_error.as_deref(),
+            Some("GitHub 502 while disabling auto-merge.")
+        );
+        let heads = {
+            let conn = db.0.lock().unwrap();
+            dependabot::merge_operation_heads(&conn).unwrap()
+        };
+        assert_eq!(
+            heads[0].operation.id, id,
+            "the cancelling op stays the FIFO head; the next same-repo PR is blocked"
+        );
+        assert!(
+            heads.iter().all(|h| h.operation.id != next_id) || heads[0].operation.id == id,
+            "the next PR does not run while a remote cleanup is still owed"
+        );
+        assert_eq!(fake.calls().disable, 1);
+        assert_eq!(fake.calls().dequeue, 0);
+
+        // Second pass: cleanup succeeds → only now does it terminalize as cancelled.
+        tick(&db, &fake);
+        assert_eq!(
+            op(&db, id).state,
+            "cancelled",
+            "terminalizes once cleanup succeeds"
+        );
+        let calls = fake.calls();
+        assert_eq!(calls.disable, 2, "disable retried on the second pass");
+        assert_eq!(calls.dequeue, 1, "dequeue ran once auto-merge was disabled");
+    }
+
+    #[test]
+    fn backoff_gate_makes_no_network_call_until_due() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::mark_merge_progress(&conn, id, "sha1", true, false, None).unwrap();
+            dependabot::schedule_next_action_in(&conn, id, 600).unwrap();
+        }
+        let fake = FakeBackend::new(Script::default());
+        tick(&db, &fake);
+        // Nothing scripted was needed — the gate short-circuited before any backend call.
+        let calls = fake.calls();
+        assert_eq!(calls.process, 0);
+        assert_eq!(op(&db, id).state, "delegated");
+    }
+
+    #[test]
+    fn orchestrator_persists_core_and_graphql_rate_snapshots() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let _id = enqueue_op(&db, 1);
+        let fake = FakeBackend::new(Script {
+            process: VecDeque::from([Ok(prepared("sha1", "main", "PR_1", Some("clean")))]),
+            policy: VecDeque::from([Ok(policy(MergeQueueStrategy::MergeQueue))]),
+            queue: VecDeque::from([Ok(queue_result(Some(pr_status("sha1"))))]),
+            enqueue: VecDeque::from([Ok(applied())]),
+            ..Default::default()
+        });
+        tick(&db, &fake);
+        let conn = db.0.lock().unwrap();
+        let buckets = sync::read_rate_buckets(&conn).unwrap();
+        assert!(buckets.iter().any(|b| b.resource == "core"));
+        assert!(
+            buckets.iter().any(|b| b.resource == "graphql"),
+            "graphql bucket from the queue GraphQL calls is persisted"
+        );
+    }
+
+    #[test]
+    fn fifo_advances_only_the_repo_head_and_independent_repos_progress() {
+        let db = db_with_token();
+        store(
+            &db,
+            &[
+                pr(1, "octo/repo-a", 10, "first"),
+                pr(2, "octo/repo-a", 11, "second"),
+                pr(3, "octo/repo-b", 12, "other"),
+            ],
+        );
+        let a1 = enqueue_op(&db, 1);
+        let _a2 = enqueue_op(&db, 2);
+        let b3 = enqueue_op(&db, 3);
+        // Both repo heads validate to a cached direct strategy this tick.
+        let fake = FakeBackend::new(Script {
+            process: VecDeque::from([
+                Ok(prepared("sha-a1", "main", "PR_a1", Some("clean"))),
+                Ok(prepared("sha-b3", "main", "PR_b3", Some("clean"))),
+            ]),
+            policy: VecDeque::from([
+                Ok(policy(MergeQueueStrategy::Direct)),
+                Ok(policy(MergeQueueStrategy::Direct)),
+            ]),
+            ..Default::default()
+        });
+        tick(&db, &fake);
+        // repo-a head (pr 1) advanced; repo-a second (pr 2) stayed queued; repo-b head advanced.
+        assert_eq!(op(&db, a1).state, "delegated");
+        assert_eq!(op(&db, b3).state, "delegated");
+        let conn = db.0.lock().unwrap();
+        let second = dependabot::get_operation(&conn, _a2).unwrap().unwrap();
+        assert_eq!(second.state, "queued");
     }
 }

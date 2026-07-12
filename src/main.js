@@ -15,7 +15,12 @@ import {
 } from "./js/sync.js";
 import { initSettings, loadSettings, showSettings } from "./js/settings.js";
 import { initInbox, loadInbox } from "./js/inbox.js";
-import { initDependabot, onDependabotOpened } from "./js/dependabot.js";
+import {
+  initDependabot,
+  onDependabotOpened,
+  startDependabotMergePolling,
+  stopDependabotMergePolling,
+} from "./js/dependabot.js";
 import { initModules, configureModules, restoreLastModule, getActiveModule } from "./js/modules.js";
 import { initShortcuts } from "./js/shortcuts.js";
 
@@ -68,6 +73,7 @@ window.addEventListener("DOMContentLoaded", () => {
     onAuthenticated: (justSignedIn) => {
       // Signed in → begin the automatic poll loop (idempotent; restarts the countdown).
       startPolling();
+      startDependabotMergePolling();
       if (justSignedIn) {
         // Fresh sign-in: refresh the cached login display + sync status with the new creds.
         loadSettings();
@@ -84,6 +90,7 @@ window.addEventListener("DOMContentLoaded", () => {
       session.syncedThisSession = false;
       // Signed out → stop polling so we never hit the API without a token.
       stopPolling();
+      stopDependabotMergePolling();
     },
   });
   loadStorage();

@@ -761,6 +761,1799 @@ where
     })
 }
 
+/* ----------------------- Dependabot merge operations ---------------------- */
+
+/// Classification used by the durable merge queue to decide whether a repository's FIFO head
+/// retries or becomes terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeErrorClass {
+    Auth,
+    Rate,
+    Transient,
+    Permanent,
+}
+
+#[derive(Debug)]
+pub struct MergeRemoteError {
+    pub class: MergeErrorClass,
+    pub message: String,
+    pub rates: Vec<RateLimit>,
+}
+
+#[derive(Debug)]
+pub enum MergeRemoteOutcome {
+    Merged {
+        head_sha: Option<String>,
+    },
+    Pending {
+        head_sha: String,
+        approved: bool,
+        branch_update_requested: bool,
+        reason: Option<String>,
+    },
+    Cancelled,
+    PermanentFailure {
+        code: &'static str,
+        reason: String,
+    },
+    /// GitHub reports the validated direct-merge PR as blocked. The orchestrator diagnoses checks
+    /// first, then determines whether a stale base branch is the remaining blocker.
+    Blocked {
+        head_sha: String,
+        base_ref: String,
+    },
+    /// The head passed validation (and, unless `behind`, was approved), but the resolved merge
+    /// strategy is not `Direct` — so no direct `PUT /merge` or `PUT /update-branch` was issued.
+    /// The orchestrator uses `base_ref`/`node_id` to resolve/cache the strategy and drive the
+    /// merge-queue flow (enable auto-merge / enqueue / poll) instead. Never surfaced to the
+    /// FIFO loop: the orchestrator consumes it and returns one of the variants above.
+    Prepared {
+        head_sha: String,
+        base_ref: String,
+        node_id: String,
+        mergeable_state: Option<String>,
+    },
+    /// No progress was made this tick and the durable `state` must not change — e.g. the
+    /// operation is pacing itself away behind `next_action_at` (a scheduled retry/backoff that
+    /// isn't due yet), so no network call was made. The orchestrator has already persisted any
+    /// phase/event narration; the FIFO loop leaves the row exactly as it found it.
+    Waiting,
+}
+
+#[derive(Debug)]
+pub struct MergeRemoteResult {
+    pub outcome: MergeRemoteOutcome,
+    pub rates: Vec<RateLimit>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MergePull {
+    state: String,
+    #[serde(default)]
+    draft: bool,
+    merged_at: Option<String>,
+    user: Option<SubjectUser>,
+    mergeable_state: Option<String>,
+    head: MergeHead,
+    #[serde(default)]
+    node_id: String,
+    base: Option<MergeBase>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MergeHead {
+    sha: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MergeBase {
+    #[serde(rename = "ref")]
+    ref_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MergeCommit {
+    sha: String,
+    author: Option<SubjectUser>,
+    #[serde(default)]
+    parents: Vec<MergeCommitParent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MergeCommitParent {
+    sha: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MergeCommitValidation {
+    Safe,
+    HeadChanged,
+    Unsafe,
+}
+
+fn merge_commits_are_safe(
+    commits: &[MergeCommit],
+    current_head: &str,
+    login: &str,
+    update_from: Option<&str>,
+) -> MergeCommitValidation {
+    // GitHub caps this endpoint at 250 commits without exposing a reliable truncation flag.
+    // Refuse the ambiguous boundary rather than approve a possibly unvalidated tail/prefix.
+    if commits.len() >= 250 {
+        return MergeCommitValidation::Unsafe;
+    }
+    if commits.last().map(|commit| commit.sha.as_str()) != Some(current_head) {
+        return MergeCommitValidation::HeadChanged;
+    }
+    let (start, mut accepted_head) = match update_from {
+        Some(marker) => {
+            let Some(index) = commits.iter().position(|commit| commit.sha == marker) else {
+                return MergeCommitValidation::Unsafe;
+            };
+            (index + 1, Some(marker))
+        }
+        None => (0, None),
+    };
+    for commit in &commits[start..] {
+        if commit
+            .author
+            .as_ref()
+            .is_some_and(|u| is_dependabot_author(&u.login))
+        {
+            accepted_head = Some(commit.sha.as_str());
+            continue;
+        }
+        if update_from.is_none() || commit.author.as_ref().is_none_or(|u| u.login != login) {
+            return MergeCommitValidation::Unsafe;
+        }
+        if commit.parents.len() != 2
+            || commit.parents.first().map(|parent| parent.sha.as_str()) != accepted_head
+        {
+            return MergeCommitValidation::Unsafe;
+        }
+        accepted_head = Some(commit.sha.as_str());
+    }
+    MergeCommitValidation::Safe
+}
+
+#[derive(Debug, Deserialize)]
+struct MergeReview {
+    user: Option<SubjectUser>,
+    state: String,
+    commit_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MergeLogin {
+    login: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MergeResponse {
+    merged: bool,
+    message: String,
+}
+
+fn merge_error(
+    status: reqwest::StatusCode,
+    body: String,
+    rate: &RateLimit,
+    rates: &mut Vec<RateLimit>,
+) -> MergeRemoteError {
+    let normalized_body = body.to_lowercase();
+    let class = if status == reqwest::StatusCode::UNAUTHORIZED
+        || (status == reqwest::StatusCode::FORBIDDEN
+            && !normalized_body.contains("rate limit")
+            && rate.retry_after.is_none())
+    {
+        MergeErrorClass::Auth
+    } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || (status == reqwest::StatusCode::FORBIDDEN
+            && (normalized_body.contains("rate limit") || rate.retry_after.is_some()))
+    {
+        MergeErrorClass::Rate
+    } else if status.is_server_error()
+        || status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::CONFLICT
+        || (status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
+            && normalized_body.contains("expected head sha"))
+    {
+        MergeErrorClass::Transient
+    } else {
+        MergeErrorClass::Permanent
+    };
+    MergeRemoteError {
+        class,
+        message: format!("GitHub returned {status}: {body}"),
+        rates: std::mem::take(rates),
+    }
+}
+
+async fn merge_json<T: for<'de> Deserialize<'de>>(
+    request: reqwest::RequestBuilder,
+    what: &'static str,
+    rates: &mut Vec<RateLimit>,
+) -> Result<T, MergeRemoteError> {
+    let response = request.send().await.map_err(|e| MergeRemoteError {
+        class: MergeErrorClass::Transient,
+        message: format!("network error: {e}"),
+        rates: std::mem::take(rates),
+    })?;
+    let status = response.status();
+    let mut rate = RateLimit::default();
+    rate.update_from(response.headers());
+    rates.push(rate.clone());
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default().trim().to_string();
+        return Err(merge_error(status, body, &rate, rates));
+    }
+    response.json().await.map_err(|e| MergeRemoteError {
+        class: MergeErrorClass::Transient,
+        message: format!("failed to parse {what}: {e}"),
+        rates: std::mem::take(rates),
+    })
+}
+
+fn merge_refusal_message(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("message")?.as_str().map(str::to_string))
+        .filter(|message| !message.is_empty())
+        .unwrap_or_else(|| "GitHub is still blocking this merge.".to_string())
+}
+
+fn squash_merge_is_disallowed(message: &str) -> bool {
+    message.eq_ignore_ascii_case("Squash merges are not allowed on this repository.")
+}
+
+async fn merge_pull_request(
+    request: reqwest::RequestBuilder,
+    rates: &mut Vec<RateLimit>,
+) -> Result<MergeResponse, MergeRemoteError> {
+    let response = request.send().await.map_err(|e| MergeRemoteError {
+        class: MergeErrorClass::Transient,
+        message: format!("network error: {e}"),
+        rates: std::mem::take(rates),
+    })?;
+    let status = response.status();
+    let mut rate = RateLimit::default();
+    rate.update_from(response.headers());
+    rates.push(rate.clone());
+    if status.is_success() {
+        return response.json().await.map_err(|e| MergeRemoteError {
+            class: MergeErrorClass::Transient,
+            message: format!("failed to parse merge pull request: {e}"),
+            rates: std::mem::take(rates),
+        });
+    }
+    let body = response.text().await.unwrap_or_default().trim().to_string();
+    if status == reqwest::StatusCode::METHOD_NOT_ALLOWED {
+        let message = merge_refusal_message(&body);
+        if squash_merge_is_disallowed(&message) {
+            return Err(MergeRemoteError {
+                class: MergeErrorClass::Permanent,
+                message: format!("GitHub returned {status}: {body}"),
+                rates: std::mem::take(rates),
+            });
+        }
+        return Ok(MergeResponse {
+            merged: false,
+            message,
+        });
+    }
+    Err(merge_error(status, body, &rate, rates))
+}
+
+async fn merge_empty(
+    request: reqwest::RequestBuilder,
+    rates: &mut Vec<RateLimit>,
+) -> Result<reqwest::StatusCode, MergeRemoteError> {
+    let response = request.send().await.map_err(|e| MergeRemoteError {
+        class: MergeErrorClass::Transient,
+        message: format!("network error: {e}"),
+        rates: std::mem::take(rates),
+    })?;
+    let status = response.status();
+    let mut rate = RateLimit::default();
+    rate.update_from(response.headers());
+    rates.push(rate.clone());
+    if status.is_success() {
+        Ok(status)
+    } else {
+        let body = response.text().await.unwrap_or_default().trim().to_string();
+        Err(merge_error(status, body, &rate, rates))
+    }
+}
+
+async fn merge_pages<T: for<'de> Deserialize<'de>>(
+    client: &reqwest::Client,
+    mut url: String,
+    token: &str,
+    what: &'static str,
+    rates: &mut Vec<RateLimit>,
+) -> Result<Vec<T>, MergeRemoteError> {
+    let mut all = Vec::new();
+    loop {
+        let response =
+            authed_get(client, &url, token)
+                .send()
+                .await
+                .map_err(|e| MergeRemoteError {
+                    class: MergeErrorClass::Transient,
+                    message: format!("network error: {e}"),
+                    rates: std::mem::take(rates),
+                })?;
+        let status = response.status();
+        let next = next_page_url(response.headers());
+        let mut rate = RateLimit::default();
+        rate.update_from(response.headers());
+        rates.push(rate.clone());
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default().trim().to_string();
+            return Err(merge_error(status, body, &rate, rates));
+        }
+        let mut page: Vec<T> = response.json().await.map_err(|e| MergeRemoteError {
+            class: MergeErrorClass::Transient,
+            message: format!("failed to parse {what}: {e}"),
+            rates: std::mem::take(rates),
+        })?;
+        all.append(&mut page);
+        match next {
+            Some(next) => {
+                url = next;
+                tokio::time::sleep(DEPENDABOT_REQUEST_DELAY).await;
+            }
+            None => return Ok(all),
+        }
+    }
+}
+
+fn direct_merge_attempt_allowed(mergeable_state: Option<&str>) -> bool {
+    matches!(mergeable_state, Some("clean" | "unstable"))
+}
+
+/// Process one queue head. This uses serial REST calls: normal queue heads are few, and REST
+/// directly supports all commits, reviews, and mutations needed for strict checks.
+/// The caller owns durable state and must not hold SQLite while this function runs.
+///
+/// Shared entry point for both merge strategies (requirement 3): it always validates the exact
+/// head as complete Dependabot-owned history and secures the PAT's approval at that head. Only
+/// when `strategy` is [`MergeQueueStrategy::Direct`] does it then issue the direct
+/// `PUT /merge` / `PUT /update-branch` mutations; for `MergeQueue`/`Unknown` it stops after
+/// validation+approval and returns [`MergeRemoteOutcome::Prepared`] so the orchestrator can
+/// resolve/cache the policy and drive the GraphQL merge-queue flow instead — the direct
+/// merge/update endpoints are never touched for a queue-governed branch (requirement 5).
+pub async fn process_dependabot_merge_operation<Cancelled>(
+    client: &reqwest::Client,
+    token: &str,
+    work: &crate::dependabot::MergeWork,
+    timed_out: bool,
+    strategy: MergeQueueStrategy,
+    mutation_guard: &tokio::sync::Mutex<()>,
+    is_cancelled: Cancelled,
+) -> Result<MergeRemoteResult, MergeRemoteError>
+where
+    Cancelled: Fn() -> bool,
+{
+    let operation = &work.operation;
+    let mut rates = Vec::new();
+    let pull: MergePull = merge_json(
+        authed_get(client, &operation.pull_url, token),
+        "pull request",
+        &mut rates,
+    )
+    .await?;
+    let head_sha = pull.head.sha.clone();
+    let base_ref = pull.base.as_ref().map(|b| b.ref_name.clone());
+    let node_id = pull.node_id.clone();
+    if pull.merged_at.is_some() {
+        return Ok(MergeRemoteResult {
+            outcome: MergeRemoteOutcome::Merged {
+                head_sha: Some(head_sha),
+            },
+            rates,
+        });
+    }
+
+    if operation.state == "cancel_requested" || timed_out || is_cancelled() {
+        return Ok(MergeRemoteResult {
+            outcome: MergeRemoteOutcome::Cancelled,
+            rates,
+        });
+    }
+
+    if !is_dependabot_author(pull.user.as_ref().map(|u| u.login.as_str()).unwrap_or("")) {
+        return Ok(MergeRemoteResult {
+            outcome: MergeRemoteOutcome::PermanentFailure {
+                code: "not_dependabot",
+                reason: "The live PR author is not Dependabot.".to_string(),
+            },
+            rates,
+        });
+    }
+    if pull.state != "open" {
+        return Ok(MergeRemoteResult {
+            outcome: MergeRemoteOutcome::PermanentFailure {
+                code: "not_open",
+                reason: "The pull request is no longer open.".to_string(),
+            },
+            rates,
+        });
+    }
+    if pull.draft {
+        return Ok(MergeRemoteResult {
+            outcome: MergeRemoteOutcome::PermanentFailure {
+                code: "draft",
+                reason: "The pull request is a draft.".to_string(),
+            },
+            rates,
+        });
+    }
+    if pull.mergeable_state.as_deref() == Some("dirty") {
+        return Ok(MergeRemoteResult {
+            outcome: MergeRemoteOutcome::PermanentFailure {
+                code: "dirty",
+                reason: "The pull request has merge conflicts (DIRTY).".to_string(),
+            },
+            rates,
+        });
+    }
+
+    // An unchanged head has already passed authorship validation and carries the PAT owner's
+    // approval. Skip expensive commit pagination, but re-check reviews if GitHub reports the
+    // PR blocked so a dismissed approval cannot deadlock the operation.
+    let head_already_prepared = operation.state == "delegated"
+        && operation.observed_head_sha.as_deref() == Some(head_sha.as_str())
+        && operation.validated_head_sha.as_deref() == Some(head_sha.as_str())
+        && operation.approved_head_sha.as_deref() == Some(head_sha.as_str());
+    let needs_approval = pull.mergeable_state.as_deref() != Some("behind")
+        && (!head_already_prepared || pull.mergeable_state.as_deref() == Some("blocked"));
+    let needs_identity = !head_already_prepared || needs_approval;
+    let login: Option<MergeLogin> = if needs_identity {
+        Some(
+            merge_json(
+                authed_get(client, &format!("{API_BASE}/user"), token),
+                "authenticated user",
+                &mut rates,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    if !head_already_prepared {
+        let commits: Vec<MergeCommit> = merge_pages(
+            client,
+            format!(
+                "{API_BASE}/repos/{}/pulls/{}/commits?per_page={DEPENDABOT_PER_PAGE}",
+                operation.repo_full_name, operation.number
+            ),
+            token,
+            "pull request commits",
+            &mut rates,
+        )
+        .await?;
+        let update_from = work.update_branch_from_sha.as_deref();
+        let commit_validation = merge_commits_are_safe(
+            &commits,
+            &head_sha,
+            &login
+                .as_ref()
+                .expect("identity fetched for commit validation")
+                .login,
+            update_from,
+        );
+        if commit_validation == MergeCommitValidation::HeadChanged {
+            return Err(MergeRemoteError {
+                class: MergeErrorClass::Transient,
+                message: "The pull request head changed during commit validation; retrying."
+                    .to_string(),
+                rates,
+            });
+        }
+        if commit_validation == MergeCommitValidation::Unsafe {
+            return Ok(MergeRemoteResult {
+                outcome: MergeRemoteOutcome::PermanentFailure {
+                    code: "non_dependabot_commit",
+                    reason:
+                        "Helix could not validate the complete current commit history as Dependabot-owned."
+                            .to_string(),
+                },
+                rates,
+            });
+        }
+    }
+
+    if needs_approval {
+        let login = login.as_ref().expect("identity fetched when needed");
+        let reviews: Vec<MergeReview> = merge_pages(
+            client,
+            format!(
+                "{API_BASE}/repos/{}/pulls/{}/reviews?per_page={DEPENDABOT_PER_PAGE}",
+                operation.repo_full_name, operation.number
+            ),
+            token,
+            "pull request reviews",
+            &mut rates,
+        )
+        .await?;
+        let already_approved = reviews.iter().any(|review| {
+            review.state.eq_ignore_ascii_case("APPROVED")
+                && review.commit_id.as_deref() == Some(head_sha.as_str())
+                && review.user.as_ref().is_some_and(|u| u.login == login.login)
+        });
+        if !already_approved {
+            let _mutation_lease = mutation_guard.lock().await;
+            if is_cancelled() {
+                return Ok(MergeRemoteResult {
+                    outcome: MergeRemoteOutcome::Cancelled,
+                    rates,
+                });
+            }
+            merge_empty(
+                authed(
+                    client
+                        .post(format!(
+                            "{API_BASE}/repos/{}/pulls/{}/reviews",
+                            operation.repo_full_name, operation.number
+                        ))
+                        .json(&serde_json::json!({
+                            "event": "APPROVE",
+                            "commit_id": head_sha
+                        })),
+                    token,
+                ),
+                &mut rates,
+            )
+            .await?;
+        }
+    }
+
+    // Validation + approval are complete. For a queue-governed branch (or one whose policy
+    // hasn't been resolved yet) stop here and hand back the validated head, base ref, and node
+    // id: the orchestrator resolves/caches the strategy and, when it's a merge queue, drives the
+    // GraphQL auto-merge/enqueue flow. The direct merge/update endpoints below run only for a
+    // conclusively `Direct` branch.
+    if !matches!(strategy, MergeQueueStrategy::Direct) {
+        return Ok(MergeRemoteResult {
+            outcome: MergeRemoteOutcome::Prepared {
+                head_sha,
+                base_ref: base_ref.unwrap_or_default(),
+                node_id,
+                mergeable_state: pull.mergeable_state.clone(),
+            },
+            rates,
+        });
+    }
+
+    // `unstable` is still mergeable but has a non-passing status, which can come from optional
+    // checks. The merge endpoint remains authoritative if the REST mergeability snapshot is stale.
+    if direct_merge_attempt_allowed(pull.mergeable_state.as_deref()) {
+        let _mutation_lease = mutation_guard.lock().await;
+        if is_cancelled() {
+            return Ok(MergeRemoteResult {
+                outcome: MergeRemoteOutcome::Cancelled,
+                rates,
+            });
+        }
+        let merged = merge_pull_request(
+            authed(
+                client
+                    .put(format!(
+                        "{API_BASE}/repos/{}/pulls/{}/merge",
+                        operation.repo_full_name, operation.number
+                    ))
+                    .json(&serde_json::json!({
+                        "sha": head_sha,
+                        "merge_method": "squash"
+                    })),
+                token,
+            ),
+            &mut rates,
+        )
+        .await?;
+        if merged.merged {
+            return Ok(MergeRemoteResult {
+                outcome: MergeRemoteOutcome::Merged {
+                    head_sha: Some(head_sha),
+                },
+                rates,
+            });
+        }
+        return Ok(MergeRemoteResult {
+            outcome: MergeRemoteOutcome::Pending {
+                head_sha,
+                approved: true,
+                branch_update_requested: false,
+                reason: Some(merged.message),
+            },
+            rates,
+        });
+    }
+
+    if pull.mergeable_state.as_deref() == Some("behind") {
+        let outcome = send_guarded_branch_update(
+            update_pull_request_branch_request(
+                client,
+                token,
+                &operation.repo_full_name,
+                operation.number,
+                &head_sha,
+            ),
+            mutation_guard,
+            is_cancelled,
+            &mut rates,
+        )
+        .await?;
+        if outcome == MutationOutcome::Cancelled {
+            return Ok(MergeRemoteResult {
+                outcome: MergeRemoteOutcome::Cancelled,
+                rates,
+            });
+        }
+        return Ok(MergeRemoteResult {
+            outcome: MergeRemoteOutcome::Pending {
+                head_sha,
+                approved: false,
+                branch_update_requested: true,
+                reason: Some("Updating the branch and waiting for fresh checks.".to_string()),
+            },
+            rates,
+        });
+    }
+
+    if pull.mergeable_state.as_deref() == Some("blocked") {
+        return Ok(MergeRemoteResult {
+            outcome: MergeRemoteOutcome::Blocked {
+                head_sha,
+                base_ref: base_ref.unwrap_or_default(),
+            },
+            rates,
+        });
+    }
+
+    Ok(MergeRemoteResult {
+        outcome: MergeRemoteOutcome::Pending {
+            head_sha,
+            approved: true,
+            branch_update_requested: false,
+            reason: Some("Waiting for GitHub checks or required reviews.".to_string()),
+        },
+        rates,
+    })
+}
+
+/* ------------------------- Exact-head check diagnosis --------------------- */
+
+/// Where a pending/failed check came from — whether it's misattributed matters: a GitHub
+/// Actions job cannot be rerun the same way an external check can (see
+/// [`diagnose_exact_head_checks`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum CheckSource {
+    Actions,
+    External,
+}
+
+/// A check or status that hasn't concluded yet at the exact head SHA.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PendingCheck {
+    pub name: String,
+    pub source: CheckSource,
+}
+
+/// A failed GitHub Actions workflow run at the exact head SHA — carries what's needed to
+/// offer a "rerun failed jobs" action ([`rerun_failed_jobs`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ActionsRunFailure {
+    pub run_id: i64,
+    pub run_attempt: i64,
+    pub name: Option<String>,
+    pub conclusion: Option<String>,
+}
+
+/// A failed check run or legacy commit status from a non-Actions source. Helix has no way to
+/// safely rerun these on the user's behalf (see requirement 7 in the phase-2 plan): the PAT
+/// can't rerequest a third-party check suite, so this is surfaced for the human to act on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExternalCheckFailure {
+    pub name: String,
+    pub conclusion: Option<String>,
+    pub details_url: Option<String>,
+}
+
+/// Result of diagnosing the checks/statuses/workflow runs at one commit SHA.
+#[derive(Debug, Default)]
+pub struct ExactHeadCheckDiagnosis {
+    pub pending: Vec<PendingCheck>,
+    pub actions_failures: Vec<ActionsRunFailure>,
+    pub external_failures: Vec<ExternalCheckFailure>,
+    pub rates: Vec<RateLimit>,
+}
+
+/// The GitHub Actions app's slug on check runs (`check_run.app.slug`). Used to tell an Actions
+/// job apart from a third-party Checks API user so Actions failures — surfaced instead from
+/// the `actions/runs` listing, with a rerunnable `run_id` — are never double-counted as
+/// "external".
+const GITHUB_ACTIONS_APP_SLUG: &str = "github-actions";
+
+#[derive(Debug, Deserialize)]
+struct CheckRunsResponse {
+    check_runs: Vec<CheckRunItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CheckRunApp {
+    slug: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CheckRunItem {
+    name: String,
+    status: String,
+    conclusion: Option<String>,
+    details_url: Option<String>,
+    app: Option<CheckRunApp>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowRunsResponse {
+    workflow_runs: Vec<WorkflowRunItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowRunItem {
+    id: i64,
+    #[serde(default)]
+    run_attempt: Option<i64>,
+    name: Option<String>,
+    status: String,
+    conclusion: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CombinedStatusResponse {
+    statuses: Vec<CombinedStatusItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CombinedStatusItem {
+    state: String,
+    context: String,
+    target_url: Option<String>,
+}
+
+/// Whether a check-run/workflow-run `status` means it hasn't concluded yet. Per the REST docs
+/// (`docs.github.com/en/rest/checks/runs`, `.../rest/actions/workflow-runs`), `completed` is
+/// the only terminal status; everything else (`queued`, `in_progress`, and the
+/// Apps-only `waiting`/`requested`/`pending`) is still pending.
+fn is_check_pending_status(status: &str) -> bool {
+    status != "completed"
+}
+
+/// Whether a check-run/workflow-run `conclusion` should be surfaced as a failure blocking the
+/// merge. `success`/`neutral`/`skipped`/`stale` are not failures.
+fn is_failure_conclusion(conclusion: &str) -> bool {
+    matches!(
+        conclusion,
+        "failure" | "timed_out" | "cancelled" | "action_required" | "startup_failure"
+    )
+}
+
+/// Whether a legacy commit-status `state` (`docs.github.com/en/rest/commits/statuses`) is a
+/// failure. Valid states are `error`, `failure`, `pending`, `success`.
+fn is_failure_status_state(state: &str) -> bool {
+    matches!(state, "failure" | "error")
+}
+
+/// Diagnose the checks at an **exact** commit SHA: check runs, the combined legacy-status view,
+/// and GitHub Actions workflow runs. Serial + paced like the Dependabot enumeration, and every
+/// response's rate snapshot is returned so the caller can track all three buckets it touches
+/// (`core`, plus whichever buckets Checks/Actions report against).
+///
+/// A GitHub Actions check run is *never* reported as an external failure — its workflow run
+/// (with `run_id`/`run_attempt` for [`rerun_failed_jobs`]) is the authoritative source for
+/// Actions failures, so Actions-owned check runs are skipped entirely in the check-runs pass.
+pub async fn diagnose_exact_head_checks(
+    client: &reqwest::Client,
+    token: &str,
+    repo_full_name: &str,
+    head_sha: &str,
+) -> Result<ExactHeadCheckDiagnosis, MergeRemoteError> {
+    let mut rates = Vec::new();
+    let mut pending = Vec::new();
+    let mut actions_failures = Vec::new();
+    let mut external_failures = Vec::new();
+
+    let check_runs: Vec<CheckRunItem> = merge_pages_field(
+        client,
+        format!(
+            "{API_BASE}/repos/{repo_full_name}/commits/{head_sha}/check-runs?per_page={DEPENDABOT_PER_PAGE}"
+        ),
+        token,
+        "check runs",
+        &mut rates,
+        |wrapper: CheckRunsResponse| wrapper.check_runs,
+    )
+    .await?;
+
+    for run in check_runs {
+        let is_actions = run
+            .app
+            .as_ref()
+            .and_then(|app| app.slug.as_deref())
+            .is_some_and(|slug| slug == GITHUB_ACTIONS_APP_SLUG);
+        if is_actions {
+            // Classified from the workflow-run listing below instead — see the doc comment.
+            continue;
+        }
+        if is_check_pending_status(&run.status) {
+            pending.push(PendingCheck {
+                name: run.name,
+                source: CheckSource::External,
+            });
+            continue;
+        }
+        if run.conclusion.as_deref().is_some_and(is_failure_conclusion) {
+            external_failures.push(ExternalCheckFailure {
+                name: run.name,
+                conclusion: run.conclusion,
+                details_url: run.details_url,
+            });
+        }
+    }
+
+    tokio::time::sleep(DEPENDABOT_REQUEST_DELAY).await;
+    let workflow_runs: Vec<WorkflowRunItem> = merge_pages_field(
+        client,
+        format!(
+            "{API_BASE}/repos/{repo_full_name}/actions/runs?head_sha={head_sha}&per_page={DEPENDABOT_PER_PAGE}"
+        ),
+        token,
+        "workflow runs",
+        &mut rates,
+        |wrapper: WorkflowRunsResponse| wrapper.workflow_runs,
+    )
+    .await?;
+
+    for run in workflow_runs {
+        if is_check_pending_status(&run.status) {
+            pending.push(PendingCheck {
+                name: run
+                    .name
+                    .unwrap_or_else(|| format!("workflow run {}", run.id)),
+                source: CheckSource::Actions,
+            });
+            continue;
+        }
+        if run.conclusion.as_deref().is_some_and(is_failure_conclusion) {
+            actions_failures.push(ActionsRunFailure {
+                run_id: run.id,
+                run_attempt: run.run_attempt.unwrap_or(1),
+                name: run.name,
+                conclusion: run.conclusion,
+            });
+        }
+    }
+
+    tokio::time::sleep(DEPENDABOT_REQUEST_DELAY).await;
+    let status: CombinedStatusResponse = merge_json(
+        authed_get(
+            client,
+            &format!("{API_BASE}/repos/{repo_full_name}/commits/{head_sha}/status"),
+            token,
+        ),
+        "combined status",
+        &mut rates,
+    )
+    .await?;
+
+    for item in status.statuses {
+        if item.state == "pending" {
+            pending.push(PendingCheck {
+                name: item.context,
+                source: CheckSource::External,
+            });
+            continue;
+        }
+        if is_failure_status_state(&item.state) {
+            external_failures.push(ExternalCheckFailure {
+                name: item.context,
+                conclusion: Some(item.state),
+                details_url: item.target_url,
+            });
+        }
+    }
+
+    Ok(ExactHeadCheckDiagnosis {
+        pending,
+        actions_failures,
+        external_failures,
+        rates,
+    })
+}
+
+/// Like [`merge_pages`], but for endpoints whose page body wraps the array in an object (e.g.
+/// `{"check_runs": [...]}` instead of a bare `[...]`). `extract` pulls the array out of each
+/// page's wrapper type `W`.
+async fn merge_pages_field<W, T, F>(
+    client: &reqwest::Client,
+    mut url: String,
+    token: &str,
+    what: &'static str,
+    rates: &mut Vec<RateLimit>,
+    extract: F,
+) -> Result<Vec<T>, MergeRemoteError>
+where
+    W: for<'de> Deserialize<'de>,
+    F: Fn(W) -> Vec<T>,
+{
+    let mut all = Vec::new();
+    loop {
+        let response =
+            authed_get(client, &url, token)
+                .send()
+                .await
+                .map_err(|e| MergeRemoteError {
+                    class: MergeErrorClass::Transient,
+                    message: format!("network error: {e}"),
+                    rates: std::mem::take(rates),
+                })?;
+        let status = response.status();
+        let next = next_page_url(response.headers());
+        let mut rate = RateLimit::default();
+        rate.update_from(response.headers());
+        rates.push(rate.clone());
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default().trim().to_string();
+            return Err(merge_error(status, body, &rate, rates));
+        }
+        let wrapper: W = response.json().await.map_err(|e| MergeRemoteError {
+            class: MergeErrorClass::Transient,
+            message: format!("failed to parse {what}: {e}"),
+            rates: std::mem::take(rates),
+        })?;
+        all.extend(extract(wrapper));
+        match next {
+            Some(next_url) => {
+                url = next_url;
+                tokio::time::sleep(DEPENDABOT_REQUEST_DELAY).await;
+            }
+            None => return Ok(all),
+        }
+    }
+}
+
+/* ----------------------------- Queue mutations ----------------------------- */
+
+/// Outcome of a mutation gated by the shared mutation guard: either cancellation was observed
+/// after the guard was acquired (so nothing was dispatched to GitHub), or GitHub accepted the
+/// request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutationOutcome {
+    Cancelled,
+    Applied,
+}
+
+#[derive(Debug)]
+pub struct MutationResult {
+    pub outcome: MutationOutcome,
+    pub rates: Vec<RateLimit>,
+}
+
+#[derive(Debug)]
+pub struct BranchComparisonResult {
+    pub behind: bool,
+    pub rates: Vec<RateLimit>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompareResponse {
+    behind_by: u64,
+}
+
+fn compare_url(repo_full_name: &str, base_ref: &str, head_sha: &str) -> Option<reqwest::Url> {
+    let (owner, repo) = repo_full_name.split_once('/')?;
+    let comparison = format!("{base_ref}...{head_sha}");
+    let mut url = reqwest::Url::parse(API_BASE).ok()?;
+    url.path_segments_mut()
+        .ok()?
+        .extend(["repos", owner, repo, "compare"])
+        .push(&comparison);
+    Some(url)
+}
+
+/// Compare the current base ref with the exact validated PR head. `behind_by > 0` means the base
+/// contains commits absent from the head, even when GitHub collapses that fact into `BLOCKED`.
+pub async fn compare_pull_request_branch(
+    client: &reqwest::Client,
+    token: &str,
+    repo_full_name: &str,
+    base_ref: &str,
+    head_sha: &str,
+) -> Result<BranchComparisonResult, MergeRemoteError> {
+    let mut rates = Vec::new();
+    let Some(url) = compare_url(repo_full_name, base_ref, head_sha) else {
+        return Err(MergeRemoteError {
+            class: MergeErrorClass::Permanent,
+            message: "Could not construct the pull request comparison URL.".to_string(),
+            rates,
+        });
+    };
+    let comparison: CompareResponse = merge_json(
+        authed_get(client, url.as_str(), token),
+        "pull request branch comparison",
+        &mut rates,
+    )
+    .await?;
+    Ok(BranchComparisonResult {
+        behind: comparison.behind_by > 0,
+        rates,
+    })
+}
+
+fn update_pull_request_branch_request(
+    client: &reqwest::Client,
+    token: &str,
+    repo_full_name: &str,
+    number: i64,
+    expected_head_sha: &str,
+) -> reqwest::RequestBuilder {
+    authed(
+        client
+            .put(format!(
+                "{API_BASE}/repos/{repo_full_name}/pulls/{number}/update-branch"
+            ))
+            .json(&serde_json::json!({ "expected_head_sha": expected_head_sha })),
+        token,
+    )
+}
+
+async fn send_guarded_branch_update<Cancelled>(
+    request: reqwest::RequestBuilder,
+    mutation_guard: &tokio::sync::Mutex<()>,
+    is_cancelled: Cancelled,
+    rates: &mut Vec<RateLimit>,
+) -> Result<MutationOutcome, MergeRemoteError>
+where
+    Cancelled: Fn() -> bool,
+{
+    let _mutation_lease = mutation_guard.lock().await;
+    if is_cancelled() {
+        return Ok(MutationOutcome::Cancelled);
+    }
+    merge_json::<serde_json::Value>(request, "update pull request branch", rates).await?;
+    Ok(MutationOutcome::Applied)
+}
+
+/// Update a PR branch from its base, guarded by the exact validated head SHA and cancellation.
+pub async fn update_pull_request_branch<Cancelled>(
+    client: &reqwest::Client,
+    token: &str,
+    repo_full_name: &str,
+    number: i64,
+    expected_head_sha: &str,
+    mutation_guard: &tokio::sync::Mutex<()>,
+    is_cancelled: Cancelled,
+) -> Result<MutationResult, MergeRemoteError>
+where
+    Cancelled: Fn() -> bool,
+{
+    let mut rates = Vec::new();
+    let outcome = send_guarded_branch_update(
+        update_pull_request_branch_request(
+            client,
+            token,
+            repo_full_name,
+            number,
+            expected_head_sha,
+        ),
+        mutation_guard,
+        is_cancelled,
+        &mut rates,
+    )
+    .await?;
+    Ok(MutationResult { outcome, rates })
+}
+
+/// Re-run the failed jobs of a workflow run (`POST .../actions/runs/{run_id}/rerun-failed-jobs`).
+/// Uses the same auth headers, error classification, and rate capture as every other mutation
+/// in this module; the caller owns any retry budget (there is deliberately none here — a
+/// repeated rerun request is not idempotent the way the queue mutations below are, since each
+/// call creates a new run attempt).
+pub async fn rerun_failed_jobs<Cancelled>(
+    client: &reqwest::Client,
+    token: &str,
+    repo_full_name: &str,
+    run_id: i64,
+    mutation_guard: &tokio::sync::Mutex<()>,
+    is_cancelled: Cancelled,
+) -> Result<MutationResult, MergeRemoteError>
+where
+    Cancelled: Fn() -> bool,
+{
+    let mut rates = Vec::new();
+    let _mutation_lease = mutation_guard.lock().await;
+    if is_cancelled() {
+        return Ok(MutationResult {
+            outcome: MutationOutcome::Cancelled,
+            rates,
+        });
+    }
+    merge_empty(
+        authed(
+            client.post(format!(
+                "{API_BASE}/repos/{repo_full_name}/actions/runs/{run_id}/rerun-failed-jobs"
+            )),
+            token,
+        ),
+        &mut rates,
+    )
+    .await?;
+    Ok(MutationResult {
+        outcome: MutationOutcome::Applied,
+        rates,
+    })
+}
+
+/* -------------------------- Merge-queue policy detection ------------------- */
+
+/// Whether a repo/base branch merges directly or requires GitHub's merge queue.
+/// `Unknown` means the policy could not be conclusively determined (both the REST rules
+/// endpoint and the GraphQL fallback were inaccessible/ambiguous) — callers must not treat it
+/// as `Direct`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum MergeQueueStrategy {
+    Direct,
+    MergeQueue,
+    Unknown,
+}
+
+#[derive(Debug)]
+pub struct MergeQueuePolicy {
+    pub strategy: MergeQueueStrategy,
+    pub rates: Vec<RateLimit>,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+struct BranchRuleItem {
+    #[serde(rename = "type")]
+    rule_type: String,
+}
+
+/// Whether any active branch rule requires a merge queue (`type == "merge_queue"`, per
+/// `docs.github.com/en/rest/repos/rules`).
+fn rules_indicate_merge_queue(rules: &[BranchRuleItem]) -> bool {
+    rules.iter().any(|rule| rule.rule_type == "merge_queue")
+}
+
+enum BranchRulesOutcome {
+    Rules(Vec<BranchRuleItem>),
+    /// The rules endpoint could not answer (404, or a non-rate-limit 403 — insufficient scope,
+    /// plan restriction, etc.). The caller must not read this as "no rules" and must fall back
+    /// instead of guessing `Direct`.
+    Inconclusive,
+}
+
+/// GET the active branch rules, treating 404/non-rate 403 as [`BranchRulesOutcome::Inconclusive`]
+/// (so the caller can fall back to GraphQL) instead of a hard error. Any other failure (auth,
+/// rate limit, network, server error) still propagates normally.
+async fn fetch_branch_rules(
+    client: &reqwest::Client,
+    token: &str,
+    repo_full_name: &str,
+    base_branch: &str,
+    rates: &mut Vec<RateLimit>,
+) -> Result<BranchRulesOutcome, MergeRemoteError> {
+    let mut url = format!(
+        "{API_BASE}/repos/{repo_full_name}/rules/branches/{base_branch}?per_page={DEPENDABOT_PER_PAGE}"
+    );
+    let mut rules = Vec::new();
+    loop {
+        let response =
+            authed_get(client, &url, token)
+                .send()
+                .await
+                .map_err(|e| MergeRemoteError {
+                    class: MergeErrorClass::Transient,
+                    message: format!("network error: {e}"),
+                    rates: std::mem::take(rates),
+                })?;
+        let status = response.status();
+        let next = next_page_url(response.headers());
+        let mut rate = RateLimit::default();
+        rate.update_from(response.headers());
+        rates.push(rate.clone());
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(BranchRulesOutcome::Inconclusive);
+        }
+        if status == reqwest::StatusCode::FORBIDDEN {
+            let body = response.text().await.unwrap_or_default();
+            if !body.to_lowercase().contains("rate limit") {
+                return Ok(BranchRulesOutcome::Inconclusive);
+            }
+            return Err(merge_error(status, body.trim().to_string(), &rate, rates));
+        }
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default().trim().to_string();
+            return Err(merge_error(status, body, &rate, rates));
+        }
+        let mut page: Vec<BranchRuleItem> =
+            response.json().await.map_err(|e| MergeRemoteError {
+                class: MergeErrorClass::Transient,
+                message: format!("failed to parse branch rules: {e}"),
+                rates: std::mem::take(rates),
+            })?;
+        rules.append(&mut page);
+        match next {
+            Some(next_url) => {
+                url = next_url;
+                tokio::time::sleep(DEPENDABOT_REQUEST_DELAY).await;
+            }
+            None => return Ok(BranchRulesOutcome::Rules(rules)),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct MergeQueueLookupData {
+    repository: Option<MergeQueueLookupRepo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MergeQueueLookupRepo {
+    #[serde(rename = "mergeQueue")]
+    merge_queue: Option<serde_json::Value>,
+}
+
+/// Detect whether `base_branch` in `repo_full_name` merges directly or requires GitHub's merge
+/// queue. The active branch-rules REST endpoint (`GET .../rules/branches/{branch}`, looking for
+/// a `merge_queue` rule) is authoritative and tried first; the classic
+/// `BranchProtectionRule.requiresMergeQueue` GraphQL field is not present in the current public
+/// schema (verified against the schema `octokit/graphql-schema` mirrors from introspection), so
+/// the fallback instead asks `Repository.mergeQueue(branch:)` — a schema-confirmed field that
+/// resolves to the active `MergeQueue` for that branch (from either a ruleset or classic branch
+/// protection) or `null` if none applies. See this function's summary note for the coordinator.
+///
+/// Only a REST 404/non-rate 403 triggers the GraphQL fallback; any other REST error (auth, rate
+/// limit, network, 5xx) propagates directly. If the fallback itself is inconclusive (GraphQL
+/// error, or the repository/ref can't be resolved), the result is [`MergeQueueStrategy::Unknown`]
+/// rather than a guessed `Direct`.
+pub async fn detect_merge_queue_policy(
+    client: &reqwest::Client,
+    token: &str,
+    repo_full_name: &str,
+    base_branch: &str,
+) -> Result<MergeQueuePolicy, MergeRemoteError> {
+    let mut rates = Vec::new();
+    match fetch_branch_rules(client, token, repo_full_name, base_branch, &mut rates).await? {
+        BranchRulesOutcome::Rules(rules) => {
+            let strategy = if rules_indicate_merge_queue(&rules) {
+                MergeQueueStrategy::MergeQueue
+            } else {
+                MergeQueueStrategy::Direct
+            };
+            return Ok(MergeQueuePolicy { strategy, rates });
+        }
+        BranchRulesOutcome::Inconclusive => {}
+    }
+
+    let Some((owner, repo)) = repo_full_name.split_once('/') else {
+        return Ok(MergeQueuePolicy {
+            strategy: MergeQueueStrategy::Unknown,
+            rates,
+        });
+    };
+    let query = r#"
+        query($owner: String!, $repo: String!, $branch: String!) {
+          repository(owner: $owner, name: $repo) {
+            mergeQueue(branch: $branch) { id }
+          }
+        }
+    "#;
+    let variables = serde_json::json!({ "owner": owner, "repo": repo, "branch": base_branch });
+    match graphql_request::<MergeQueueLookupData>(
+        client,
+        token,
+        query,
+        variables,
+        "merge queue lookup",
+        &mut rates,
+    )
+    .await
+    {
+        Ok(data) => {
+            let strategy = match data.repository {
+                Some(repo) if repo.merge_queue.is_some() => MergeQueueStrategy::MergeQueue,
+                Some(_) => MergeQueueStrategy::Direct,
+                None => MergeQueueStrategy::Unknown,
+            };
+            Ok(MergeQueuePolicy { strategy, rates })
+        }
+        Err(err) => Ok(MergeQueuePolicy {
+            strategy: MergeQueueStrategy::Unknown,
+            rates: err.rates,
+        }),
+    }
+}
+
+/* -------------------------------- GraphQL ---------------------------------- */
+
+const GRAPHQL_API: &str = "https://api.github.com/graphql";
+
+#[derive(Debug, Deserialize)]
+struct GraphQlErrorItem {
+    message: String,
+    #[serde(rename = "type")]
+    error_type: Option<String>,
+}
+
+// `data` is kept as an untyped `Value` (rather than a generic `T`) so this envelope itself
+// doesn't need to be generic: serde's derive would otherwise require `T: Default` for the
+// `#[serde(default)]` on `data`, even though `Option<T>` doesn't actually need it. The final
+// typed value is pulled out with `serde_json::from_value` once errors have been ruled out.
+#[derive(Debug, Deserialize)]
+struct GraphQlEnvelope {
+    #[serde(default)]
+    data: Option<serde_json::Value>,
+    #[serde(default)]
+    errors: Option<Vec<GraphQlErrorItem>>,
+}
+
+/// Classify a non-empty GraphQL `errors` array using each error's `type` (GitHub's GraphQL
+/// error extension: `NOT_FOUND`, `FORBIDDEN`, `RATE_LIMITED`, `INTERNAL`, `UNPROCESSABLE`, …).
+/// Unrecognized/absent types are treated as permanent rather than silently retried.
+fn classify_graphql_errors(errors: &[GraphQlErrorItem]) -> MergeErrorClass {
+    if errors
+        .iter()
+        .any(|e| e.error_type.as_deref() == Some("RATE_LIMITED"))
+    {
+        MergeErrorClass::Rate
+    } else if errors.iter().any(|e| {
+        matches!(
+            e.error_type.as_deref(),
+            Some("INTERNAL") | Some("SERVICE_UNAVAILABLE") | Some("TIMEOUT")
+        )
+    }) {
+        MergeErrorClass::Transient
+    } else {
+        MergeErrorClass::Permanent
+    }
+}
+
+/// POST one GraphQL request against `https://api.github.com/graphql`, using the same auth
+/// headers, rate capture (GraphQL responses carry `X-RateLimit-*` too, for the `graphql`
+/// bucket), and [`MergeRemoteError`] classes as the REST helpers. A 200 response with a
+/// non-empty `errors` array is still an error — classified via [`classify_graphql_errors`], not
+/// silently ignored in favor of a possibly-null `data`.
+async fn graphql_request<T: for<'de> Deserialize<'de>>(
+    client: &reqwest::Client,
+    token: &str,
+    query: &str,
+    variables: serde_json::Value,
+    what: &'static str,
+    rates: &mut Vec<RateLimit>,
+) -> Result<T, MergeRemoteError> {
+    let body = serde_json::json!({ "query": query, "variables": variables });
+    let response = authed(client.post(GRAPHQL_API).json(&body), token)
+        .send()
+        .await
+        .map_err(|e| MergeRemoteError {
+            class: MergeErrorClass::Transient,
+            message: format!("network error: {e}"),
+            rates: std::mem::take(rates),
+        })?;
+    let status = response.status();
+    let mut rate = RateLimit::default();
+    rate.update_from(response.headers());
+    rates.push(rate.clone());
+    if !status.is_success() {
+        let body_text = response.text().await.unwrap_or_default().trim().to_string();
+        return Err(merge_error(status, body_text, &rate, rates));
+    }
+    let parsed: GraphQlEnvelope = response.json().await.map_err(|e| MergeRemoteError {
+        class: MergeErrorClass::Transient,
+        message: format!("failed to parse {what}: {e}"),
+        rates: std::mem::take(rates),
+    })?;
+    if let Some(errors) = parsed.errors {
+        if !errors.is_empty() {
+            let class = classify_graphql_errors(&errors);
+            let message = errors
+                .into_iter()
+                .map(|e| e.message)
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(MergeRemoteError {
+                class,
+                message: format!("GraphQL error for {what}: {message}"),
+                rates: std::mem::take(rates),
+            });
+        }
+    }
+    match parsed.data {
+        Some(value) if !value.is_null() => {
+            serde_json::from_value(value).map_err(|e| MergeRemoteError {
+                class: MergeErrorClass::Transient,
+                message: format!("failed to parse {what}: {e}"),
+                rates: std::mem::take(rates),
+            })
+        }
+        _ => Err(MergeRemoteError {
+            class: MergeErrorClass::Transient,
+            message: format!("GraphQL response for {what} had no data"),
+            rates: std::mem::take(rates),
+        }),
+    }
+}
+
+/* ---------------------------- PR queue status query ------------------------ */
+
+/// A merge-queue entry attached to a pull request (`PullRequest.mergeQueueEntry`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MergeQueueEntryStatus {
+    pub id: String,
+    pub position: Option<i64>,
+    pub state: Option<String>,
+}
+
+/// A pull request's merge-readiness, as seen through GraphQL. `check_status` is the head
+/// commit's `statusCheckRollup.state` (`SUCCESS`/`FAILURE`/`PENDING`/`ERROR`/`EXPECTED`, or
+/// `None` if GitHub has no rollup yet).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PrQueueStatus {
+    pub node_id: String,
+    pub head_oid: String,
+    pub state: String,
+    pub merged: bool,
+    pub mergeable: Option<String>,
+    pub review_decision: Option<String>,
+    pub check_status: Option<String>,
+    pub auto_merge_enabled: bool,
+    pub merge_queue_entry: Option<MergeQueueEntryStatus>,
+}
+
+pub struct PrQueueStatusResult {
+    pub status: Option<PrQueueStatus>,
+    pub rates: Vec<RateLimit>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PrQueueStatusData {
+    repository: Option<PrQueueRepo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PrQueueRepo {
+    #[serde(rename = "pullRequest")]
+    pull_request: Option<PrQueueNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PrQueueNode {
+    id: String,
+    #[serde(rename = "headRefOid")]
+    head_ref_oid: String,
+    state: String,
+    merged: bool,
+    mergeable: Option<String>,
+    #[serde(rename = "reviewDecision")]
+    review_decision: Option<String>,
+    #[serde(rename = "autoMergeRequest")]
+    auto_merge_request: Option<serde_json::Value>,
+    #[serde(rename = "mergeQueueEntry")]
+    merge_queue_entry: Option<GraphQlMergeQueueEntry>,
+    commits: Option<PrQueueCommits>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphQlMergeQueueEntry {
+    id: String,
+    position: Option<i64>,
+    state: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PrQueueCommits {
+    nodes: Vec<PrQueueCommitNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PrQueueCommitNode {
+    commit: PrQueueCommitInner,
+}
+
+#[derive(Debug, Deserialize)]
+struct PrQueueCommitInner {
+    #[serde(rename = "statusCheckRollup")]
+    status_check_rollup: Option<PrQueueRollup>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PrQueueRollup {
+    state: String,
+}
+
+/// Fetch a pull request's queue-relevant status via GraphQL: node ID, head OID, merged/open
+/// state, mergeable/review/check status, whether auto-merge is enabled, and its merge-queue
+/// entry (ID/position/state) when one exists. Returns `status: None` (rather than an error) if
+/// the PR itself can't be resolved (e.g. `repository` or `pullRequest` came back null) — a
+/// GraphQL-level error still propagates as [`MergeRemoteError`].
+pub async fn fetch_pr_queue_status(
+    client: &reqwest::Client,
+    token: &str,
+    repo_full_name: &str,
+    number: i64,
+) -> Result<PrQueueStatusResult, MergeRemoteError> {
+    let mut rates = Vec::new();
+    let Some((owner, repo)) = repo_full_name.split_once('/') else {
+        return Err(MergeRemoteError {
+            class: MergeErrorClass::Permanent,
+            message: format!("'{repo_full_name}' is not an owner/repo full name"),
+            rates,
+        });
+    };
+    let query = r#"
+        query($owner: String!, $repo: String!, $number: Int!) {
+          repository(owner: $owner, name: $repo) {
+            pullRequest(number: $number) {
+              id
+              headRefOid
+              state
+              merged
+              mergeable
+              reviewDecision
+              autoMergeRequest { enabledAt }
+              mergeQueueEntry { id position state }
+              commits(last: 1) {
+                nodes {
+                  commit {
+                    statusCheckRollup { state }
+                  }
+                }
+              }
+            }
+          }
+        }
+    "#;
+    let variables = serde_json::json!({ "owner": owner, "repo": repo, "number": number });
+    let data: PrQueueStatusData = graphql_request(
+        client,
+        token,
+        query,
+        variables,
+        "pull request queue status",
+        &mut rates,
+    )
+    .await?;
+    let status = data.repository.and_then(|r| r.pull_request).map(|pr| {
+        let check_status = pr
+            .commits
+            .and_then(|commits| commits.nodes.into_iter().next())
+            .and_then(|node| node.commit.status_check_rollup)
+            .map(|rollup| rollup.state);
+        PrQueueStatus {
+            node_id: pr.id,
+            head_oid: pr.head_ref_oid,
+            state: pr.state,
+            merged: pr.merged,
+            mergeable: pr.mergeable,
+            review_decision: pr.review_decision,
+            check_status,
+            auto_merge_enabled: pr.auto_merge_request.is_some(),
+            merge_queue_entry: pr.merge_queue_entry.map(|entry| MergeQueueEntryStatus {
+                id: entry.id,
+                position: entry.position,
+                state: entry.state,
+            }),
+        }
+    });
+    Ok(PrQueueStatusResult { status, rates })
+}
+
+/* ------------------------------ Queue mutations ----------------------------- */
+
+/// Whether a GraphQL business-logic error indicates the mutation's target state was already
+/// applied (e.g. dequeuing a PR that already left the queue, or enabling auto-merge that's
+/// already on). Treating these as success makes the enqueue/dequeue/auto-merge mutations
+/// idempotent — safe to retry after an ambiguous prior attempt (e.g. a timeout where GitHub may
+/// have applied the mutation before the response was lost).
+fn is_already_applied_error(message: &str) -> bool {
+    let normalized = message.to_lowercase();
+    normalized.contains("already enabled")
+        || normalized.contains("already queued")
+        || normalized.contains("already merged")
+        || normalized.contains("not enabled")
+        || normalized.contains("not on the queue")
+        || normalized.contains("not in the queue")
+        || normalized.contains("not currently queued")
+        || normalized.contains("not enqueued")
+}
+
+/// Run one GraphQL mutation behind the shared mutation guard: acquire the guard, check
+/// cancellation *after* acquiring it and *before* dispatching (so a request already sent to
+/// GitHub always wins the race — same discipline as [`process_dependabot_merge_operation`]),
+/// then dispatch. A business-logic error that means the target state already holds (see
+/// [`is_already_applied_error`]) is folded into `Applied` rather than propagated.
+async fn run_guarded_mutation<Cancelled>(
+    client: &reqwest::Client,
+    token: &str,
+    query: &str,
+    variables: serde_json::Value,
+    what: &'static str,
+    mutation_guard: &tokio::sync::Mutex<()>,
+    is_cancelled: Cancelled,
+) -> Result<MutationResult, MergeRemoteError>
+where
+    Cancelled: Fn() -> bool,
+{
+    let mut rates = Vec::new();
+    let _mutation_lease = mutation_guard.lock().await;
+    if is_cancelled() {
+        return Ok(MutationResult {
+            outcome: MutationOutcome::Cancelled,
+            rates,
+        });
+    }
+    match graphql_request::<serde_json::Value>(client, token, query, variables, what, &mut rates)
+        .await
+    {
+        Ok(_) => Ok(MutationResult {
+            outcome: MutationOutcome::Applied,
+            rates,
+        }),
+        Err(err) if is_already_applied_error(&err.message) => Ok(MutationResult {
+            outcome: MutationOutcome::Applied,
+            rates: err.rates,
+        }),
+        Err(err) => Err(err),
+    }
+}
+
+/// Enable auto-merge (always `SQUASH`) on a pull request, bound to `expected_head_oid` so it
+/// can't silently apply to a head the caller hasn't validated.
+pub async fn enable_pr_auto_merge<Cancelled>(
+    client: &reqwest::Client,
+    token: &str,
+    pull_request_node_id: &str,
+    expected_head_oid: &str,
+    mutation_guard: &tokio::sync::Mutex<()>,
+    is_cancelled: Cancelled,
+) -> Result<MutationResult, MergeRemoteError>
+where
+    Cancelled: Fn() -> bool,
+{
+    let query = r#"
+        mutation($pullRequestId: ID!, $expectedHeadOid: GitObjectID!) {
+          enablePullRequestAutoMerge(input: {
+            pullRequestId: $pullRequestId
+            expectedHeadOid: $expectedHeadOid
+            mergeMethod: SQUASH
+          }) {
+            clientMutationId
+          }
+        }
+    "#;
+    let variables = serde_json::json!({
+        "pullRequestId": pull_request_node_id,
+        "expectedHeadOid": expected_head_oid,
+    });
+    run_guarded_mutation(
+        client,
+        token,
+        query,
+        variables,
+        "enable auto-merge",
+        mutation_guard,
+        is_cancelled,
+    )
+    .await
+}
+
+/// Disable auto-merge on a pull request.
+pub async fn disable_pr_auto_merge<Cancelled>(
+    client: &reqwest::Client,
+    token: &str,
+    pull_request_node_id: &str,
+    mutation_guard: &tokio::sync::Mutex<()>,
+    is_cancelled: Cancelled,
+) -> Result<MutationResult, MergeRemoteError>
+where
+    Cancelled: Fn() -> bool,
+{
+    let query = r#"
+        mutation($pullRequestId: ID!) {
+          disablePullRequestAutoMerge(input: { pullRequestId: $pullRequestId }) {
+            clientMutationId
+          }
+        }
+    "#;
+    let variables = serde_json::json!({ "pullRequestId": pull_request_node_id });
+    run_guarded_mutation(
+        client,
+        token,
+        query,
+        variables,
+        "disable auto-merge",
+        mutation_guard,
+        is_cancelled,
+    )
+    .await
+}
+
+/// Enqueue a pull request into its repository's merge queue, bound to `expected_head_oid`.
+/// Always enqueues at the back (`jump: false`) — Helix's FIFO queue owns ordering, so a Helix
+/// request must never jump ahead of what GitHub's queue already holds.
+pub async fn enqueue_pr<Cancelled>(
+    client: &reqwest::Client,
+    token: &str,
+    pull_request_node_id: &str,
+    expected_head_oid: &str,
+    mutation_guard: &tokio::sync::Mutex<()>,
+    is_cancelled: Cancelled,
+) -> Result<MutationResult, MergeRemoteError>
+where
+    Cancelled: Fn() -> bool,
+{
+    let query = r#"
+        mutation($pullRequestId: ID!, $expectedHeadOid: GitObjectID!, $jump: Boolean!) {
+          enqueuePullRequest(input: {
+            pullRequestId: $pullRequestId
+            expectedHeadOid: $expectedHeadOid
+            jump: $jump
+          }) {
+            mergeQueueEntry { id }
+          }
+        }
+    "#;
+    let variables = serde_json::json!({
+        "pullRequestId": pull_request_node_id,
+        "expectedHeadOid": expected_head_oid,
+        "jump": false,
+    });
+    run_guarded_mutation(
+        client,
+        token,
+        query,
+        variables,
+        "enqueue pull request",
+        mutation_guard,
+        is_cancelled,
+    )
+    .await
+}
+
+/// Dequeue a pull request from its repository's merge queue.
+pub async fn dequeue_pr<Cancelled>(
+    client: &reqwest::Client,
+    token: &str,
+    pull_request_node_id: &str,
+    mutation_guard: &tokio::sync::Mutex<()>,
+    is_cancelled: Cancelled,
+) -> Result<MutationResult, MergeRemoteError>
+where
+    Cancelled: Fn() -> bool,
+{
+    let query = r#"
+        mutation($id: ID!) {
+          dequeuePullRequest(input: { id: $id }) {
+            clientMutationId
+          }
+        }
+    "#;
+    let variables = serde_json::json!({ "id": pull_request_node_id });
+    run_guarded_mutation(
+        client,
+        token,
+        query,
+        variables,
+        "dequeue pull request",
+        mutation_guard,
+        is_cancelled,
+    )
+    .await
+}
+
 /// Apply the standard GitHub headers (auth, accept, pinned API version, user-agent) to a
 /// request builder. Shared by every verb so the discipline in `AGENT.md` is applied once.
 fn authed(builder: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
@@ -851,6 +2644,135 @@ mod tests {
         assert!(!is_dependabot_author("octocat"));
         assert!(!is_dependabot_author("renovate[bot]"));
         assert!(!is_dependabot_author("dependabot")); // not a bot login
+    }
+
+    #[test]
+    fn merge_errors_keep_sha_races_retryable() {
+        let classify = |status: reqwest::StatusCode, body: &str| {
+            merge_error(
+                status,
+                body.to_string(),
+                &RateLimit::default(),
+                &mut Vec::new(),
+            )
+            .class
+        };
+        assert_eq!(
+            classify(reqwest::StatusCode::CONFLICT, "Head branch was modified"),
+            MergeErrorClass::Transient
+        );
+        assert_eq!(
+            classify(
+                reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+                "The expected head sha does not match the pull request head."
+            ),
+            MergeErrorClass::Transient
+        );
+        assert_eq!(
+            classify(reqwest::StatusCode::UNAUTHORIZED, ""),
+            MergeErrorClass::Auth
+        );
+        assert_eq!(
+            classify(reqwest::StatusCode::FORBIDDEN, "API rate limit exceeded"),
+            MergeErrorClass::Rate
+        );
+        assert_eq!(
+            classify(
+                reqwest::StatusCode::FORBIDDEN,
+                "Resource not accessible by personal access token"
+            ),
+            MergeErrorClass::Auth
+        );
+        assert_eq!(
+            classify(reqwest::StatusCode::METHOD_NOT_ALLOWED, "Merge not allowed"),
+            MergeErrorClass::Permanent
+        );
+    }
+
+    #[test]
+    fn commit_validation_accepts_only_the_expected_pat_update_merge() {
+        let commit = |sha: &str, author: &str, parents: &[&str]| MergeCommit {
+            sha: sha.to_string(),
+            author: Some(SubjectUser {
+                login: author.to_string(),
+            }),
+            parents: parents
+                .iter()
+                .map(|sha| MergeCommitParent {
+                    sha: (*sha).to_string(),
+                })
+                .collect(),
+        };
+        let dependabot = commit("old-head", "dependabot[bot]", &["base"]);
+        let expected_update = commit("update-1", "octocat", &["old-head", "new-base"]);
+        assert_eq!(
+            merge_commits_are_safe(
+                &[dependabot, expected_update],
+                "update-1",
+                "octocat",
+                Some("old-head")
+            ),
+            MergeCommitValidation::Safe
+        );
+
+        for invalid in [
+            commit("update-1", "octocat", &["old-head"]),
+            commit("update-1", "octocat", &["new-base", "old-head"]),
+            commit("update-1", "octocat", &["old-head", "new-base", "other"]),
+        ] {
+            assert_eq!(
+                merge_commits_are_safe(
+                    &[commit("old-head", "dependabot[bot]", &["base"]), invalid],
+                    "update-1",
+                    "octocat",
+                    Some("old-head")
+                ),
+                MergeCommitValidation::Unsafe
+            );
+        }
+        let updates = [
+            commit("old-head", "dependabot[bot]", &["base"]),
+            commit("update-1", "octocat", &["old-head", "new-base-1"]),
+            commit("update-2", "octocat", &["update-1", "new-base-2"]),
+        ];
+        assert_eq!(
+            merge_commits_are_safe(&updates, "update-2", "octocat", Some("old-head")),
+            MergeCommitValidation::Safe
+        );
+        assert_eq!(
+            merge_commits_are_safe(&updates, "update-2", "octocat", Some("update-1")),
+            MergeCommitValidation::Safe
+        );
+        assert_eq!(
+            merge_commits_are_safe(
+                &[
+                    commit("old-head", "dependabot[bot]", &["base"]),
+                    commit("update-1", "octocat", &["old-head", "new-base-1"]),
+                    commit("update-2", "octocat", &["update-1", "new-base-2"]),
+                    commit("update-3", "octocat", &["update-2", "new-base-3"])
+                ],
+                "update-3",
+                "octocat",
+                Some("update-2")
+            ),
+            MergeCommitValidation::Safe
+        );
+        assert_eq!(
+            merge_commits_are_safe(
+                &[commit("safe-prefix", "dependabot[bot]", &["base"])],
+                "unreturned-head",
+                "octocat",
+                None
+            ),
+            MergeCommitValidation::HeadChanged
+        );
+        let capped: Vec<_> = (0..250)
+            .map(|index| commit(&format!("commit-{index}"), "dependabot[bot]", &["parent"]))
+            .collect();
+        assert_eq!(
+            merge_commits_are_safe(&capped, "commit-249", "octocat", None),
+            MergeCommitValidation::Unsafe
+        );
     }
 
     #[test]
@@ -1019,5 +2941,399 @@ mod tests {
             .into();
         assert_eq!(resolved.state.as_deref(), Some("open"));
         assert_eq!(resolved.mergeable_state.as_deref(), Some("clean"));
+    }
+
+    #[test]
+    fn direct_merge_attempts_clean_and_unstable_pull_requests() {
+        assert!(direct_merge_attempt_allowed(Some("clean")));
+        assert!(
+            direct_merge_attempt_allowed(Some("unstable")),
+            "GitHub's merge endpoint must decide whether a non-passing status is required"
+        );
+        for state in ["blocked", "behind", "dirty", "draft", "unknown"] {
+            assert!(
+                !direct_merge_attempt_allowed(Some(state)),
+                "{state} must not trigger a merge attempt"
+            );
+        }
+        assert!(!direct_merge_attempt_allowed(None));
+    }
+
+    #[test]
+    fn merge_refusal_uses_github_message_or_safe_fallback() {
+        assert_eq!(
+            merge_refusal_message(r#"{"message":"Pull Request is not mergeable"}"#),
+            "Pull Request is not mergeable"
+        );
+        assert_eq!(
+            merge_refusal_message(r#"{"message":""}"#),
+            "GitHub is still blocking this merge."
+        );
+        assert_eq!(
+            merge_refusal_message("not json"),
+            "GitHub is still blocking this merge."
+        );
+    }
+
+    #[test]
+    fn disallowed_squash_merge_is_a_permanent_refusal() {
+        assert!(squash_merge_is_disallowed(
+            "Squash merges are not allowed on this repository."
+        ));
+        assert!(!squash_merge_is_disallowed("Pull Request is not mergeable"));
+    }
+
+    #[test]
+    fn compare_url_encodes_refs_as_one_path_segment() {
+        let url = compare_url("octo/repo", "release/next", "abc123").unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://api.github.com/repos/octo/repo/compare/release%2Fnext...abc123"
+        );
+        assert!(compare_url("missing-repo-owner", "main", "abc123").is_none());
+    }
+
+    #[test]
+    fn compare_response_reports_commits_missing_from_the_head() {
+        let comparison: CompareResponse =
+            serde_json::from_str(r#"{"behind_by":5,"ahead_by":1}"#).unwrap();
+        assert_eq!(comparison.behind_by, 5);
+    }
+
+    /* ------------------------- exact-head check diagnosis ------------------- */
+
+    #[test]
+    fn pending_status_covers_every_non_completed_value() {
+        for status in ["queued", "in_progress", "waiting", "requested", "pending"] {
+            assert!(
+                is_check_pending_status(status),
+                "{status} should be pending"
+            );
+        }
+        assert!(!is_check_pending_status("completed"));
+    }
+
+    #[test]
+    fn failure_conclusions_exclude_green_and_neutral_outcomes() {
+        for conclusion in [
+            "failure",
+            "timed_out",
+            "cancelled",
+            "action_required",
+            "startup_failure",
+        ] {
+            assert!(
+                is_failure_conclusion(conclusion),
+                "{conclusion} should be a failure"
+            );
+        }
+        for conclusion in ["success", "neutral", "skipped", "stale"] {
+            assert!(
+                !is_failure_conclusion(conclusion),
+                "{conclusion} should not be a failure"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_status_failure_states_are_error_and_failure_only() {
+        assert!(is_failure_status_state("failure"));
+        assert!(is_failure_status_state("error"));
+        assert!(!is_failure_status_state("pending"));
+        assert!(!is_failure_status_state("success"));
+    }
+
+    #[test]
+    fn check_run_deserializes_actions_app_slug() {
+        let body = r#"{
+            "check_runs": [
+                {
+                    "name": "build",
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "details_url": "https://github.com/o/r/runs/1",
+                    "app": { "slug": "github-actions" }
+                },
+                {
+                    "name": "lint / eslint",
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "details_url": "https://circleci.com/o/r/2",
+                    "app": { "slug": "circleci-checks" }
+                },
+                {
+                    "name": "no-app-check",
+                    "status": "queued",
+                    "conclusion": null,
+                    "details_url": null,
+                    "app": null
+                }
+            ]
+        }"#;
+        let parsed: CheckRunsResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed.check_runs.len(), 3);
+        assert_eq!(
+            parsed.check_runs[0].app.as_ref().unwrap().slug.as_deref(),
+            Some("github-actions")
+        );
+        assert_eq!(
+            parsed.check_runs[1].app.as_ref().unwrap().slug.as_deref(),
+            Some("circleci-checks")
+        );
+        assert!(parsed.check_runs[2].app.is_none());
+        assert!(is_check_pending_status(&parsed.check_runs[2].status));
+    }
+
+    /// A GitHub Actions check run must never be classified as an "external" failure — its
+    /// workflow run (with a rerunnable `run_id`) is the source of truth for Actions failures.
+    /// This exercises the same routing logic `diagnose_exact_head_checks` applies per check run.
+    #[test]
+    fn actions_check_runs_are_excluded_from_external_classification() {
+        let is_actions =
+            |slug: Option<&str>| slug.is_some_and(|slug| slug == GITHUB_ACTIONS_APP_SLUG);
+        assert!(is_actions(Some("github-actions")));
+        assert!(!is_actions(Some("circleci-checks")));
+        assert!(!is_actions(None));
+    }
+
+    #[test]
+    fn workflow_run_deserializes_with_optional_run_attempt() {
+        let body = r#"{
+            "workflow_runs": [
+                { "id": 1, "run_attempt": 2, "name": "CI", "status": "completed", "conclusion": "failure" },
+                { "id": 2, "name": "Deploy", "status": "in_progress", "conclusion": null }
+            ]
+        }"#;
+        let parsed: WorkflowRunsResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed.workflow_runs[0].run_attempt, Some(2));
+        assert_eq!(
+            parsed.workflow_runs[0].conclusion.as_deref(),
+            Some("failure")
+        );
+        assert_eq!(parsed.workflow_runs[1].run_attempt, None);
+        assert!(is_check_pending_status(&parsed.workflow_runs[1].status));
+    }
+
+    #[test]
+    fn combined_status_deserializes_contexts() {
+        let body = r#"{
+            "state": "failure",
+            "statuses": [
+                { "state": "failure", "context": "ci/jenkins", "target_url": "https://jenkins/1", "description": "failed" },
+                { "state": "pending", "context": "ci/circleci", "target_url": null, "description": null }
+            ]
+        }"#;
+        let parsed: CombinedStatusResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed.statuses[0].context, "ci/jenkins");
+        assert!(is_failure_status_state(&parsed.statuses[0].state));
+        assert_eq!(parsed.statuses[1].context, "ci/circleci");
+        assert!(!is_failure_status_state(&parsed.statuses[1].state));
+    }
+
+    /* ---------------------------- merge-queue policy ------------------------- */
+
+    #[test]
+    fn branch_rules_detect_merge_queue_by_type() {
+        let body = r#"[{"type": "pull_request"}, {"type": "merge_queue"}]"#;
+        let rules: Vec<BranchRuleItem> = serde_json::from_str(body).unwrap();
+        assert!(rules_indicate_merge_queue(&rules));
+
+        let body = r#"[{"type": "pull_request"}, {"type": "required_status_checks"}]"#;
+        let rules: Vec<BranchRuleItem> = serde_json::from_str(body).unwrap();
+        assert!(!rules_indicate_merge_queue(&rules));
+
+        let rules: Vec<BranchRuleItem> = serde_json::from_str("[]").unwrap();
+        assert!(!rules_indicate_merge_queue(&rules));
+    }
+
+    #[test]
+    fn merge_queue_lookup_data_distinguishes_present_absent_and_unresolved() {
+        // An active merge queue on the branch.
+        let data: MergeQueueLookupData =
+            serde_json::from_str(r#"{"repository": {"mergeQueue": {"id": "MQ_1"}}}"#).unwrap();
+        assert!(data.repository.unwrap().merge_queue.is_some());
+
+        // No merge queue configured for the branch — a definitive "direct" answer.
+        let data: MergeQueueLookupData =
+            serde_json::from_str(r#"{"repository": {"mergeQueue": null}}"#).unwrap();
+        assert!(data.repository.unwrap().merge_queue.is_none());
+
+        // Repository itself couldn't be resolved — ambiguous, must not default to "direct".
+        let data: MergeQueueLookupData = serde_json::from_str(r#"{"repository": null}"#).unwrap();
+        assert!(data.repository.is_none());
+    }
+
+    /* -------------------------------- GraphQL --------------------------------- */
+
+    #[test]
+    fn graphql_errors_array_parses_and_classifies() {
+        let body = r#"{
+            "data": null,
+            "errors": [
+                { "type": "RATE_LIMITED", "message": "API rate limit exceeded" }
+            ]
+        }"#;
+        let envelope: GraphQlEnvelope = serde_json::from_str(body).unwrap();
+        let errors = envelope.errors.unwrap();
+        assert_eq!(classify_graphql_errors(&errors), MergeErrorClass::Rate);
+
+        let transient = [GraphQlErrorItem {
+            message: "internal error".into(),
+            error_type: Some("INTERNAL".into()),
+        }];
+        assert_eq!(
+            classify_graphql_errors(&transient),
+            MergeErrorClass::Transient
+        );
+
+        let permanent = [GraphQlErrorItem {
+            message: "Could not resolve to a PullRequest".into(),
+            error_type: Some("NOT_FOUND".into()),
+        }];
+        assert_eq!(
+            classify_graphql_errors(&permanent),
+            MergeErrorClass::Permanent
+        );
+
+        let untyped = [GraphQlErrorItem {
+            message: "something went wrong".into(),
+            error_type: None,
+        }];
+        assert_eq!(
+            classify_graphql_errors(&untyped),
+            MergeErrorClass::Permanent
+        );
+    }
+
+    #[test]
+    fn graphql_envelope_tolerates_missing_errors_key() {
+        // A successful response typically omits `errors` entirely.
+        let body = r#"{"data": {"repository": null}}"#;
+        let envelope: GraphQlEnvelope = serde_json::from_str(body).unwrap();
+        assert!(envelope.errors.is_none());
+        assert!(envelope.data.is_some());
+    }
+
+    #[test]
+    fn pr_queue_status_data_parses_full_shape() {
+        let body = r#"{
+            "repository": {
+                "pullRequest": {
+                    "id": "PR_kw",
+                    "headRefOid": "abc123",
+                    "state": "OPEN",
+                    "merged": false,
+                    "mergeable": "MERGEABLE",
+                    "reviewDecision": "APPROVED",
+                    "autoMergeRequest": { "enabledAt": "2026-01-01T00:00:00Z" },
+                    "mergeQueueEntry": { "id": "MQE_1", "position": 3, "state": "QUEUED" },
+                    "commits": {
+                        "nodes": [
+                            { "commit": { "statusCheckRollup": { "state": "PENDING" } } }
+                        ]
+                    }
+                }
+            }
+        }"#;
+        let data: PrQueueStatusData = serde_json::from_str(body).unwrap();
+        let pr = data.repository.unwrap().pull_request.unwrap();
+        assert_eq!(pr.id, "PR_kw");
+        assert_eq!(pr.head_ref_oid, "abc123");
+        assert!(pr.auto_merge_request.is_some());
+        let entry = pr.merge_queue_entry.unwrap();
+        assert_eq!(entry.position, Some(3));
+        assert_eq!(entry.state.as_deref(), Some("QUEUED"));
+        assert_eq!(
+            pr.commits
+                .unwrap()
+                .nodes
+                .into_iter()
+                .next()
+                .unwrap()
+                .commit
+                .status_check_rollup
+                .unwrap()
+                .state,
+            "PENDING"
+        );
+    }
+
+    #[test]
+    fn pr_queue_status_data_tolerates_no_merge_queue_entry() {
+        let body = r#"{
+            "repository": {
+                "pullRequest": {
+                    "id": "PR_kw",
+                    "headRefOid": "abc123",
+                    "state": "OPEN",
+                    "merged": false,
+                    "mergeable": "UNKNOWN",
+                    "reviewDecision": null,
+                    "autoMergeRequest": null,
+                    "mergeQueueEntry": null,
+                    "commits": { "nodes": [] }
+                }
+            }
+        }"#;
+        let data: PrQueueStatusData = serde_json::from_str(body).unwrap();
+        let pr = data.repository.unwrap().pull_request.unwrap();
+        assert!(pr.auto_merge_request.is_none());
+        assert!(pr.merge_queue_entry.is_none());
+        assert!(pr.commits.unwrap().nodes.is_empty());
+    }
+
+    /* ---------------------------- queue-mutation idempotency ----------------- */
+
+    #[test]
+    fn already_applied_errors_are_recognized_across_all_four_mutations() {
+        for message in [
+            "GraphQL error for enable auto-merge: Auto-merge is already enabled",
+            "GraphQL error for disable auto-merge: Auto-merge is not enabled for this pull request",
+            "GraphQL error for enqueue pull request: This pull request is already queued",
+            "GraphQL error for dequeue pull request: This pull request is not on the queue",
+            "GraphQL error for dequeue pull request: The pull request is not currently queued",
+        ] {
+            assert!(
+                is_already_applied_error(message),
+                "{message} should be idempotent-noop"
+            );
+        }
+    }
+
+    #[test]
+    fn genuine_mutation_errors_are_not_treated_as_already_applied() {
+        for message in [
+            "GraphQL error for enqueue pull request: The expected head OID does not match",
+            "GitHub returned 403: Resource not accessible by personal access token",
+            "network error: connection refused",
+        ] {
+            assert!(
+                !is_already_applied_error(message),
+                "{message} should be a real error"
+            );
+        }
+    }
+
+    /* -------------------------- request-shape assertions ---------------------- */
+
+    #[test]
+    fn enqueue_pr_variables_always_pin_jump_false() {
+        let variables = serde_json::json!({
+            "pullRequestId": "PR_1",
+            "expectedHeadOid": "deadbeef",
+            "jump": false,
+        });
+        assert_eq!(variables["jump"], serde_json::json!(false));
+        assert_eq!(variables["pullRequestId"], serde_json::json!("PR_1"));
+        assert_eq!(variables["expectedHeadOid"], serde_json::json!("deadbeef"));
+    }
+
+    #[test]
+    fn dequeue_pr_variables_use_the_pull_request_id_as_the_input_id() {
+        // DequeuePullRequestInput's only field is `id`, documented as "The ID of the pull
+        // request to be dequeued" — not a merge-queue-entry ID.
+        let variables = serde_json::json!({ "id": "PR_1" });
+        assert_eq!(variables["id"], serde_json::json!("PR_1"));
+        assert!(variables.get("mergeQueueEntryId").is_none());
     }
 }

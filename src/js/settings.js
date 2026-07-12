@@ -1,8 +1,13 @@
 import { invoke } from "./api.js";
-import { FALLBACK_MIN_POLL_INTERVAL_S, SETTINGS_DEBOUNCE_MS } from "./constants.js";
+import {
+  FALLBACK_MIN_DEPENDABOT_MERGE_POLL_INTERVAL_S,
+  FALLBACK_MIN_POLL_INTERVAL_S,
+  SETTINGS_DEBOUNCE_MS,
+} from "./constants.js";
 import { $, $$, flash } from "./dom.js";
-import { poll } from "./state.js";
+import { dependabotMergePoll, poll } from "./state.js";
 import { startPolling, updateSyncButtonHint } from "./sync.js";
+import { startDependabotMergePolling } from "./dependabot.js";
 import { isAuthenticated } from "./account.js";
 import { isShortcutsOpen } from "./shortcuts.js";
 import { hideModulePanes, showActiveModulePane } from "./modules.js";
@@ -117,6 +122,16 @@ function applyPollMin(seconds) {
   if (label) label.textContent = String(poll.minIntervalS);
 }
 
+function applyDependabotMergePollMin(seconds) {
+  dependabotMergePoll.minIntervalS = Number.isInteger(seconds)
+    ? seconds
+    : FALLBACK_MIN_DEPENDABOT_MERGE_POLL_INTERVAL_S;
+  const input = $("#dependabot-merge-poll-interval");
+  if (input) input.min = String(dependabotMergePoll.minIntervalS);
+  const label = $("#dependabot-merge-poll-min-label");
+  if (label) label.textContent = String(dependabotMergePoll.minIntervalS);
+}
+
 /** Show/hide the note explaining that GitHub's requested cadence is raising the user's
  *  interval, so the setting doesn't look silently ignored. Reads the latest floor captured
  *  from sync status (`poll.githubFloorS`); safe to call whenever the pane is shown. */
@@ -138,8 +153,11 @@ export async function loadSettings() {
     const s = await invoke("get_settings");
     // The backend owns the floor; mirror it onto the input + local validation.
     applyPollMin(s.min_poll_interval_s);
+    applyDependabotMergePollMin(s.min_dependabot_merge_poll_interval_s);
     $("#poll-interval").value = s.poll_interval_s;
     poll.intervalSeconds = s.poll_interval_s;
+    $("#dependabot-merge-poll-interval").value = s.dependabot_merge_poll_interval_s;
+    dependabotMergePoll.intervalSeconds = s.dependabot_merge_poll_interval_s;
     updateSyncingNote();
     updateSyncButtonHint();
     const themeInput = $(`input[name="theme"][value="${s.theme}"]`);
@@ -203,6 +221,10 @@ async function applySettings() {
   const seq = ++settingsApplySeq;
 
   const pollIntervalS = Number.parseInt($("#poll-interval").value, 10);
+  const dependabotMergePollIntervalS = Number.parseInt(
+    $("#dependabot-merge-poll-interval").value,
+    10,
+  );
 
   // Guard against NaN / out-of-range input before invoking the backend (NaN would
   // serialize to null over IPC and surface a confusing error).
@@ -210,10 +232,17 @@ async function applySettings() {
     setSettingsError(`Min ${poll.minIntervalS}s`);
     return;
   }
+  if (
+    !Number.isInteger(dependabotMergePollIntervalS) ||
+    dependabotMergePollIntervalS < dependabotMergePoll.minIntervalS
+  ) {
+    setSettingsError(`Dependabot merge minimum ${dependabotMergePoll.minIntervalS}s`);
+    return;
+  }
   clearSettingsError();
 
   try {
-    const s = await invoke("save_settings", { pollIntervalS });
+    const s = await invoke("save_settings", { pollIntervalS, dependabotMergePollIntervalS });
     // Ignore a stale response superseded by a newer apply, so it can't clobber the
     // current UI state or show an outdated flash.
     if (seq !== settingsApplySeq) return;
@@ -223,6 +252,10 @@ async function applySettings() {
     if (s.poll_interval_s !== poll.intervalSeconds) {
       poll.intervalSeconds = s.poll_interval_s;
       if (isAuthenticated()) startPolling();
+    }
+    if (s.dependabot_merge_poll_interval_s !== dependabotMergePoll.intervalSeconds) {
+      dependabotMergePoll.intervalSeconds = s.dependabot_merge_poll_interval_s;
+      if (isAuthenticated()) startDependabotMergePolling();
     }
     // The user's interval may now be below/above GitHub's floor — refresh the note + tooltip.
     updateSyncingNote();
@@ -282,14 +315,17 @@ export function initSettings() {
   // Apply the fallback floor synchronously so the input has a sane `min` before the async
   // loadSettings() resolves with the backend's authoritative value.
   applyPollMin(FALLBACK_MIN_POLL_INTERVAL_S);
-  $("#poll-interval").addEventListener("input", () => {
-    clearTimeout(settingsDebounce);
-    settingsDebounce = setTimeout(applySettings, SETTINGS_DEBOUNCE_MS);
-  });
-  $("#poll-interval").addEventListener("change", () => {
-    clearTimeout(settingsDebounce);
-    applySettings();
-  });
+  applyDependabotMergePollMin(FALLBACK_MIN_DEPENDABOT_MERGE_POLL_INTERVAL_S);
+  for (const id of ["#poll-interval", "#dependabot-merge-poll-interval"]) {
+    $(id).addEventListener("input", () => {
+      clearTimeout(settingsDebounce);
+      settingsDebounce = setTimeout(applySettings, SETTINGS_DEBOUNCE_MS);
+    });
+    $(id).addEventListener("change", () => {
+      clearTimeout(settingsDebounce);
+      applySettings();
+    });
+  }
 
   // Theme picker: paint + persist independently of the rest of the settings form, so
   // toggling theme always saves even if another field (e.g. poll interval) is mid-edit.

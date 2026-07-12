@@ -1,13 +1,19 @@
 import { invoke, listen } from "./api.js";
 import { $, html, toast, announce } from "./dom.js";
-import { STATES } from "./constants.js";
+import { POLL_TICK_MS, STATES } from "./constants.js";
 import { relTime } from "./format.js";
-import { filterDependabotGroups, totalPrs } from "./dependabot-model.js";
-import { repoSection } from "./dependabot-view.js";
+import {
+  activeMergeCount,
+  filterDependabotGroups,
+  sortMergeOperations,
+  totalPrs,
+} from "./dependabot-model.js";
+import { operationsList, repoSection } from "./dependabot-view.js";
 import { sourceButton } from "./ui.js";
 import { isAuthenticated } from "./account.js";
 import { isMenuOpen } from "./menu.js";
 import { isShortcutsOpen } from "./shortcuts.js";
+import { dependabotMergePoll } from "./state.js";
 
 /* The Dependabot module: a read-only list of open Dependabot PRs grouped by repository, its
  * repo-only sidebar refinement, keyboard navigation, and its own sync flow. Pure row/section
@@ -21,6 +27,8 @@ import { isShortcutsOpen } from "./shortcuts.js";
 
 /** By-repo PR groups from the backend (`{ full_name, total, prs }[]`). */
 let depGroups = [];
+let mergeOperations = [];
+let activeView = "prs";
 /** Optional repository refinement: a `full_name`, or null for "all repositories". */
 let activeRepo = null;
 /** True while a sync is in flight; gates stale `dependabot:progress` events. */
@@ -34,6 +42,14 @@ let lastSyncAt = 0;
 /** Resolves once the persisted last-sync time has been read (or the read failed). The
  *  auto-sync staleness gate awaits it so a restart doesn't re-scan a still-fresh sync. */
 let statusLoaded = Promise.resolve();
+let operationPollTimer = null;
+let operationPollElapsed = 0;
+let operationTicking = false;
+let loadGeneration = 0;
+let pollStartGeneration = 0;
+let expandedOperationId = null;
+let operationDetails = {};
+let operationDetailGeneration = 0;
 
 /** Auto-sync-on-open only fires if we've never synced this session or it's been at least
  *  this long since the last sync — so repeated opens don't re-scan the repo list every time. */
@@ -42,6 +58,7 @@ const AUTO_SYNC_STALE_MS = 5 * 60 * 1000;
 const REPO_ICON = `<svg viewBox="0 0 16 16" width="15" height="15"><path d="M3 2.5h7.5L13 5v8.5H3z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M5 6h4M5 8.5h6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>`;
 // Matches the notifications "All" smart-filter icon for cross-module consistency.
 const ALL_ICON = `<svg viewBox="0 0 16 16" width="15" height="15"><circle cx="8" cy="8" r="5.25" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M5.5 8l1.6 1.7L10.6 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+const OPERATIONS_ICON = `<svg viewBox="0 0 16 16" width="15" height="15"><path d="M3 4h10M3 8h10M3 12h10" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="5" cy="4" r="1.4" fill="currentColor"/><circle cx="9" cy="8" r="1.4" fill="currentColor"/><circle cx="7" cy="12" r="1.4" fill="currentColor"/></svg>`;
 
 /* -------------------------------- Rendering ------------------------------- */
 
@@ -74,49 +91,119 @@ function captureFocus() {
   const list = $("#dependabot");
   if (!active || !list || !list.contains(active)) return null;
   const row = active.closest(".n-row");
-  return row?.dataset.prId ?? null;
+  if (!row) return null;
+  if (row.dataset.operationId) {
+    return {
+      kind: "operation",
+      id: row.dataset.operationId,
+      part: active.classList.contains("dep-operation-cancel")
+        ? "cancel"
+        : active.classList.contains("dep-operation-disclosure")
+          ? "disclosure"
+          : "open",
+    };
+  }
+  return row.dataset.prId
+    ? {
+        kind: "pr",
+        id: row.dataset.prId,
+        part: active.classList.contains("dep-merge-action") ? "action" : "open",
+      }
+    : null;
 }
 
-/** Restore focus to a PR row by id after a re-render. Returns true if it landed. */
-function applyFocus(prId, { preventScroll = false } = {}) {
-  if (prId == null) return false;
-  const safe = String(prId).replace(/["\\]/g, "\\$&");
-  const open = $("#dependabot")?.querySelector(`.n-row[data-pr-id="${safe}"] .n-open[tabindex]`);
-  if (!open) return false;
-  open.focus({ preventScroll });
+/** Restore focus to the same PR/operation control after a re-render. */
+function applyFocus(target, { preventScroll = false } = {}) {
+  if (!target) return false;
+  const safe = String(target.id).replace(/["\\]/g, "\\$&");
+  const row = $("#dependabot")?.querySelector(
+    `.n-row[data-${target.kind === "operation" ? "operation" : "pr"}-id="${safe}"]`,
+  );
+  const control =
+    target.kind === "operation" && target.part === "cancel"
+      ? row?.querySelector(".dep-operation-cancel") || row?.querySelector(".n-open[tabindex]")
+      : target.kind === "operation" && target.part === "disclosure"
+        ? row?.querySelector(".dep-operation-disclosure") || row?.querySelector(".n-open[tabindex]")
+        : target.kind === "pr" && target.part === "action"
+          ? row?.querySelector(".dep-merge-action") || row?.querySelector(".n-open[tabindex]")
+          : row?.querySelector(".n-open[tabindex]");
+  if (!control) return false;
+  control.focus({ preventScroll });
   return true;
 }
 
-/** Render the central PR list for the active repo refinement. */
+/** Render the central PR list for the active repo refinement. A live re-render (e.g. from a
+ *  `dependabot:operations-changed` event, or after a fetch resolves) replaces the whole list's
+ *  markup — capture+restore the scroll position around that (in addition to focus, via
+ *  `captureFocus`/`applyFocus`) so it doesn't visibly jump back to the top mid-session. */
 function renderList() {
   const list = $("#dependabot");
   if (!list) return;
   const preserved = captureFocus();
+  const scrollTop = list.scrollTop;
+  clearDependabotHover();
+  if (activeView === "operations") {
+    list.innerHTML = operationsList(sortMergeOperations(mergeOperations), {
+      expandedId: expandedOperationId,
+      details: operationDetails,
+    });
+    list.scrollTop = scrollTop;
+    if (preserved != null && !applyFocus(preserved, { preventScroll: true })) {
+      list.querySelector(".n-open[tabindex]")?.focus({ preventScroll: true });
+    }
+    return;
+  }
+
   const groups = visibleGroups();
   if (!groups.length) {
     list.innerHTML = emptyDependabot();
     return;
   }
   list.innerHTML = groups.map(repoSection).join("");
+  list.scrollTop = scrollTop;
   if (preserved != null && !applyFocus(preserved, { preventScroll: true })) {
     list.querySelector(".n-open[tabindex]")?.focus({ preventScroll: true });
   }
+}
+
+function clearDependabotHover() {
+  for (const row of $("#dependabot")?.querySelectorAll(".n-row--hover") ?? []) {
+    row.classList.remove("n-row--hover");
+  }
+}
+
+function onDependabotMouseOver(e) {
+  clearDependabotHover();
+  const el = e.target instanceof Element ? e.target : e.target?.parentElement;
+  el?.closest("#dependabot .n-row")?.classList.add("n-row--hover");
 }
 
 /** Render the repo-only sidebar for the Dependabot module (counts + active highlight). */
 function renderSidebar() {
   const filterList = $("#dependabot-filter-list");
   if (filterList) {
+    const activeOperationCount = activeMergeCount(mergeOperations);
     // "All" mirrors the notifications smart filter: total open PRs, active when no repo is
     // refined, and clicking it clears any repo refinement.
-    filterList.innerHTML = sourceButton({
-      icon: ALL_ICON,
-      label: "All",
-      attrs: html`data-filter="all"`,
-      active: activeRepo == null,
-      count: depGroups.length ? String(totalPrs(depGroups)) : "",
-    });
+    filterList.innerHTML =
+      sourceButton({
+        icon: ALL_ICON,
+        label: "All",
+        attrs: html`data-filter="all"`,
+        active: activeView === "prs" && activeRepo == null,
+        count: depGroups.length ? String(totalPrs(depGroups)) : "",
+      }) +
+      sourceButton({
+        icon: OPERATIONS_ICON,
+        label: "Operations",
+        attrs: html`data-filter="operations"`,
+        active: activeView === "operations",
+        count: activeOperationCount ? String(activeOperationCount) : "",
+      });
     filterList.querySelector('[data-filter="all"]')?.addEventListener("click", clearRepo);
+    filterList
+      .querySelector('[data-filter="operations"]')
+      ?.addEventListener("click", selectOperations);
   }
 
   const repoList = $("#dependabot-repo-list");
@@ -135,7 +222,7 @@ function renderSidebar() {
         labelTitle: g.full_name,
         className: "repo-source",
         attrs: html`data-repo="${g.full_name}"`,
-        active: g.full_name === activeRepo,
+        active: activeView === "prs" && g.full_name === activeRepo,
         count: g.prs.length ? String(g.prs.length) : "",
       }),
     )
@@ -155,7 +242,10 @@ function renderSidebar() {
 function renderTitle() {
   const title = $("#dependabot-view-title");
   if (!title) return;
-  if (activeRepo != null) {
+  if (activeView === "operations") {
+    title.innerHTML = html`Dependabot<span class="crumb-sep" aria-hidden="true">›</span><span class="crumb-repo">Operations</span>`;
+    title.setAttribute("aria-label", "Dependabot, merge operations");
+  } else if (activeRepo != null) {
     title.innerHTML = html`Dependabot<span class="crumb-sep" aria-hidden="true">›</span><span class="crumb-repo">${activeRepo}</span>`;
     title.setAttribute("aria-label", `Dependabot, repository ${activeRepo}`);
   } else {
@@ -166,6 +256,11 @@ function renderTitle() {
 
 /** Announce the current view to assistive tech (the visual heading change isn't announced). */
 function announceView() {
+  if (activeView === "operations") {
+    const count = mergeOperations.length;
+    announce(`Dependabot merge operations, ${count} ${count === 1 ? "operation" : "operations"}.`);
+    return;
+  }
   const count = totalPrs(visibleGroups());
   const noun = count === 1 ? "pull request" : "pull requests";
   const where = activeRepo != null ? `Dependabot, repository ${activeRepo}` : "Dependabot";
@@ -174,6 +269,7 @@ function announceView() {
 
 /** Toggle the repository refinement: select it, or clear it if already active. */
 function selectRepo(fullName, kbd = false) {
+  activeView = "prs";
   activeRepo = activeRepo === fullName ? null : fullName;
   renderTitle();
   renderSidebar();
@@ -184,7 +280,17 @@ function selectRepo(fullName, kbd = false) {
 
 /** Clear any repository refinement (the sidebar "All" entry). No-op if already cleared. */
 function clearRepo() {
-  if (activeRepo == null) return;
+  if (activeRepo == null && activeView === "prs") return;
+  activeView = "prs";
+  activeRepo = null;
+  renderTitle();
+  renderSidebar();
+  renderList();
+  announceView();
+}
+
+function selectOperations() {
+  activeView = "operations";
   activeRepo = null;
   renderTitle();
   renderSidebar();
@@ -196,8 +302,15 @@ function clearRepo() {
 
 /** Load the cached Dependabot PRs from SQLite and render (offline-first; no network). */
 export async function loadDependabot() {
+  const generation = ++loadGeneration;
   try {
-    depGroups = await invoke("list_dependabot");
+    const [groups, operations] = await Promise.all([
+      invoke("list_dependabot"),
+      invoke("list_dependabot_merge_operations"),
+    ]);
+    if (generation !== loadGeneration) return;
+    depGroups = groups;
+    mergeOperations = operations;
     // Drop a repo refinement whose repository is no longer present.
     if (activeRepo != null && !depGroups.some((g) => g.full_name === activeRepo)) {
       activeRepo = null;
@@ -206,7 +319,33 @@ export async function loadDependabot() {
     renderSidebar();
     renderList();
   } catch (err) {
+    if (generation !== loadGeneration) return;
     $("#dependabot").innerHTML = html`<pre class="error-detail">${err}</pre>`;
+  }
+}
+
+async function reloadOperations() {
+  const generation = ++loadGeneration;
+  try {
+    const [groups, operations] = await Promise.all([
+      invoke("list_dependabot"),
+      invoke("list_dependabot_merge_operations"),
+    ]);
+    if (generation !== loadGeneration) return;
+    depGroups = groups;
+    mergeOperations = operations;
+    if (
+      expandedOperationId != null &&
+      !mergeOperations.some((operation) => operation.id === expandedOperationId)
+    ) {
+      expandedOperationId = null;
+      operationDetailGeneration += 1;
+    }
+    renderSidebar();
+    if (!$("#view-dependabot")?.hidden) renderList();
+    if (expandedOperationId != null) refreshExpandedOperationDetail();
+  } catch (err) {
+    console.error(`failed to load Dependabot merge operations: ${err}`);
   }
 }
 
@@ -225,17 +364,103 @@ function openPr(url) {
 function onListClick(e) {
   if (e.detail > 1) return; // ignore the second click of a double-click
   const el = e.target instanceof Element ? e.target : e.target?.parentElement;
+  const disclosure = el?.closest(".dep-operation-disclosure");
+  if (disclosure?.dataset.operationId) {
+    toggleOperationDetail(Number(disclosure.dataset.operationId));
+    return;
+  }
+  const merge = el?.closest(".dep-merge-action");
+  if (merge) {
+    if (merge.dataset.operationId) cancelMerge(merge.dataset.operationId);
+    else if (merge.dataset.prId) enqueueMerge(merge.dataset.prId);
+    return;
+  }
+  const cancel = el?.closest(".dep-operation-cancel");
+  if (cancel?.dataset.operationId) {
+    cancelMerge(cancel.dataset.operationId);
+    return;
+  }
   const open = el?.closest(".n-open");
   if (open?.dataset.url) openPr(open.dataset.url);
 }
 
-/** Enter on a focused PR row → open it (links activate on Enter, not Space). */
+/** Re-fetch the currently-expanded operation's detail (used both right after expanding it and
+ *  to refresh a still-expanded panel on a live `dependabot:operations-changed` event). Guards
+ *  against stale responses two ways: `operationDetailGeneration` is bumped by every
+ *  toggle/collapse so an in-flight fetch that resolves after the user acted again is dropped,
+ *  and the resolved `operationId` is re-checked against the *current* `expandedOperationId` in
+ *  case the panel was collapsed (or a different one opened) while this fetch was in flight. */
+async function refreshExpandedOperationDetail() {
+  const operationId = expandedOperationId;
+  if (operationId == null) return;
+  const generation = ++operationDetailGeneration;
+  try {
+    const detail = await invoke("get_dependabot_merge_operation_detail", { operationId });
+    if (generation !== operationDetailGeneration || operationId !== expandedOperationId) return;
+    operationDetails = { ...operationDetails, [operationId]: detail };
+    renderList();
+  } catch (err) {
+    if (generation !== operationDetailGeneration || operationId !== expandedOperationId) return;
+    console.error(`failed to load Dependabot merge operation ${operationId}: ${err}`);
+    toast("Couldn't load merge operation details", "error");
+  }
+}
+
+/** Toggle one operation's inline detail disclosure — collapsing it if already expanded
+ *  (only one operation's detail is ever expanded at a time), otherwise expanding it: render
+ *  immediately with a loading placeholder (`detail: null`), then fetch+refresh. */
+function toggleOperationDetail(operationId) {
+  if (expandedOperationId === operationId) {
+    expandedOperationId = null;
+    operationDetailGeneration += 1;
+    renderList();
+    return;
+  }
+  expandedOperationId = operationId;
+  operationDetails = { ...operationDetails, [operationId]: null };
+  renderList();
+  refreshExpandedOperationDetail();
+}
+
+/** Enter on a focused PR row → open it (links activate on Enter, not Space). Explicitly
+ *  excludes the disclosure/cancel/merge-action buttons — they're real `<button>`s so
+ *  Enter already activates their own click handler natively; this guard just keeps that
+ *  activation from *also* bubbling into opening the PR link. */
 function onListKeydown(e) {
   if (e.key !== "Enter") return;
+  if (e.target.closest?.(".dep-merge-action, .dep-operation-cancel, .dep-operation-disclosure")) {
+    return;
+  }
   const open = e.target.closest?.(".n-open");
   if (!open?.dataset.url) return;
   e.preventDefault();
   openPr(open.dataset.url);
+}
+
+async function enqueueMerge(prId) {
+  try {
+    await invoke("enqueue_dependabot_merge", { prId: Number(prId) });
+    announce("Merge queued.");
+    await reloadOperations();
+    operationPollElapsed = Number.POSITIVE_INFINITY;
+    processMergeOperations();
+  } catch (err) {
+    toast(String(err), "error");
+  }
+}
+
+async function cancelMerge(operationId) {
+  try {
+    const operation = await invoke("cancel_dependabot_merge", {
+      operationId: Number(operationId),
+    });
+    announce(operation.state === "cancelled" ? "Merge operation cancelled." : "Cancelling merge.");
+    await reloadOperations();
+    operationPollElapsed = Number.POSITIVE_INFINITY;
+    processMergeOperations();
+  } catch (err) {
+    toast(String(err), "error");
+  }
 }
 
 /* ------------------------- Keyboard command model ------------------------- */
@@ -243,6 +468,79 @@ function onListKeydown(e) {
 /** All PR rows currently in the DOM, in visual order. */
 function rows() {
   return [...$("#dependabot").querySelectorAll(".n-row")];
+}
+
+async function processMergeOperations() {
+  if (!isAuthenticated() || operationTicking || !activeMergeCount(mergeOperations)) return;
+  if (Date.now() < dependabotMergePoll.backoffUntilMs) return;
+  operationTicking = true;
+  operationPollElapsed = 0;
+  try {
+    const result = await invoke("process_dependabot_merges");
+    if (result) applyMergeStatus(result.status ?? result);
+    await reloadOperations();
+  } catch (err) {
+    console.error(`Dependabot merge processing failed: ${err}`);
+    setDepProgress(String(err), "error");
+  } finally {
+    operationTicking = false;
+  }
+}
+
+function applyMergeStatus(status) {
+  dependabotMergePoll.intervalSeconds =
+    Number(status.poll_interval_s) || dependabotMergePoll.intervalSeconds;
+  dependabotMergePoll.minIntervalS =
+    Number(status.min_poll_interval_s) || dependabotMergePoll.minIntervalS;
+  dependabotMergePoll.githubFloorS = Number(status.github_poll_floor_s) || 0;
+  dependabotMergePoll.backoffUntilMs = Date.parse(status.backoff_until) || 0;
+}
+
+async function operationPollTick() {
+  if (!isAuthenticated() || operationTicking || !activeMergeCount(mergeOperations)) return;
+  if (Date.now() < dependabotMergePoll.backoffUntilMs) return;
+  operationPollElapsed += 1;
+  const interval = Math.max(
+    dependabotMergePoll.intervalSeconds,
+    dependabotMergePoll.minIntervalS,
+    dependabotMergePoll.githubFloorS,
+  );
+  if (operationPollElapsed >= interval) processMergeOperations();
+}
+
+export async function startDependabotMergePolling() {
+  stopDependabotMergePolling();
+  const pollGeneration = ++pollStartGeneration;
+  const generation = ++loadGeneration;
+  try {
+    const [groups, operations, status] = await Promise.all([
+      invoke("list_dependabot"),
+      invoke("list_dependabot_merge_operations"),
+      invoke("dependabot_merge_status"),
+    ]);
+    if (pollGeneration !== pollStartGeneration) return;
+    if (generation === loadGeneration) {
+      depGroups = groups;
+      mergeOperations = operations;
+      applyMergeStatus(status);
+      renderSidebar();
+      if (!$("#view-dependabot")?.hidden) renderList();
+    }
+  } catch (err) {
+    if (pollGeneration !== pollStartGeneration) return;
+    if (generation === loadGeneration) {
+      console.error(`failed to start Dependabot merge polling: ${err}`);
+    }
+  }
+  operationPollTimer = setInterval(operationPollTick, POLL_TICK_MS);
+  if (activeMergeCount(mergeOperations)) processMergeOperations();
+}
+
+export function stopDependabotMergePolling() {
+  pollStartGeneration += 1;
+  if (operationPollTimer) clearInterval(operationPollTimer);
+  operationPollTimer = null;
+  operationPollElapsed = 0;
 }
 
 /** The row the keyboard cursor is on, or null. */
@@ -410,7 +708,11 @@ export function initDependabot() {
   if (list) {
     list.addEventListener("click", onListClick);
     list.addEventListener("keydown", onListKeydown);
+    list.addEventListener("mouseover", onDependabotMouseOver);
+    list.addEventListener("mouseleave", clearDependabotHover);
+    list.addEventListener("scroll", clearDependabotHover, { passive: true });
   }
+  window.addEventListener("blur", clearDependabotHover);
   document.addEventListener("keydown", onCommandKeydown);
   $("#dependabot-sync-btn")?.addEventListener("click", syncDependabot);
 
@@ -435,5 +737,8 @@ export function initDependabot() {
   // Merge-readiness pills resolve in the background after a sync; reload once they land.
   listen("dependabot:resolved", () => {
     loadDependabot();
+  });
+  listen("dependabot:operations-changed", () => {
+    reloadOperations();
   });
 }

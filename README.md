@@ -46,6 +46,9 @@ mirror GitHub's model:
   visible/filtered set from the toolbar, with optimistic local updates and per-thread
   failure reporting.
 - **API rate-limit visibility** — per-bucket usage bars in Settings.
+- **Dependabot merge operations** — queue safe PAT-approved merges per repository, follow each
+  operation in an interactive timeline, retry failed GitHub Actions jobs, and use GitHub merge
+  queue automatically when the target branch requires it.
 - **Keyboard-first triage** — a power-user command model for the inbox; press <kbd>?</kbd>
   (or **Help → Keyboard Shortcuts**) for the full cheatsheet.
 - **Light & dark themes** — a Dracula-inspired dark mode; choose System (default),
@@ -149,6 +152,13 @@ Rather than fight that, debug builds skip the Keychain entirely.
 > ⚠️ Because the dev token is stored unencrypted, use a **low-privilege PAT**
 > locally and never ship a debug build. There is nothing to set up — it just
 > works, with no prompts.
+
+Dependabot merge operations require **Pull requests: read/write**, **Contents:
+read/write**, **Actions: read/write**, and **Metadata: read** on each managed
+repository when using a fine-grained PAT. Actions permission lets Helix rerun failed
+GitHub Actions jobs; third-party CI cannot be retriggered with a PAT and is surfaced
+as needing attention. Keep the token repository-scoped; authorization failures
+remain visible without dropping queued work.
 
 ## Project conventions
 
