@@ -335,25 +335,35 @@ pub fn enqueue_merge_operation(
     conn: &Connection,
     pr_id: i64,
 ) -> rusqlite::Result<DependabotMergeOperation> {
-    let cached: Option<(String, i64, String, String, String, String, Option<String>)> = conn
+    struct CachedPr {
+        repo: String,
+        number: i64,
+        title: String,
+        html_url: String,
+        pull_url: String,
+        author: String,
+        base_ref: Option<String>,
+    }
+
+    let cached: Option<CachedPr> = conn
         .query_row(
             "SELECT repo_full_name, number, title, html_url, pull_url, author, base_ref
              FROM dependabot_prs WHERE id = ?1",
             [pr_id],
             |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                ))
+                Ok(CachedPr {
+                    repo: r.get(0)?,
+                    number: r.get(1)?,
+                    title: r.get(2)?,
+                    html_url: r.get(3)?,
+                    pull_url: r.get(4)?,
+                    author: r.get(5)?,
+                    base_ref: r.get(6)?,
+                })
             },
         )
         .optional()?;
-    let Some((repo, number, title, html_url, pull_url, author, base_ref)) = cached else {
+    let Some(cached) = cached else {
         return Err(rusqlite::Error::QueryReturnedNoRows);
     };
     if let Some(existing) = get_active_operation_for_pr(conn, pr_id)? {
@@ -368,7 +378,16 @@ pub fn enqueue_merge_operation(
               enqueued_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'queued',
                  strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
-        params![pr_id, repo, number, title, html_url, pull_url, author, base_ref],
+        params![
+            pr_id,
+            cached.repo,
+            cached.number,
+            cached.title,
+            cached.html_url,
+            cached.pull_url,
+            cached.author,
+            cached.base_ref
+        ],
     );
     if let Err(error) = inserted {
         drop(tx);
