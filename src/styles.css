@@ -1043,6 +1043,19 @@ code,
   line-height: 1.35;
 }
 
+.operation-repo-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  padding: var(--space-4) var(--space-16);
+  background: var(--surface);
+  border-bottom: 1px solid var(--hairline);
+}
+
+.operation-repo-group + .operation-repo-group {
+  border-top: 1px solid var(--hairline);
+}
+
 /* ---------------------------------------------------------------------------------------
  * Operation detail panel (Phase 2): the inline flow visualization,
  * retry/queue metadata, current/next explanation, and action log revealed by an operation

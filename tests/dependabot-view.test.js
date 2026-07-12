@@ -132,13 +132,46 @@ test("terminal operations render errors without a cancellation action", () => {
   assert.ok(!row.includes("dep-operation-cancel"));
 });
 
-test("operationsList splits active and recent operations", () => {
+test("operationsList splits active and recent operations into repository groups", () => {
   const output = operationsList([
     baseOperation,
-    { ...baseOperation, id: 8, state: "merged", terminal_at: "2026-01-02T00:00:00Z" },
+    {
+      ...baseOperation,
+      id: 8,
+      repo_full_name: "acme/widgets",
+      state: "queued",
+    },
+    {
+      ...baseOperation,
+      id: 10,
+      title: "Bump axios",
+      state: "queued",
+    },
+    {
+      ...baseOperation,
+      id: 9,
+      state: "merged",
+      terminal_at: "2026-01-02T00:00:00Z",
+    },
   ]);
   assert.ok(output.includes(">Active<"));
   assert.ok(output.includes(">Recent<"));
+  assert.ok(output.includes('data-operation-status="active"'));
+  assert.ok(output.includes('data-operation-status="recent"'));
+  assert.ok(output.includes('data-repo="octo/hello"'));
+  assert.ok(output.includes('data-repo="acme/widgets"'));
+  assert.equal(output.match(/role="group"/g)?.length, 3);
+  assert.equal(output.match(/class="operation-repo-group"/g)?.length, 3);
+  assert.ok(output.indexOf("octo/hello") < output.indexOf("acme/widgets"));
+  assert.ok(output.indexOf('data-operation-id="7"') < output.indexOf('data-operation-id="10"'));
+});
+
+test("operationsList escapes repository group names", () => {
+  const output = operationsList([
+    { ...baseOperation, repo_full_name: "<img src=x onerror=alert(1)>" },
+  ]);
+  assert.ok(output.includes("&lt;img src=x onerror=alert(1)&gt;"));
+  assert.ok(!output.includes("<img src=x"));
 });
 
 /* ---------------------------------------------------------------------------------------
