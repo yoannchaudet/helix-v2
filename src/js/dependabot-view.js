@@ -235,10 +235,12 @@ function operationDisclosureButton(operation, expanded) {
 export function operationRow(operation, options = {}) {
   const { expanded = false, detail = null } = options;
   const detailText = operation.failure_reason || operation.last_error;
+  const detailIsError =
+    operation.state === "failed" ||
+    operation.state === "timed_out" ||
+    Boolean(operation.last_error);
   const operationDetail = detailText
-    ? html`<div class="operation-detail${
-        operation.state === "merged" ? "" : " operation-detail--error"
-      }">${detailText}</div>`
+    ? html`<div class="operation-detail${detailIsError ? " operation-detail--error" : ""}">${detailText}</div>`
     : "";
   const queue =
     operation.state === "queued" && operation.queue_position != null

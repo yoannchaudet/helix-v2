@@ -148,6 +148,27 @@ test("merged operations render terminal detail with neutral styling", () => {
   assert.ok(!row.includes("operation-detail--error"));
 });
 
+test("cancelled operations render terminal detail with neutral styling", () => {
+  const row = operationRow({
+    ...baseOperation,
+    state: "cancelled",
+    failure_reason: "Cancelled.",
+    terminal_at: "2026-01-02T00:00:00Z",
+  });
+  assert.ok(row.includes("Cancelled."));
+  assert.ok(row.includes('class="operation-detail"'));
+  assert.ok(!row.includes("operation-detail--error"));
+});
+
+test("active operations render explicit last errors with error styling", () => {
+  const row = operationRow({
+    ...baseOperation,
+    state: "delegated",
+    last_error: "GitHub request failed.",
+  });
+  assert.ok(row.includes('class="operation-detail operation-detail--error"'));
+});
+
 test("operationsList splits active and recent operations into repository groups", () => {
   const output = operationsList([
     baseOperation,
