@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   activeMergeCount,
@@ -23,6 +24,13 @@ import {
 
 /* Pure model logic — no DOM. Covers the repo-refine + recency-sort pipeline and the small
  * helpers the view relies on. */
+
+const phaseContract = JSON.parse(
+  readFileSync(
+    new URL("../contracts/dependabot-merge-phase-contract.json", import.meta.url),
+    "utf8",
+  ),
+);
 
 function group(fullName, prs) {
   return { full_name: fullName, total: prs.length, prs };
@@ -111,7 +119,6 @@ test("buildOperationGraph (direct strategy): steps before the current phase are 
   assert.equal(graph.strategy, "direct");
   assert.equal(nodeById(graph, "queued").state, "done");
   assert.equal(nodeById(graph, "validating").state, "done");
-  assert.equal(nodeById(graph, "approving").state, "done");
   assert.equal(nodeById(graph, "updating_branch").state, "done");
   assert.equal(nodeById(graph, "waiting_checks").state, "done");
   // No retry ever happened, so the (unused) retry pair is "skipped", not "done".
@@ -130,7 +137,6 @@ test("buildOperationGraph (direct strategy): every shared phase maps to a node",
   for (const phase of [
     PHASES.QUEUED,
     PHASES.VALIDATING,
-    PHASES.APPROVING,
     PHASES.UPDATING_BRANCH,
     PHASES.WAITING_CHECKS,
   ]) {
@@ -182,9 +188,9 @@ test("buildOperationGraph (merge_queue strategy): every branch phase maps to a n
 });
 
 test("buildOperationGraph (unknown strategy): shows strategy-detection + both branches as upcoming, safely", () => {
-  const graph = buildOperationGraph({ state: "validating", phase: PHASES.APPROVING });
+  const graph = buildOperationGraph({ state: "validating", phase: PHASES.VALIDATING });
   assert.equal(graph.strategy, "unknown");
-  assert.equal(nodeById(graph, "approving").state, "current");
+  assert.equal(nodeById(graph, "validating").state, "current");
   assert.equal(nodeById(graph, "strategy_detection").state, "upcoming");
   assert.equal(nodeById(graph, "direct:merging").state, "upcoming");
   assert.equal(nodeById(graph, "queue:enabling_auto_merge").state, "upcoming");
@@ -200,7 +206,7 @@ test("buildOperationGraph (unknown strategy): terminating before it resolves ski
     failure_reason: "boom",
   });
   assert.equal(nodeById(graph, "validating").state, "failed");
-  assert.equal(nodeById(graph, "approving").state, "skipped");
+  assert.equal(nodeById(graph, "updating_branch").state, "skipped");
   assert.equal(nodeById(graph, "strategy_detection").state, "skipped");
   assert.equal(nodeById(graph, "direct:merging").state, "skipped");
   assert.equal(nodeById(graph, "queue:waiting_merge_queue").state, "skipped");
@@ -244,6 +250,23 @@ test("buildOperationGraph: terminal phases — merged/failed/cancelled/timed_out
     assert.equal(nodeById(graph, "waiting_checks").state, "failed");
     // Steps never reached before the failure are "skipped", not "done".
     assert.equal(nodeById(graph, "merging").state, "skipped");
+  }
+});
+
+test("buildOperationGraph covers the backend phase and terminal-state contract fixture", () => {
+  const mergeQueueOnly = new Set([PHASES.ENABLING_AUTO_MERGE, PHASES.WAITING_MERGE_QUEUE]);
+  for (const phase of phaseContract.phases) {
+    const strategy = mergeQueueOnly.has(phase) ? STRATEGIES.MERGE_QUEUE : STRATEGIES.DIRECT;
+    const graph = buildOperationGraph({ state: "delegated", phase, strategy });
+    assert.ok(nodeById(graph, phase), `expected node for backend phase ${phase}`);
+  }
+  for (const terminalState of phaseContract.graph_terminal_states) {
+    const graph = buildOperationGraph({
+      state: terminalState,
+      phase: PHASES.WAITING_CHECKS,
+      strategy: STRATEGIES.DIRECT,
+    });
+    assert.equal(nodeById(graph, "terminal").state, terminalState === "merged" ? "done" : "failed");
   }
 });
 

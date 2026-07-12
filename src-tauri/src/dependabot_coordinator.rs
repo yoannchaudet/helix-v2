@@ -632,52 +632,48 @@ fn phase_explanation(operation: &dependabot::DependabotMergeOperation) -> (Strin
         _ => {}
     }
 
-    match operation.phase.as_str() {
-        "queued" => (
+    match dependabot::MergePhase::from_db(&operation.phase) {
+        dependabot::MergePhase::Queued => (
             "Waiting for Helix to start processing this pull request.".to_string(),
             "Validate that the pull request is still open and mergeable.".to_string(),
         ),
-        "validating" => (
+        dependabot::MergePhase::Validating => (
             "Confirming the pull request is still open, mergeable, and matches the last observed commit.".to_string(),
             "Resolve the merge strategy for this repository and branch.".to_string(),
         ),
-        "approving" => (
-            "Requesting the approvals this pull request needs before it can merge.".to_string(),
-            "Check whether the branch needs to be updated with the base branch before merging.".to_string(),
-        ),
-        "updating_branch" => (
+        dependabot::MergePhase::UpdatingBranch => (
             "Updating the pull request's branch with the latest changes from its base branch.".to_string(),
             "Wait for status checks to run against the updated branch.".to_string(),
         ),
-        "waiting_requirements" => (
+        dependabot::MergePhase::WaitingRequirements => (
             "GitHub still reports this pull request as blocked, but no pending or failing checks are visible yet.".to_string(),
             "Wait for GitHub to publish the remaining requirement or allow the merge.".to_string(),
         ),
-        "waiting_checks" => (
+        dependabot::MergePhase::WaitingChecks => (
             "Waiting for required status checks to finish on the pull request.".to_string(),
             "Once checks succeed, continue toward merging; retry them if any fail.".to_string(),
         ),
-        "retry_scheduled" => (
+        dependabot::MergePhase::RetryScheduled => (
             "A required check failed or hasn't started; Helix has scheduled a retry.".to_string(),
             "Re-run the failed checks once the retry delay elapses.".to_string(),
         ),
-        "retrying_checks" => (
+        dependabot::MergePhase::RetryingChecks => (
             "Re-running the status checks that previously failed.".to_string(),
             "Wait for the retried checks to complete.".to_string(),
         ),
-        "enabling_auto_merge" => (
+        dependabot::MergePhase::EnablingAutoMerge => (
             "Enabling GitHub's native auto-merge for this pull request.".to_string(),
             "Wait for the pull request to enter (or clear) the merge queue.".to_string(),
         ),
-        "waiting_merge_queue" => (
+        dependabot::MergePhase::WaitingMergeQueue => (
             "Waiting in GitHub's merge queue for this pull request.".to_string(),
             "GitHub will merge the pull request automatically once the queue processes it.".to_string(),
         ),
-        "merging" => (
+        dependabot::MergePhase::Merging => (
             "Merging the pull request.".to_string(),
             "No further action — Helix is completing the merge.".to_string(),
         ),
-        other => (
+        dependabot::MergePhase::Unknown(other) => (
             format!("Processing this pull request (phase: {other})."),
             "Waiting for Helix to make further progress.".to_string(),
         ),
@@ -1504,7 +1500,14 @@ async fn orchestrate_operation<B: MergeBackend>(
             })?;
         } else {
             with_conn(db, &rates, |conn| {
-                dependabot::set_phase(conn, op_id, "retrying_checks", None, None, None)?;
+                dependabot::set_phase(
+                    conn,
+                    op_id,
+                    dependabot::MergePhase::RetryingChecks,
+                    None,
+                    None,
+                    None,
+                )?;
                 dependabot::append_operation_event(
                     conn,
                     op_id,
@@ -1575,7 +1578,14 @@ async fn orchestrate_operation<B: MergeBackend>(
             // Reruns dispatched: clear the backoff and wait for the fresh checks to report.
             let head = work.operation.observed_head_sha.clone().unwrap_or_default();
             with_conn(db, &rates, |conn| {
-                dependabot::set_phase(conn, op_id, "waiting_checks", None, None, None)?;
+                dependabot::set_phase(
+                    conn,
+                    op_id,
+                    dependabot::MergePhase::WaitingChecks,
+                    None,
+                    None,
+                    None,
+                )?;
                 dependabot::schedule_next_action(conn, op_id, None)
             })?;
             return Ok(github::MergeRemoteResult {
@@ -1618,7 +1628,14 @@ async fn orchestrate_operation<B: MergeBackend>(
     }
 
     with_conn(db, &rates, |conn| {
-        dependabot::set_phase(conn, op_id, "validating", None, None, None)?;
+        dependabot::set_phase(
+            conn,
+            op_id,
+            dependabot::MergePhase::Validating,
+            None,
+            None,
+            None,
+        )?;
         dependabot::append_operation_event(
             conn,
             op_id,
@@ -1641,7 +1658,14 @@ async fn orchestrate_operation<B: MergeBackend>(
     match result.outcome {
         Outcome::Merged { head_sha } => {
             with_conn(db, &rates, |conn| {
-                dependabot::set_phase(conn, op_id, "merging", None, None, None)?;
+                dependabot::set_phase(
+                    conn,
+                    op_id,
+                    dependabot::MergePhase::Merging,
+                    None,
+                    None,
+                    None,
+                )?;
                 dependabot::append_operation_event(
                     conn,
                     op_id,
@@ -1708,7 +1732,14 @@ async fn orchestrate_operation<B: MergeBackend>(
         } => {
             if branch_update_requested {
                 with_conn(db, &rates, |conn| {
-                    dependabot::set_phase(conn, op_id, "updating_branch", None, None, None)?;
+                    dependabot::set_phase(
+                        conn,
+                        op_id,
+                        dependabot::MergePhase::UpdatingBranch,
+                        None,
+                        None,
+                        None,
+                    )?;
                     dependabot::schedule_next_action(conn, op_id, None)?;
                     dependabot::append_operation_event(
                         conn,
@@ -1753,7 +1784,7 @@ async fn orchestrate_operation<B: MergeBackend>(
                     dependabot::set_phase(
                         conn,
                         op_id,
-                        "validating",
+                        dependabot::MergePhase::Validating,
                         None,
                         Some(&node_id),
                         Some(&base_ref),
@@ -1786,7 +1817,7 @@ async fn orchestrate_operation<B: MergeBackend>(
                         dependabot::set_phase(
                             conn,
                             op_id,
-                            "validating",
+                            dependabot::MergePhase::Validating,
                             Some(strategy_label),
                             None,
                             None,
@@ -1803,7 +1834,7 @@ async fn orchestrate_operation<B: MergeBackend>(
                         dependabot::set_phase(
                             conn,
                             op_id,
-                            "validating",
+                            dependabot::MergePhase::Validating,
                             Some("direct"),
                             None,
                             None,
@@ -1836,7 +1867,7 @@ async fn orchestrate_operation<B: MergeBackend>(
                         dependabot::set_phase(
                             conn,
                             op_id,
-                            "validating",
+                            dependabot::MergePhase::Validating,
                             Some("merge_queue"),
                             None,
                             None,
@@ -1864,7 +1895,7 @@ async fn orchestrate_operation<B: MergeBackend>(
                         dependabot::set_phase(
                             conn,
                             op_id,
-                            "validating",
+                            dependabot::MergePhase::Validating,
                             Some("unknown"),
                             None,
                             None,
@@ -1985,7 +2016,14 @@ async fn direct_await_checks<B: MergeBackend>(
                     failure.run_attempt,
                 )?;
             }
-            dependabot::set_phase(conn, op_id, "retry_scheduled", None, None, None)?;
+            dependabot::set_phase(
+                conn,
+                op_id,
+                dependabot::MergePhase::RetryScheduled,
+                None,
+                None,
+                None,
+            )?;
             dependabot::schedule_next_action_in(conn, op_id, CHECK_RETRY_DELAY_S)?;
             dependabot::append_operation_event(
                 conn,
@@ -2034,7 +2072,14 @@ async fn direct_await_checks<B: MergeBackend>(
                 }
                 let head = head_sha.to_string();
                 with_conn(db, rates, |conn| {
-                    dependabot::set_phase(conn, op_id, "updating_branch", None, None, None)?;
+                    dependabot::set_phase(
+                        conn,
+                        op_id,
+                        dependabot::MergePhase::UpdatingBranch,
+                        None,
+                        None,
+                        None,
+                    )?;
                     dependabot::schedule_next_action(conn, op_id, None)?;
                     dependabot::append_operation_event(
                         conn,
@@ -2069,7 +2114,14 @@ async fn direct_await_checks<B: MergeBackend>(
             let head = head_sha.to_string();
             let summary = "GitHub still blocks the merge; no pending or failing checks were found.";
             with_conn(db, rates, |conn| {
-                dependabot::set_phase(conn, op_id, "waiting_requirements", None, None, None)?;
+                dependabot::set_phase(
+                    conn,
+                    op_id,
+                    dependabot::MergePhase::WaitingRequirements,
+                    None,
+                    None,
+                    None,
+                )?;
                 dependabot::schedule_next_action(conn, op_id, None)?;
                 dependabot::append_operation_event(
                     conn,
@@ -2103,7 +2155,14 @@ async fn direct_await_checks<B: MergeBackend>(
         "Waiting for required status checks to finish.".to_string()
     };
     with_conn(db, rates, |conn| {
-        dependabot::set_phase(conn, op_id, "waiting_checks", None, None, None)?;
+        dependabot::set_phase(
+            conn,
+            op_id,
+            dependabot::MergePhase::WaitingChecks,
+            None,
+            None,
+            None,
+        )?;
         dependabot::schedule_next_action(conn, op_id, None)?;
         dependabot::append_operation_event(
             conn,
@@ -2149,7 +2208,14 @@ async fn queue_flow<B: MergeBackend>(
     let status = net!(*rates, backend.queue_status(&repo, number)).status;
     let Some(status) = status else {
         with_conn(db, rates, |conn| {
-            dependabot::set_phase(conn, op_id, "waiting_merge_queue", None, None, None)?;
+            dependabot::set_phase(
+                conn,
+                op_id,
+                dependabot::MergePhase::WaitingMergeQueue,
+                None,
+                None,
+                None,
+            )?;
             dependabot::schedule_next_action(conn, op_id, None)?;
             dependabot::append_operation_event(
                 conn,
@@ -2175,7 +2241,14 @@ async fn queue_flow<B: MergeBackend>(
     if status.merged {
         let head = status.head_oid.clone();
         with_conn(db, rates, |conn| {
-            dependabot::set_phase(conn, op_id, "merging", None, None, None)?;
+            dependabot::set_phase(
+                conn,
+                op_id,
+                dependabot::MergePhase::Merging,
+                None,
+                None,
+                None,
+            )?;
             dependabot::append_operation_event(
                 conn,
                 op_id,
@@ -2231,7 +2304,14 @@ async fn queue_flow<B: MergeBackend>(
         let head = head_sha.to_string();
         with_conn(db, rates, |conn| {
             dependabot::set_queue_metadata(conn, op_id, position, true)?;
-            dependabot::set_phase(conn, op_id, "waiting_merge_queue", None, None, None)?;
+            dependabot::set_phase(
+                conn,
+                op_id,
+                dependabot::MergePhase::WaitingMergeQueue,
+                None,
+                None,
+                None,
+            )?;
             dependabot::schedule_next_action(conn, op_id, None)?;
             dependabot::append_operation_event(
                 conn,
@@ -2296,7 +2376,14 @@ async fn queue_flow<B: MergeBackend>(
         let head = head_sha.to_string();
         with_conn(db, rates, |conn| {
             dependabot::set_queue_metadata(conn, op_id, None, true)?;
-            dependabot::set_phase(conn, op_id, "enabling_auto_merge", None, None, None)?;
+            dependabot::set_phase(
+                conn,
+                op_id,
+                dependabot::MergePhase::EnablingAutoMerge,
+                None,
+                None,
+                None,
+            )?;
             dependabot::schedule_next_action(conn, op_id, None)?;
             dependabot::append_operation_event(
                 conn,
@@ -2326,7 +2413,14 @@ async fn queue_flow<B: MergeBackend>(
     let head = head_sha.to_string();
     with_conn(db, rates, |conn| {
         dependabot::set_queue_metadata(conn, op_id, None, true)?;
-        dependabot::set_phase(conn, op_id, "waiting_merge_queue", None, None, None)?;
+        dependabot::set_phase(
+            conn,
+            op_id,
+            dependabot::MergePhase::WaitingMergeQueue,
+            None,
+            None,
+            None,
+        )?;
         dependabot::schedule_next_action(conn, op_id, None)?;
         dependabot::append_operation_event(
             conn,
@@ -3198,26 +3292,22 @@ mod tests {
 
     #[test]
     fn phase_explanations_are_exhaustive_and_non_empty_for_every_planned_phase() {
-        let phases = [
-            "queued",
-            "validating",
-            "approving",
-            "updating_branch",
-            "waiting_requirements",
-            "waiting_checks",
-            "retry_scheduled",
-            "retrying_checks",
-            "enabling_auto_merge",
-            "waiting_merge_queue",
-            "merging",
-        ];
+        let phases = dependabot::MergePhase::KNOWN_PHASES;
         let db = db_with_token();
         store(&db, &[pr(1, "octo/repo-a", 10, "first")]);
         let conn = db.0.lock().unwrap();
         let operation = dependabot::enqueue_merge_operation(&conn, 1).unwrap();
 
         for phase in phases {
-            dependabot::set_phase(&conn, operation.id, phase, None, None, None).unwrap();
+            dependabot::set_phase(
+                &conn,
+                operation.id,
+                dependabot::MergePhase::from_db(phase),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
             let refreshed = dependabot::get_operation(&conn, operation.id)
                 .unwrap()
                 .unwrap();
@@ -3235,12 +3325,51 @@ mod tests {
     }
 
     #[test]
+    fn frontend_phase_contract_fixture_matches_backend_emitted_phases_and_terminal_states() {
+        #[derive(serde::Deserialize)]
+        struct PhaseContract {
+            phases: Vec<String>,
+            graph_terminal_states: Vec<String>,
+        }
+
+        let contract: PhaseContract = serde_json::from_str(include_str!(
+            "../../contracts/dependabot-merge-phase-contract.json"
+        ))
+        .unwrap();
+
+        assert_eq!(
+            contract.phases,
+            dependabot::MergePhase::KNOWN_PHASES
+                .iter()
+                .map(|phase| phase.to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            contract.graph_terminal_states,
+            vec![
+                "merged".to_string(),
+                "cancelled".to_string(),
+                "failed".to_string(),
+                "timed_out".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn phase_explanation_falls_back_gracefully_for_an_unrecognized_phase() {
         let db = db_with_token();
         store(&db, &[pr(1, "octo/repo-a", 10, "first")]);
         let conn = db.0.lock().unwrap();
         let operation = dependabot::enqueue_merge_operation(&conn, 1).unwrap();
-        dependabot::set_phase(&conn, operation.id, "some_future_phase", None, None, None).unwrap();
+        dependabot::set_phase(
+            &conn,
+            operation.id,
+            dependabot::MergePhase::Unknown("some_future_phase".to_string()),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let refreshed = dependabot::get_operation(&conn, operation.id)
             .unwrap()
             .unwrap();
@@ -3256,7 +3385,15 @@ mod tests {
         store(&db, &[pr(1, "octo/repo-a", 10, "first")]);
         let conn = db.0.lock().unwrap();
         let operation = dependabot::enqueue_merge_operation(&conn, 1).unwrap();
-        dependabot::set_phase(&conn, operation.id, "waiting_checks", None, None, None).unwrap();
+        dependabot::set_phase(
+            &conn,
+            operation.id,
+            dependabot::MergePhase::WaitingChecks,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         dependabot::terminalize(
             &conn,
@@ -3737,7 +3874,15 @@ mod tests {
         {
             let conn = db.0.lock().unwrap();
             dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "direct").unwrap();
-            dependabot::set_phase(&conn, id, "queued", Some("direct"), None, Some("main")).unwrap();
+            dependabot::set_phase(
+                &conn,
+                id,
+                dependabot::MergePhase::Queued,
+                Some("direct"),
+                None,
+                Some("main"),
+            )
+            .unwrap();
         }
         tick(&db, &fake);
         let after = op(&db, id);
@@ -3772,7 +3917,15 @@ mod tests {
         {
             let conn = db.0.lock().unwrap();
             dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "direct").unwrap();
-            dependabot::set_phase(&conn, id, "queued", Some("direct"), None, Some("main")).unwrap();
+            dependabot::set_phase(
+                &conn,
+                id,
+                dependabot::MergePhase::Queued,
+                Some("direct"),
+                None,
+                Some("main"),
+            )
+            .unwrap();
         }
 
         tick(&db, &fake);
@@ -3816,7 +3969,15 @@ mod tests {
         {
             let conn = db.0.lock().unwrap();
             dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "direct").unwrap();
-            dependabot::set_phase(&conn, id, "queued", Some("direct"), None, Some("main")).unwrap();
+            dependabot::set_phase(
+                &conn,
+                id,
+                dependabot::MergePhase::Queued,
+                Some("direct"),
+                None,
+                Some("main"),
+            )
+            .unwrap();
         }
 
         tick(&db, &fake);
@@ -3923,7 +4084,15 @@ mod tests {
         {
             let conn = db.0.lock().unwrap();
             dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "direct").unwrap();
-            dependabot::set_phase(&conn, id, "queued", Some("direct"), None, Some("main")).unwrap();
+            dependabot::set_phase(
+                &conn,
+                id,
+                dependabot::MergePhase::Queued,
+                Some("direct"),
+                None,
+                Some("main"),
+            )
+            .unwrap();
         }
         tick(&db, &fake);
         let after = op(&db, id);
@@ -3967,7 +4136,15 @@ mod tests {
         {
             let conn = db.0.lock().unwrap();
             dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "direct").unwrap();
-            dependabot::set_phase(&conn, id, "queued", Some("direct"), None, Some("main")).unwrap();
+            dependabot::set_phase(
+                &conn,
+                id,
+                dependabot::MergePhase::Queued,
+                Some("direct"),
+                None,
+                Some("main"),
+            )
+            .unwrap();
         }
 
         // Tick 1: both failed runs scheduled; a five-minute backoff is set.
@@ -4033,7 +4210,15 @@ mod tests {
         {
             let conn = db.0.lock().unwrap();
             dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "direct").unwrap();
-            dependabot::set_phase(&conn, id, "queued", Some("direct"), None, Some("main")).unwrap();
+            dependabot::set_phase(
+                &conn,
+                id,
+                dependabot::MergePhase::Queued,
+                Some("direct"),
+                None,
+                Some("main"),
+            )
+            .unwrap();
         }
         // Three failure→schedule→rerun cycles, no numeric cap.
         for _ in 0..3 {
@@ -4161,7 +4346,15 @@ mod tests {
         {
             let conn = db.0.lock().unwrap();
             dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "direct").unwrap();
-            dependabot::set_phase(&conn, id, "queued", Some("direct"), None, Some("main")).unwrap();
+            dependabot::set_phase(
+                &conn,
+                id,
+                dependabot::MergePhase::Queued,
+                Some("direct"),
+                None,
+                Some("main"),
+            )
+            .unwrap();
         }
         // Delegated 89 minutes ago: too little of the 90-minute deadline remains to retry.
         set_delegated_at(&db, id, "-89 minutes");
@@ -4185,7 +4378,15 @@ mod tests {
         {
             let conn = db.0.lock().unwrap();
             dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "direct").unwrap();
-            dependabot::set_phase(&conn, id, "queued", Some("direct"), None, Some("main")).unwrap();
+            dependabot::set_phase(
+                &conn,
+                id,
+                dependabot::MergePhase::Queued,
+                Some("direct"),
+                None,
+                Some("main"),
+            )
+            .unwrap();
         }
         tick(&db, &fake);
         assert_eq!(op(&db, id).phase, "updating_branch");
@@ -4320,8 +4521,15 @@ mod tests {
         {
             let conn = db.0.lock().unwrap();
             dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "merge_queue").unwrap();
-            dependabot::set_phase(&conn, id, "queued", Some("merge_queue"), None, Some("main"))
-                .unwrap();
+            dependabot::set_phase(
+                &conn,
+                id,
+                dependabot::MergePhase::Queued,
+                Some("merge_queue"),
+                None,
+                Some("main"),
+            )
+            .unwrap();
             dependabot::set_queue_metadata(&conn, id, None, true).unwrap();
         }
         tick(&db, &fake);

@@ -13,7 +13,7 @@
 //! discipline used for notification subjects.
 
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
 use crate::github::{DependabotPr, ResolvedSubject};
 
@@ -843,6 +843,90 @@ pub fn merge_deadline_exhausted(
 // orchestrator narrates through the functions below; nothing here changes `state` semantics.
 // ---------------------------------------------------------------------------------------------
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergePhase {
+    Queued,
+    Validating,
+    UpdatingBranch,
+    WaitingRequirements,
+    WaitingChecks,
+    RetryScheduled,
+    RetryingChecks,
+    EnablingAutoMerge,
+    WaitingMergeQueue,
+    Merging,
+    Unknown(String),
+}
+
+impl MergePhase {
+    #[cfg(test)]
+    pub const KNOWN_PHASES: [&'static str; 10] = [
+        "queued",
+        "validating",
+        "updating_branch",
+        "waiting_requirements",
+        "waiting_checks",
+        "retry_scheduled",
+        "retrying_checks",
+        "enabling_auto_merge",
+        "waiting_merge_queue",
+        "merging",
+    ];
+
+    pub fn from_db(phase: &str) -> Self {
+        match phase {
+            "queued" => Self::Queued,
+            "validating" => Self::Validating,
+            "updating_branch" => Self::UpdatingBranch,
+            "waiting_requirements" => Self::WaitingRequirements,
+            "waiting_checks" => Self::WaitingChecks,
+            "retry_scheduled" => Self::RetryScheduled,
+            "retrying_checks" => Self::RetryingChecks,
+            "enabling_auto_merge" => Self::EnablingAutoMerge,
+            "waiting_merge_queue" => Self::WaitingMergeQueue,
+            "merging" => Self::Merging,
+            other => Self::Unknown(other.to_string()),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Queued => "queued",
+            Self::Validating => "validating",
+            Self::UpdatingBranch => "updating_branch",
+            Self::WaitingRequirements => "waiting_requirements",
+            Self::WaitingChecks => "waiting_checks",
+            Self::RetryScheduled => "retry_scheduled",
+            Self::RetryingChecks => "retrying_checks",
+            Self::EnablingAutoMerge => "enabling_auto_merge",
+            Self::WaitingMergeQueue => "waiting_merge_queue",
+            Self::Merging => "merging",
+            Self::Unknown(other) => other.as_str(),
+        }
+    }
+}
+
+impl From<&str> for MergePhase {
+    fn from(value: &str) -> Self {
+        Self::from_db(value)
+    }
+}
+
+impl From<String> for MergePhase {
+    fn from(value: String) -> Self {
+        Self::from_db(&value)
+    }
+}
+
+impl Serialize for MergePhase {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
 /// One entry in an operation's append-only narration/audit trail.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct MergeOperationEvent {
@@ -971,14 +1055,15 @@ pub fn get_operation_detail(
 /// GitHub identity metadata (`pull_node_id`, `base_ref`) discovered along the way. `None` for
 /// `strategy`/`pull_node_id`/`base_ref` leaves the existing value untouched, so callers can
 /// narrate incremental progress without re-supplying metadata they haven't (re)resolved.
-pub fn set_phase(
+pub fn set_phase<P: Into<MergePhase>>(
     conn: &Connection,
     id: i64,
-    phase: &str,
+    phase: P,
     strategy: Option<&str>,
     pull_node_id: Option<&str>,
     base_ref: Option<&str>,
 ) -> rusqlite::Result<()> {
+    let phase: MergePhase = phase.into();
     conn.execute(
         "UPDATE dependabot_merge_operations
          SET phase = ?2,
@@ -986,7 +1071,7 @@ pub fn set_phase(
              pull_node_id = COALESCE(?4, pull_node_id),
              base_ref = COALESCE(?5, base_ref)
          WHERE id = ?1",
-        params![id, phase, strategy, pull_node_id, base_ref],
+        params![id, phase.as_str(), strategy, pull_node_id, base_ref],
     )?;
     Ok(())
 }
@@ -2072,6 +2157,15 @@ mod tests {
         assert_eq!(advanced.strategy, "native_squash");
         assert_eq!(advanced.pull_node_id.as_deref(), Some("PR_kwABC"));
         assert_eq!(advanced.base_ref.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn merge_phase_serializes_to_snake_case_text_for_known_and_unknown_values() {
+        let queued = serde_json::to_string(&MergePhase::Queued).unwrap();
+        let unknown =
+            serde_json::to_string(&MergePhase::Unknown("future_phase".to_string())).unwrap();
+        assert_eq!(queued, "\"queued\"");
+        assert_eq!(unknown, "\"future_phase\"");
     }
 
     #[test]
