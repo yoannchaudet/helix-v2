@@ -234,10 +234,14 @@ function operationDisclosureButton(operation, expanded) {
  *  it's loading renders a lightweight placeholder instead of blank space). */
 export function operationRow(operation, options = {}) {
   const { expanded = false, detail = null } = options;
-  const errorDetail =
-    operation.failure_reason || operation.last_error
-      ? html`<div class="operation-error">${operation.failure_reason || operation.last_error}</div>`
-      : "";
+  const detailText = operation.failure_reason || operation.last_error;
+  const detailIsError =
+    operation.state === "failed" ||
+    operation.state === "timed_out" ||
+    Boolean(operation.last_error);
+  const operationDetail = detailText
+    ? html`<div class="operation-detail${detailIsError ? " operation-detail--error" : ""}">${detailText}</div>`
+    : "";
   const queue =
     operation.state === "queued" && operation.queue_position != null
       ? ` · queue ${operation.queue_position}`
@@ -268,7 +272,7 @@ export function operationRow(operation, options = {}) {
         <div class="n-main">
           <div class="n-title"><span class="n-number">#${operation.number}</span> ${operation.title}</div>
           <div class="n-meta">${operation.repo_full_name}${target}${queue} · ${relTime(time)}</div>
-          ${rawHtml(errorDetail)}
+          ${rawHtml(operationDetail)}
         </div>
       </div>
       ${rawHtml(disclosure)}
