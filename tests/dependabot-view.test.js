@@ -131,8 +131,21 @@ test("terminal operations render errors without a cancellation action", () => {
   });
   assert.ok(row.includes("Failed"));
   assert.ok(row.includes("&lt;conflict&gt;"));
+  assert.ok(row.includes('class="operation-detail operation-detail--error"'));
   assert.ok(!row.includes("dep-operation-cancel"));
   assert.ok(!row.includes("dep-discard-action"));
+});
+
+test("merged operations render terminal detail with neutral styling", () => {
+  const row = operationRow({
+    ...baseOperation,
+    state: "merged",
+    failure_reason: "Merged on GitHub.",
+    terminal_at: "2026-01-02T00:00:00Z",
+  });
+  assert.ok(row.includes("Merged on GitHub."));
+  assert.ok(row.includes('class="operation-detail"'));
+  assert.ok(!row.includes("operation-detail--error"));
 });
 
 test("operationsList splits active and recent operations into repository groups", () => {

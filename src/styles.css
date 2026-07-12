@@ -1046,8 +1046,7 @@ code,
   color: var(--pending);
 }
 
-.operation-state--error,
-.operation-error {
+.operation-state--error {
   color: var(--error);
 }
 
@@ -1055,10 +1054,15 @@ code,
   color: var(--muted);
 }
 
-.operation-error {
+.operation-detail {
   margin-top: 3px;
+  color: var(--muted);
   font-size: 0.74rem;
   line-height: 1.35;
+}
+
+.operation-detail--error {
+  color: var(--error);
 }
 
 .operation-repo-header {
