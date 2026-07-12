@@ -141,7 +141,6 @@ export const STRATEGIES = {
 export const PHASES = {
   QUEUED: "queued",
   VALIDATING: "validating",
-  APPROVING: "approving",
   UPDATING_BRANCH: "updating_branch",
   WAITING_REQUIREMENTS: "waiting_requirements",
   WAITING_CHECKS: "waiting_checks",
@@ -166,7 +165,6 @@ const TERMINAL_LABELS = {
 const PHASE_LABELS = {
   [PHASES.QUEUED]: "Queued",
   [PHASES.VALIDATING]: "Validating",
-  [PHASES.APPROVING]: "Approving",
   [PHASES.UPDATING_BRANCH]: "Updating branch",
   [PHASES.WAITING_REQUIREMENTS]: "Waiting on requirements",
   [PHASES.WAITING_CHECKS]: "Waiting on checks",
@@ -185,7 +183,6 @@ const PHASE_LABELS = {
 const SHARED_PHASES = [
   PHASES.QUEUED,
   PHASES.VALIDATING,
-  PHASES.APPROVING,
   PHASES.UPDATING_BRANCH,
   PHASES.WAITING_REQUIREMENTS,
   PHASES.WAITING_CHECKS,

@@ -1,0 +1,15 @@
+{
+  "phases": [
+    "queued",
+    "validating",
+    "updating_branch",
+    "waiting_requirements",
+    "waiting_checks",
+    "retry_scheduled",
+    "retrying_checks",
+    "enabling_auto_merge",
+    "waiting_merge_queue",
+    "merging"
+  ],
+  "graph_terminal_states": ["merged", "cancelled", "failed", "timed_out"]
+}
