@@ -540,6 +540,7 @@ pub struct DependabotPr {
     pub title: String,
     pub html_url: String,
     pub author: String,
+    pub base_ref: String,
     pub repo_full_name: String,
     pub repo_owner: String,
     pub repo_name: String,
@@ -571,6 +572,7 @@ struct PullListItem {
     html_url: String,
     url: String,
     user: Option<SubjectUser>,
+    base: MergeBase,
     created_at: String,
     updated_at: String,
 }
@@ -661,6 +663,7 @@ async fn list_open_dependabot_prs(
                 title: p.title,
                 html_url: p.html_url,
                 author,
+                base_ref: p.base.ref_name,
                 repo_full_name: format!("{owner}/{name}"),
                 repo_owner: owner.to_string(),
                 repo_name: name.to_string(),
@@ -2644,6 +2647,26 @@ mod tests {
         assert!(!is_dependabot_author("octocat"));
         assert!(!is_dependabot_author("renovate[bot]"));
         assert!(!is_dependabot_author("dependabot")); // not a bot login
+    }
+
+    #[test]
+    fn pull_list_item_deserializes_target_branch() {
+        let item: PullListItem = serde_json::from_str(
+            r#"{
+                "id": 1,
+                "number": 10,
+                "title": "Bump dependency",
+                "html_url": "https://github.com/octo/repo/pull/10",
+                "url": "https://api.github.com/repos/octo/repo/pulls/10",
+                "user": {"login": "dependabot[bot]"},
+                "base": {"ref": "release/next"},
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-02T00:00:00Z"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(item.base.ref_name, "release/next");
     }
 
     #[test]

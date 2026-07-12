@@ -22,6 +22,10 @@ test("lists open Dependabot PRs grouped by repository", async ({ page }) => {
   // All three fixture PRs are shown as openable rows.
   await expect(page.locator("#dependabot .n-row")).toHaveCount(3);
   await expect(page.locator("#dependabot")).toContainText("Bump lodash from 4.17.20 to 4.17.21");
+  await expect(page.locator('#dependabot .n-row[data-pr-id="101"]')).toContainText("Target: main");
+  await expect(page.locator('#dependabot .n-row[data-pr-id="102"]')).toContainText(
+    "Target: release/v2",
+  );
 });
 
 test("shows merge readiness and a merge action without notification controls", async ({ page }) => {
@@ -49,6 +53,7 @@ test("queues a merge and shows it in Operations", async ({ page }) => {
   await expect(page.locator("#dependabot .operation-row")).toHaveCount(1);
   await expect(page.locator("#dependabot .operation-row")).toContainText("Bump lodash");
   await expect(page.locator("#dependabot .operation-row")).toContainText(/Queued|Merging/);
+  await expect(page.locator("#dependabot .operation-row")).toContainText("Target: main");
 
   const calls = await page.evaluate(() => window.__TAURI_CALLS__);
   expect(calls.some((call) => call.cmd === "enqueue_dependabot_merge")).toBe(true);
@@ -62,6 +67,7 @@ test("cancels an active merge from Operations", async ({ page }) => {
     number: 40,
     title: "Bump lodash",
     html_url: "https://github.com/octo/hello/pull/40",
+    base_ref: "main",
     state: "delegated",
     queue_position: 1,
     failure_reason: null,

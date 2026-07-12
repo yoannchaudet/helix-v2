@@ -425,6 +425,9 @@ module's **sidebar + content** split:
   restarts — distinct from the notifications sync time in `sync_state`.
 - Dependabot **merge operations** are durable SQLite state. Repositories progress
   independently, but each repository has a strict FIFO queue with one active merge at a time.
+  The PR list persists each PR's target branch from GitHub's `base.ref`, displays it on the PR
+  row, and snapshots it onto the durable operation so Operations retains the same context.
+  Target branches are informational and do not partition or otherwise change the repo FIFO.
   At the head, Helix validates that the open/non-draft/non-conflicting PR and all its commits
   are Dependabot-owned, approves the current head SHA, and auto-detects the base branch's merge
   strategy. Direct merges update a behind branch, then revalidate and reapprove its new head;
