@@ -796,6 +796,12 @@ pub enum MergeRemoteOutcome {
         code: &'static str,
         reason: String,
     },
+    /// GitHub reports the validated direct-merge PR as blocked. The orchestrator diagnoses checks
+    /// first, then determines whether a stale base branch is the remaining blocker.
+    Blocked {
+        head_sha: String,
+        base_ref: String,
+    },
     /// The head passed validation (and, unless `behind`, was approved), but the resolved merge
     /// strategy is not `Direct` — so no direct `PUT /merge` or `PUT /update-branch` was issued.
     /// The orchestrator uses `base_ref`/`node_id` to resolve/cache the strategy and drive the
@@ -1367,33 +1373,41 @@ where
     }
 
     if pull.mergeable_state.as_deref() == Some("behind") {
-        let _mutation_lease = mutation_guard.lock().await;
-        if is_cancelled() {
+        let outcome = send_guarded_branch_update(
+            update_pull_request_branch_request(
+                client,
+                token,
+                &operation.repo_full_name,
+                operation.number,
+                &head_sha,
+            ),
+            mutation_guard,
+            is_cancelled,
+            &mut rates,
+        )
+        .await?;
+        if outcome == MutationOutcome::Cancelled {
             return Ok(MergeRemoteResult {
                 outcome: MergeRemoteOutcome::Cancelled,
                 rates,
             });
         }
-        merge_json::<serde_json::Value>(
-            authed(
-                client
-                    .put(format!(
-                        "{API_BASE}/repos/{}/pulls/{}/update-branch",
-                        operation.repo_full_name, operation.number
-                    ))
-                    .json(&serde_json::json!({ "expected_head_sha": head_sha })),
-                token,
-            ),
-            "update pull request branch",
-            &mut rates,
-        )
-        .await?;
         return Ok(MergeRemoteResult {
             outcome: MergeRemoteOutcome::Pending {
                 head_sha,
                 approved: false,
                 branch_update_requested: true,
                 reason: Some("Updating the branch and waiting for fresh checks.".to_string()),
+            },
+            rates,
+        });
+    }
+
+    if pull.mergeable_state.as_deref() == Some("blocked") {
+        return Ok(MergeRemoteResult {
+            outcome: MergeRemoteOutcome::Blocked {
+                head_sha,
+                base_ref: base_ref.unwrap_or_default(),
             },
             rates,
         });
@@ -1725,6 +1739,121 @@ pub enum MutationOutcome {
 pub struct MutationResult {
     pub outcome: MutationOutcome,
     pub rates: Vec<RateLimit>,
+}
+
+#[derive(Debug)]
+pub struct BranchComparisonResult {
+    pub behind: bool,
+    pub rates: Vec<RateLimit>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompareResponse {
+    behind_by: u64,
+}
+
+fn compare_url(repo_full_name: &str, base_ref: &str, head_sha: &str) -> Option<reqwest::Url> {
+    let (owner, repo) = repo_full_name.split_once('/')?;
+    let comparison = format!("{base_ref}...{head_sha}");
+    let mut url = reqwest::Url::parse(API_BASE).ok()?;
+    url.path_segments_mut()
+        .ok()?
+        .extend(["repos", owner, repo, "compare"])
+        .push(&comparison);
+    Some(url)
+}
+
+/// Compare the current base ref with the exact validated PR head. `behind_by > 0` means the base
+/// contains commits absent from the head, even when GitHub collapses that fact into `BLOCKED`.
+pub async fn compare_pull_request_branch(
+    client: &reqwest::Client,
+    token: &str,
+    repo_full_name: &str,
+    base_ref: &str,
+    head_sha: &str,
+) -> Result<BranchComparisonResult, MergeRemoteError> {
+    let mut rates = Vec::new();
+    let Some(url) = compare_url(repo_full_name, base_ref, head_sha) else {
+        return Err(MergeRemoteError {
+            class: MergeErrorClass::Permanent,
+            message: "Could not construct the pull request comparison URL.".to_string(),
+            rates,
+        });
+    };
+    let comparison: CompareResponse = merge_json(
+        authed_get(client, url.as_str(), token),
+        "pull request branch comparison",
+        &mut rates,
+    )
+    .await?;
+    Ok(BranchComparisonResult {
+        behind: comparison.behind_by > 0,
+        rates,
+    })
+}
+
+fn update_pull_request_branch_request(
+    client: &reqwest::Client,
+    token: &str,
+    repo_full_name: &str,
+    number: i64,
+    expected_head_sha: &str,
+) -> reqwest::RequestBuilder {
+    authed(
+        client
+            .put(format!(
+                "{API_BASE}/repos/{repo_full_name}/pulls/{number}/update-branch"
+            ))
+            .json(&serde_json::json!({ "expected_head_sha": expected_head_sha })),
+        token,
+    )
+}
+
+async fn send_guarded_branch_update<Cancelled>(
+    request: reqwest::RequestBuilder,
+    mutation_guard: &tokio::sync::Mutex<()>,
+    is_cancelled: Cancelled,
+    rates: &mut Vec<RateLimit>,
+) -> Result<MutationOutcome, MergeRemoteError>
+where
+    Cancelled: Fn() -> bool,
+{
+    let _mutation_lease = mutation_guard.lock().await;
+    if is_cancelled() {
+        return Ok(MutationOutcome::Cancelled);
+    }
+    merge_json::<serde_json::Value>(request, "update pull request branch", rates).await?;
+    Ok(MutationOutcome::Applied)
+}
+
+/// Update a PR branch from its base, guarded by the exact validated head SHA and cancellation.
+pub async fn update_pull_request_branch<Cancelled>(
+    client: &reqwest::Client,
+    token: &str,
+    repo_full_name: &str,
+    number: i64,
+    expected_head_sha: &str,
+    mutation_guard: &tokio::sync::Mutex<()>,
+    is_cancelled: Cancelled,
+) -> Result<MutationResult, MergeRemoteError>
+where
+    Cancelled: Fn() -> bool,
+{
+    let mut rates = Vec::new();
+    let outcome = send_guarded_branch_update(
+        update_pull_request_branch_request(
+            client,
+            token,
+            repo_full_name,
+            number,
+            expected_head_sha,
+        ),
+        mutation_guard,
+        is_cancelled,
+        &mut rates,
+    )
+    .await?;
+    Ok(MutationResult { outcome, rates })
 }
 
 /// Re-run the failed jobs of a workflow run (`POST .../actions/runs/{run_id}/rerun-failed-jobs`).
@@ -2852,6 +2981,23 @@ mod tests {
             "Squash merges are not allowed on this repository."
         ));
         assert!(!squash_merge_is_disallowed("Pull Request is not mergeable"));
+    }
+
+    #[test]
+    fn compare_url_encodes_refs_as_one_path_segment() {
+        let url = compare_url("octo/repo", "release/next", "abc123").unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://api.github.com/repos/octo/repo/compare/release%2Fnext...abc123"
+        );
+        assert!(compare_url("missing-repo-owner", "main", "abc123").is_none());
+    }
+
+    #[test]
+    fn compare_response_reports_commits_missing_from_the_head() {
+        let comparison: CompareResponse =
+            serde_json::from_str(r#"{"behind_by":5,"ahead_by":1}"#).unwrap();
+        assert_eq!(comparison.behind_by, 5);
     }
 
     /* ------------------------- exact-head check diagnosis ------------------- */

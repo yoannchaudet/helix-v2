@@ -533,6 +533,10 @@ fn phase_explanation(operation: &dependabot::DependabotMergeOperation) -> (Strin
             "Updating the pull request's branch with the latest changes from its base branch.".to_string(),
             "Wait for status checks to run against the updated branch.".to_string(),
         ),
+        "waiting_requirements" => (
+            "GitHub still reports this pull request as blocked, but no pending or failing checks are visible yet.".to_string(),
+            "Wait for GitHub to publish the remaining requirement or allow the merge.".to_string(),
+        ),
         "waiting_checks" => (
             "Waiting for required status checks to finish on the pull request.".to_string(),
             "Once checks succeed, continue toward merging; retry them if any fail.".to_string(),
@@ -773,6 +777,7 @@ where
                     // the FIFO loop; treat it defensively like `Waiting` (leave the row as-is)
                     // rather than forcing a state transition on an unexpected value.
                     github::MergeRemoteOutcome::Prepared { .. }
+                    | github::MergeRemoteOutcome::Blocked { .. }
                     | github::MergeRemoteOutcome::Waiting => {}
                 }
                 processed += 1;
@@ -965,6 +970,20 @@ trait MergeBackend {
         head: &str,
     ) -> Result<github::ExactHeadCheckDiagnosis, github::MergeRemoteError>;
 
+    async fn compare_branch(
+        &self,
+        repo: &str,
+        base: &str,
+        head: &str,
+    ) -> Result<github::BranchComparisonResult, github::MergeRemoteError>;
+
+    async fn update_branch(
+        &self,
+        repo: &str,
+        number: i64,
+        head: &str,
+    ) -> Result<github::MutationResult, github::MergeRemoteError>;
+
     async fn rerun(
         &self,
         repo: &str,
@@ -1055,6 +1074,33 @@ impl MergeBackend for RealMergeBackend<'_> {
         head: &str,
     ) -> Result<github::ExactHeadCheckDiagnosis, github::MergeRemoteError> {
         github::diagnose_exact_head_checks(&self.client, &self.token, repo, head).await
+    }
+
+    async fn compare_branch(
+        &self,
+        repo: &str,
+        base: &str,
+        head: &str,
+    ) -> Result<github::BranchComparisonResult, github::MergeRemoteError> {
+        github::compare_pull_request_branch(&self.client, &self.token, repo, base, head).await
+    }
+
+    async fn update_branch(
+        &self,
+        repo: &str,
+        number: i64,
+        head: &str,
+    ) -> Result<github::MutationResult, github::MergeRemoteError> {
+        github::update_pull_request_branch(
+            &self.client,
+            &self.token,
+            repo,
+            number,
+            head,
+            self.mutation_guard,
+            self.is_cancelled(),
+        )
+        .await
     }
 
     async fn rerun(
@@ -1435,6 +1481,19 @@ async fn orchestrate_operation<B: MergeBackend>(
                 rates,
             })
         }
+        Outcome::Blocked { head_sha, base_ref } => {
+            let outcome = direct_await_checks(
+                db,
+                backend,
+                &work,
+                &head_sha,
+                Some(&base_ref),
+                timed_out,
+                &mut rates,
+            )
+            .await?;
+            Ok(github::MergeRemoteResult { outcome, rates })
+        }
         Outcome::Pending {
             head_sha,
             approved,
@@ -1469,7 +1528,8 @@ async fn orchestrate_operation<B: MergeBackend>(
             }
             // Direct strategy, head validated + approved, but not mergeable yet → diagnose checks.
             let outcome =
-                direct_await_checks(db, backend, &work, &head_sha, timed_out, &mut rates).await?;
+                direct_await_checks(db, backend, &work, &head_sha, None, timed_out, &mut rates)
+                    .await?;
             Ok(github::MergeRemoteResult { outcome, rates })
         }
         Outcome::Prepared {
@@ -1643,6 +1703,7 @@ async fn direct_await_checks<B: MergeBackend>(
     backend: &B,
     work: &dependabot::MergeWork,
     head_sha: &str,
+    blocked_base_ref: Option<&str>,
     timed_out: bool,
     rates: &mut Vec<github::RateLimit>,
 ) -> Result<github::MergeRemoteOutcome, github::MergeRemoteError> {
@@ -1744,6 +1805,78 @@ async fn direct_await_checks<B: MergeBackend>(
             branch_update_requested: false,
             reason: Some("A required check failed; a re-run is scheduled.".to_string()),
         });
+    }
+
+    if diagnosis.pending.is_empty() {
+        if let Some(base_ref) = blocked_base_ref {
+            if base_ref.is_empty() {
+                return Ok(Outcome::PermanentFailure {
+                    code: "blocked_by_repository_rule",
+                    reason:
+                        "GitHub blocks this pull request, but did not identify its base branch."
+                            .to_string(),
+                });
+            }
+            let comparison = net!(*rates, backend.compare_branch(&repo, base_ref, head_sha));
+            if comparison.behind {
+                let update = net!(
+                    *rates,
+                    backend.update_branch(&repo, work.operation.number, head_sha)
+                );
+                if update.outcome == github::MutationOutcome::Cancelled {
+                    return Ok(Outcome::Cancelled);
+                }
+                let head = head_sha.to_string();
+                with_conn(db, rates, |conn| {
+                    dependabot::set_phase(conn, op_id, "updating_branch", None, None, None)?;
+                    dependabot::schedule_next_action(conn, op_id, None)?;
+                    dependabot::append_operation_event(
+                        conn,
+                        op_id,
+                        "updating_branch",
+                        "branch",
+                        "requested",
+                        "The branch is behind its base; requested an exact-head branch update.",
+                        None,
+                        Some(&head),
+                        None,
+                    )
+                })?;
+                return Ok(Outcome::Pending {
+                    head_sha: head,
+                    approved: false,
+                    branch_update_requested: true,
+                    reason: Some(
+                        "Updating the stale branch and waiting for fresh checks.".to_string(),
+                    ),
+                });
+            }
+            let head = head_sha.to_string();
+            let summary = "GitHub still blocks the merge; no pending or failing checks were found.";
+            with_conn(db, rates, |conn| {
+                dependabot::set_phase(conn, op_id, "waiting_requirements", None, None, None)?;
+                dependabot::schedule_next_action(conn, op_id, None)?;
+                dependabot::append_operation_event(
+                    conn,
+                    op_id,
+                    "waiting_requirements",
+                    "requirement",
+                    "pending",
+                    summary,
+                    Some(
+                        "The branch is current. GitHub may still be registering a required check or enforcing another repository rule.",
+                    ),
+                    Some(&head),
+                    None,
+                )
+            })?;
+            return Ok(Outcome::Pending {
+                head_sha: head,
+                approved: true,
+                branch_update_requested: false,
+                reason: Some(summary.to_string()),
+            });
+        }
     }
 
     // Only pending checks remain: keep waiting, re-polling on the next FIFO pass.
@@ -1930,7 +2063,7 @@ async fn queue_flow<B: MergeBackend>(
                 None,
             )
         })?;
-        return direct_await_checks(db, backend, work, head_sha, false, rates).await;
+        return direct_await_checks(db, backend, work, head_sha, None, false, rates).await;
     }
 
     // Requirements still pending (not yet approved / checks not green) → idempotently enable
@@ -2720,6 +2853,7 @@ mod tests {
             "validating",
             "approving",
             "updating_branch",
+            "waiting_requirements",
             "waiting_checks",
             "retry_scheduled",
             "retrying_checks",
@@ -2852,9 +2986,10 @@ mod tests {
     /* --------------------------- durable orchestrator ------------------------ */
 
     use github::{
-        ActionsRunFailure, ExactHeadCheckDiagnosis, ExternalCheckFailure, MergeQueueEntryStatus,
-        MergeQueuePolicy, MergeQueueStrategy, MergeRemoteError, MergeRemoteOutcome,
-        MergeRemoteResult, MutationOutcome, MutationResult, PrQueueStatus, PrQueueStatusResult,
+        ActionsRunFailure, BranchComparisonResult, ExactHeadCheckDiagnosis, ExternalCheckFailure,
+        MergeQueueEntryStatus, MergeQueuePolicy, MergeQueueStrategy, MergeRemoteError,
+        MergeRemoteOutcome, MergeRemoteResult, MutationOutcome, MutationResult, PrQueueStatus,
+        PrQueueStatusResult,
     };
     use std::collections::VecDeque;
 
@@ -2873,6 +3008,8 @@ mod tests {
         process: VecDeque<NetResult<MergeRemoteResult>>,
         policy: VecDeque<NetResult<MergeQueuePolicy>>,
         diagnose: VecDeque<NetResult<ExactHeadCheckDiagnosis>>,
+        compare: VecDeque<NetResult<BranchComparisonResult>>,
+        update_branch: VecDeque<NetResult<MutationResult>>,
         rerun: VecDeque<NetResult<MutationResult>>,
         queue: VecDeque<NetResult<PrQueueStatusResult>>,
         enable: VecDeque<NetResult<MutationResult>>,
@@ -2886,6 +3023,8 @@ mod tests {
         process: usize,
         policy: usize,
         diagnose: usize,
+        compare: usize,
+        update_branch: usize,
         rerun: usize,
         rerun_ids: Vec<i64>,
         queue: usize,
@@ -2941,6 +3080,29 @@ mod tests {
         async fn diagnose(&self, _repo: &str, _head: &str) -> NetResult<ExactHeadCheckDiagnosis> {
             self.calls.lock().unwrap().diagnose += 1;
             Self::pop(&mut self.script.lock().unwrap().diagnose, "diagnose")
+        }
+
+        async fn compare_branch(
+            &self,
+            _repo: &str,
+            _base: &str,
+            _head: &str,
+        ) -> NetResult<BranchComparisonResult> {
+            self.calls.lock().unwrap().compare += 1;
+            Self::pop(&mut self.script.lock().unwrap().compare, "compare_branch")
+        }
+
+        async fn update_branch(
+            &self,
+            _repo: &str,
+            _number: i64,
+            _head: &str,
+        ) -> NetResult<MutationResult> {
+            self.calls.lock().unwrap().update_branch += 1;
+            Self::pop(
+                &mut self.script.lock().unwrap().update_branch,
+                "update_branch",
+            )
         }
 
         async fn rerun(&self, _repo: &str, run_id: i64) -> NetResult<MutationResult> {
@@ -3004,6 +3166,16 @@ mod tests {
                 approved: true,
                 branch_update_requested: branch_update,
                 reason: None,
+            },
+            rates: rates_core(),
+        }
+    }
+
+    fn blocked(head: &str, base: &str) -> MergeRemoteResult {
+        MergeRemoteResult {
+            outcome: MergeRemoteOutcome::Blocked {
+                head_sha: head.to_string(),
+                base_ref: base.to_string(),
             },
             rates: rates_core(),
         }
@@ -3162,7 +3334,7 @@ mod tests {
         store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
         let id = enqueue_op(&db, 1);
         let fake = FakeBackend::new(Script {
-            process: VecDeque::from([Ok(pending("sha1", false))]),
+            process: VecDeque::from([Ok(blocked("sha1", "main"))]),
             diagnose: VecDeque::from([Ok(ExactHeadCheckDiagnosis {
                 pending: vec![github::PendingCheck {
                     name: "build".to_string(),
@@ -3184,6 +3356,97 @@ mod tests {
         assert_eq!(after.phase, "waiting_checks");
         assert_eq!(after.check_retry_count, 0);
         assert_eq!(fake.calls().rerun, 0);
+        assert_eq!(fake.calls().compare, 0);
+        assert!(statuses(&db, id).contains(&"pending".to_string()));
+    }
+
+    #[test]
+    fn direct_blocked_with_complete_checks_updates_a_stale_branch() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        let fake = FakeBackend::new(Script {
+            process: VecDeque::from([Ok(blocked("sha1", "main"))]),
+            diagnose: VecDeque::from([Ok(ExactHeadCheckDiagnosis {
+                rates: rates_core(),
+                ..Default::default()
+            })]),
+            compare: VecDeque::from([Ok(BranchComparisonResult {
+                behind: true,
+                rates: rates_core(),
+            })]),
+            update_branch: VecDeque::from([Ok(MutationResult {
+                outcome: MutationOutcome::Applied,
+                rates: rates_core(),
+            })]),
+            ..Default::default()
+        });
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "direct").unwrap();
+            dependabot::set_phase(&conn, id, "queued", Some("direct"), None, Some("main")).unwrap();
+        }
+
+        tick(&db, &fake);
+
+        let after = op(&db, id);
+        assert_eq!(after.state, "delegated");
+        assert_eq!(after.phase, "updating_branch");
+        let update_from: Option<String> =
+            db.0.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT update_branch_from_sha FROM dependabot_merge_operations WHERE id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+        assert_eq!(update_from.as_deref(), Some("sha1"));
+        assert_eq!(fake.calls().compare, 1);
+        assert_eq!(fake.calls().update_branch, 1);
+        assert!(statuses(&db, id).contains(&"requested".to_string()));
+    }
+
+    #[test]
+    fn direct_blocked_with_no_visible_checks_and_current_branch_keeps_waiting() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        let fake = FakeBackend::new(Script {
+            process: VecDeque::from([Ok(blocked("sha1", "main"))]),
+            diagnose: VecDeque::from([Ok(ExactHeadCheckDiagnosis {
+                rates: rates_core(),
+                ..Default::default()
+            })]),
+            compare: VecDeque::from([Ok(BranchComparisonResult {
+                behind: false,
+                rates: rates_core(),
+            })]),
+            ..Default::default()
+        });
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "direct").unwrap();
+            dependabot::set_phase(&conn, id, "queued", Some("direct"), None, Some("main")).unwrap();
+        }
+
+        tick(&db, &fake);
+
+        let after = op(&db, id);
+        assert_eq!(after.state, "delegated");
+        assert_eq!(after.phase, "waiting_requirements");
+        let failure_code: Option<String> =
+            db.0.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT failure_code FROM dependabot_merge_operations WHERE id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+        assert_eq!(failure_code, None);
+        assert_eq!(fake.calls().compare, 1);
+        assert_eq!(fake.calls().update_branch, 0);
         assert!(statuses(&db, id).contains(&"pending".to_string()));
     }
 
