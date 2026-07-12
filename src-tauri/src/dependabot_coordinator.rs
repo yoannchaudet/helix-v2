@@ -366,13 +366,13 @@ pub struct DependabotMergeProcessResult {
 }
 
 fn merge_status(conn: &rusqlite::Connection) -> Result<DependabotMergeStatus, String> {
+    let sql = format!(
+        "SELECT COUNT(*) FROM dependabot_merge_operations
+         WHERE state IN ({active_states})",
+        active_states = dependabot::ACTIVE_STATES,
+    );
     let active_count = conn
-        .query_row(
-            "SELECT COUNT(*) FROM dependabot_merge_operations
-             WHERE state IN ('queued', 'validating', 'delegated', 'cancel_requested')",
-            [],
-            |r| r.get(0),
-        )
+        .query_row(&sql, [], |r| r.get(0))
         .map_err(|e| e.to_string())?;
     let runtime = dependabot::merge_runtime(conn).map_err(|e| e.to_string())?;
     Ok(DependabotMergeStatus {

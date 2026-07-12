@@ -210,9 +210,7 @@ export function installTauriMock(fixtures) {
     list_dependabot: () => {
       const activeByPr = new Map(
         state.mergeOperations
-          .filter((o) =>
-            ["queued", "validating", "delegated", "cancel_requested"].includes(o.state),
-          )
+          .filter((o) => activeMergeStates.has(o.state))
           .map((o) => [
             o.pr_id,
             { id: o.id, state: o.state, queue_position: o.queue_position ?? null },
@@ -262,9 +260,7 @@ export function installTauriMock(fixtures) {
       );
     },
     dependabot_merge_status: () => ({
-      active_count: state.mergeOperations.filter((o) =>
-        ["queued", "validating", "delegated", "cancel_requested"].includes(o.state),
-      ).length,
+      active_count: state.mergeOperations.filter((o) => activeMergeStates.has(o.state)).length,
       poll_interval_s: state.settings.dependabot_merge_poll_interval_s,
       min_poll_interval_s: state.settings.min_dependabot_merge_poll_interval_s,
       github_poll_floor_s: 0,
@@ -273,9 +269,7 @@ export function installTauriMock(fixtures) {
     }),
     enqueue_dependabot_merge: ({ prId }) => {
       const existing = state.mergeOperations.find(
-        (o) =>
-          o.pr_id === prId &&
-          ["queued", "validating", "delegated", "cancel_requested"].includes(o.state),
+        (o) => o.pr_id === prId && activeMergeStates.has(o.state),
       );
       if (existing) return { ...existing };
       let found;
