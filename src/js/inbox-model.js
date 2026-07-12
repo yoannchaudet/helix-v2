@@ -3,6 +3,13 @@
    function takes its inputs as arguments and returns new data, so this is the testable
    "core" the views render from. */
 
+// Re-export generic list utilities so existing imports keep working. The canonical home
+// is list-kit-model.js; inbox-model.js re-exports for backward compatibility.
+export { sortReposByRecency, latestUpdatedAt } from "./list-kit-model.js";
+
+// Local import for use within this module (re-exports don't bind locally).
+import { sortReposByRecency } from "./list-kit-model.js";
+
 /** Cleanup candidates: notifications safe to mark as done (design.md §6). A merged or
  *  closed pull request, or a closed issue. Subjects that aren't yet resolved (no
  *  `subject_state`) and other subject types are excluded. The resolved state is only
@@ -97,34 +104,6 @@ export const EMPTY_SUBTITLES = {
 export function repoMatches(group, filterId) {
   const match = (FILTERS[filterId] ?? FILTERS.all).match;
   return group.notifications.filter(match);
-}
-
-/** Most recent `updated_at` in a notification list (ISO-8601 UTC strings compare lexically,
- *  so the newest is the max). Empty list → "". */
-export function latestUpdatedAt(notifications) {
-  let max = "";
-  for (const n of notifications) {
-    if (n.updated_at > max) max = n.updated_at;
-  }
-  return max;
-}
-
-/** Order repo-like items most-recent-first by their newest (matching) notification, with
- *  repo name as a deterministic tie-breaker. Recency is computed once per item (not on every
- *  comparison), and names compare by code point so the order is stable across locales. */
-export function sortReposByRecency(items, getNotifications, getName) {
-  return items
-    .map((item) => ({
-      item,
-      recency: latestUpdatedAt(getNotifications(item)),
-      name: getName(item),
-    }))
-    .sort((a, b) => {
-      if (a.recency !== b.recency) return a.recency < b.recency ? 1 : -1;
-      if (a.name !== b.name) return a.name < b.name ? -1 : 1;
-      return 0;
-    })
-    .map((x) => x.item);
 }
 
 /** Apply the active filter, then the optional repo refinement, to `groups`, ordering the

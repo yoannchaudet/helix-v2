@@ -6,7 +6,7 @@
  * in Rust); repositories are refined by `full_name` (Dependabot has no notification-style
  * repo ids). Recency sorting reuses the generic helper shared with the inbox model. */
 
-import { sortReposByRecency } from "./inbox-model.js";
+import { sortReposByRecency } from "./list-kit-model.js";
 
 /** Apply the optional repository refinement (by `full_name`), then order repos
  *  most-recently-updated first. Returns new group objects; the input is not mutated. */

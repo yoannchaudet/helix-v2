@@ -1,5 +1,4 @@
 import { invoke } from "./js/api.js";
-import { $$, clearAnnounceQueue } from "./js/dom.js";
 import { loadStorage } from "./js/storage.js";
 import { initUpdates } from "./js/updates.js";
 import { initSidebarResize } from "./js/sidebar-resize.js";
@@ -14,24 +13,31 @@ import {
   configureSync,
 } from "./js/sync.js";
 import { initSettings, loadSettings, showSettings } from "./js/settings.js";
-import { initInbox, loadInbox } from "./js/inbox.js";
+import { loadInbox } from "./js/inbox.js";
+import { startDependabotMergePolling, stopDependabotMergePolling } from "./js/dependabot.js";
 import {
-  initDependabot,
-  onDependabotOpened,
-  startDependabotMergePolling,
-  stopDependabotMergePolling,
-} from "./js/dependabot.js";
-import { initModules, configureModules, restoreLastModule, getActiveModule } from "./js/modules.js";
+  initModules,
+  configureModules,
+  activateCurrentModule,
+  restoreLastModule,
+} from "./js/modules.js";
 import { initShortcuts } from "./js/shortcuts.js";
 
+// Note: inbox.js and dependabot.js self-register with the module system (registerModule)
+// and the shortcuts system (registerShortcutGroups) at import time. The named imports above
+// trigger those registrations, so their lifecycle callbacks are available when initModules()
+// runs — no separate side-effect imports are needed.
+
 /* main.js is the thin orchestrator: it wires each domain module's init on DOMContentLoaded
- * and connects the cross-domain lifecycle hooks. Everything else lives in `js/`:
+ * and connects the cross-domain lifecycle hooks. Modules self-register their lifecycle
+ * (init/activate/deactivate) and keyboard shortcuts via `registerModule` and
+ * `registerShortcutGroups` — see inbox.js and dependabot.js. Everything else lives in `js/`:
  *  - state.js     cross-module poll/session state
  *  - sync.js      notifications status header, sync flow, poll countdown
  *  - settings.js  Settings pane (appearance/theme + poll-interval form)
- *  - inbox.js     notification list + sidebar, focus, mark-done, interactions
+ *  - list-kit.js  shared list-view controller helpers (hover, kbd nav, focus)
  *  - account.js / storage.js / updates.js / sidebar-resize.js / menu.js  leaf domains
- *  - api.js / dom.js / format.js / inbox-model.js / inbox-view.js  pure helpers */
+ *  - api.js / dom.js / format.js / *-model.js / *-view.js  pure helpers */
 
 /* --------------------------------- Init ---------------------------------- */
 
@@ -44,25 +50,22 @@ window.addEventListener("DOMContentLoaded", () => {
   // Settings pane: theme picker, poll-interval form, pane open/close, and ⌘, all wired here.
   initSettings();
 
-  for (const btn of $$(".js-sync-btn")) btn.addEventListener("click", syncNow);
+  for (const btn of document.querySelectorAll(".js-sync-btn")) {
+    btn.addEventListener("click", syncNow);
+  }
 
   initSidebarResize();
-  initInbox();
-  initDependabot();
   initShortcuts();
 
-  // Module system: render the title-bar module picker and wire ⌘1/⌘2. Switching modules
-  // dismisses the Settings overlay, and opening the Dependabot module loads it (and
-  // staleness-gated auto-syncs). modules.js fires onSwitch rather than importing these
-  // modules, keeping the dependency one-directional.
-  initModules();
+  // Module system: render the title-bar module picker, wire ⌘1/⌘2, then call each
+  // registered module's init() and load(). Modules register themselves via side-effect
+  // imports above, so their lifecycle callbacks are available when initModules() runs.
+  // The onBeforeSwitch hook dismisses the Settings overlay on any module switch (Settings
+  // is NOT a module, so this lives in the app shell, not in any module's lifecycle).
   configureModules({
-    onSwitch: (id) => {
-      showSettings(false);
-      if (id === "dependabot") onDependabotOpened();
-      else clearAnnounceQueue();
-    },
+    onBeforeSwitch: () => showSettings(false),
   });
+  initModules();
 
   registerSyncEvents();
   // Sync reloads the inbox after a sync (and after background subject resolution) via this
@@ -80,10 +83,10 @@ window.addEventListener("DOMContentLoaded", () => {
         loadSettings();
         loadSyncStatus();
       }
-      // If we restored into Dependabot before auth resolved, its auth-gated auto-sync was
-      // skipped; now that we're authenticated, run its open behavior (staleness-gated, so
-      // it's a no-op when data is fresh).
-      if (getActiveModule() === "dependabot") onDependabotOpened();
+      // If auth resolved while a module was already active (e.g. restored into Dependabot
+      // before auth completed), re-activate so its auth-gated logic (staleness-gated sync,
+      // etc.) can run now.
+      activateCurrentModule();
     },
     onSignedOut: () => {
       // A new session must re-prove a successful sync before the status pill goes green

@@ -11,23 +11,59 @@ import { MODULES, DEFAULT_MODULE_ID, isModuleId, moduleAt } from "./modules-mode
  *
  * Settings is intentionally NOT a module — it's a focused full-width *overlay* (see
  * settings.js) that temporarily covers the active module and returns to it on close.
- * Switching modules dismisses that overlay (wired via the `onSwitch` hook from main.js, so
- * this module never imports settings.js and we avoid a circular dependency). */
+ *
+ * ## Module contract
+ *
+ * Modules register their lifecycle via `registerModule(id, callbacks)`. The contract is:
+ *
+ *   init()       — Called once during `initModules()` (DOMContentLoaded). Wire DOM
+ *                  listeners and one-time setup here.
+ *   load()       — Called once after init to perform the initial data load.
+ *   activate()   — Called when the module becomes visible (module switch or restore).
+ *                  Use for staleness-gated syncs, on-return announcements, etc.
+ *   deactivate() — Called when the module is hidden by another module. Use for clearing
+ *                  stale announcement queues, pausing timers, etc.
+ *
+ * All callbacks are optional. Modules that don't register still work — they just don't get
+ * lifecycle calls.
+ *
+ * The app shell can also register hooks via `configureModules({ onBeforeSwitch })` for
+ * cross-cutting concerns that are NOT module-specific (e.g. dismissing the Settings
+ * overlay). These fire before the module lifecycle. */
 
 /** The active module id. Defaults to `DEFAULT_MODULE_ID`; `restoreLastModule()` reinstates
  *  the previously opened module on launch. */
 let activeModuleId = DEFAULT_MODULE_ID;
 
-/** Cross-module hooks, set by main.js to avoid import cycles. `onSwitch(id)` fires after a
- *  module becomes active (used to dismiss the Settings overlay). */
-const hooks = { onSwitch: null };
+/** Registered module lifecycle callbacks, keyed by module id.
+ *  Shape: `{ [id]: { init?, load?, activate?, deactivate? } }`. */
+const registry = {};
+
+/** App-shell hooks, set by main.js to avoid import cycles. `onBeforeSwitch()` fires
+ *  before every module switch (used to dismiss the Settings overlay). */
+const hooks = { onBeforeSwitch: null };
 
 /** Serializes `set_last_module` writes so rapid switches persist in switch order. */
 let persistChain = Promise.resolve();
 
-/** Wire cross-module reactions without importing their modules (avoids cycles). */
+/** Wire app-shell reactions (not module-specific) without importing their modules.
+ *  `onBeforeSwitch()` fires before every switch — used to dismiss the Settings overlay. */
 export function configureModules(overrides) {
   Object.assign(hooks, overrides);
+}
+
+/** Register a module's lifecycle callbacks. Call at module init time (before `initModules`).
+ *
+ * @param {string} id       The module id (must match a MODULES entry).
+ * @param {Object} callbacks
+ * @param {Function} [callbacks.init]       One-time setup (DOMContentLoaded).
+ * @param {Function} [callbacks.load]       Initial data load (called after all inits).
+ * @param {Function} [callbacks.activate]   Called when the module becomes visible.
+ * @param {Function} [callbacks.deactivate] Called when the module is hidden.
+ */
+export function registerModule(id, callbacks) {
+  if (!isModuleId(id)) throw new Error(`registerModule: unknown module id "${id}"`);
+  registry[id] = { ...callbacks };
 }
 
 /** The currently active module's id. */
@@ -66,19 +102,31 @@ function renderPickerState() {
 }
 
 /** Switch to a module by id. No-op for an unknown id. Always re-shows the active module pane
- *  and dismisses the Settings overlay (via `onSwitch`), so it doubles as "leave Settings". */
+ *  and dismisses the Settings overlay (via `onBeforeSwitch`), so it doubles as "leave Settings".
+ *  Calls `deactivate()` on the outgoing module and `activate()` on the incoming one. */
 export function switchModule(id) {
   if (!isModuleId(id)) return;
-  activeModuleId = id;
+  const outgoing = activeModuleId;
+  // App-shell hook fires first (dismisses Settings, closes transient UI).
+  hooks.onBeforeSwitch?.();
   // Dismiss transient UI tied to the outgoing module so it can't linger over the new one:
-  // any open context menu/popover (e.g. an inbox row menu) and the Settings overlay.
+  // any open context menu/popover (e.g. an inbox row menu).
   // Close the menu WITHOUT restoring focus: its return target is inside the outgoing module,
   // which `showActiveModulePane()` is about to hide — restoring focus there would strand it
   // on a hidden element. Letting focus fall to <body> is the safe, stable outcome.
   closeMenu(false);
-  hooks.onSwitch?.(id);
+  // Lifecycle: deactivate the outgoing module (only if actually changing modules).
+  if (outgoing !== id) {
+    registry[outgoing]?.deactivate?.();
+  }
+  activeModuleId = id;
   showActiveModulePane();
   renderPickerState();
+  // Lifecycle: activate the incoming module (only if actually changed, to avoid re-running
+  // expensive activation on a same-module click that just dismisses Settings).
+  if (outgoing !== id) {
+    registry[id]?.activate?.();
+  }
   // Persist the choice so the next launch reopens this module. Writes are chained (not just
   // fire-and-forget) so a slow earlier write can't land after a later one and restore a stale
   // module on the next launch. A failed write just means we fall back to the default.
@@ -99,8 +147,16 @@ export async function restoreLastModule() {
   }
 }
 
+/** Re-activate the currently active module without switching. Used when external state
+ *  changes (e.g. authentication) mean the active module should re-run its activation
+ *  logic (staleness-gated syncs, etc.). No-op if nothing is registered. */
+export function activateCurrentModule() {
+  registry[activeModuleId]?.activate?.();
+}
+
 /** Render the picker buttons into `#module-picker` and wire clicks + the ⌘N shortcuts.
- *  Call once on DOMContentLoaded. */
+ *  Then call each registered module's `init()` and `load()`. Call once on DOMContentLoaded,
+ *  AFTER all modules have called `registerModule`. */
 export function initModules() {
   const picker = $("#module-picker");
   if (picker) {
@@ -126,7 +182,20 @@ export function initModules() {
     }
   });
 
+  // Module lifecycle: init each registered module, then load.
+  for (const m of MODULES) {
+    registry[m.id]?.init?.();
+  }
+  for (const m of MODULES) {
+    registry[m.id]?.load?.();
+  }
+
   // Paint the initial state (default module pane + picker highlight).
   showActiveModulePane();
   renderPickerState();
+
+  // Activate the default module so it runs its on-open logic (if any). If
+  // `restoreLastModule` later switches to a different module, that module's activate will
+  // fire via switchModule (and this one's deactivate), so there's no double-activation.
+  registry[activeModuleId]?.activate?.();
 }

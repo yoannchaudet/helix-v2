@@ -17,6 +17,9 @@ import { isAuthenticated } from "./account.js";
 import { setSyncProgress, flashSyncProgress, loadSyncStatus, syncNow } from "./sync.js";
 import { showSettings } from "./settings.js";
 import { isShortcutsOpen } from "./shortcuts.js";
+import { registerShortcutGroups } from "./shortcuts.js";
+import { registerModule } from "./modules.js";
+import { createHoverManager, createKbdFocusRing, createRowNavigator } from "./list-kit.js";
 
 /* The inbox: the notification list + its sidebar (type filters + repo refinement), keyboard
  * focus preservation across re-renders, the mark-done flows, and row interactions. Pure
@@ -114,37 +117,17 @@ function emptyInbox() {
  *  Shape: { threadId, part } | { selector }. Consumed (cleared) by the next renderInbox. */
 let pendingInboxFocus = null;
 
-/* Row hover is driven by a JS-managed class instead of the CSS `:hover` pseudo. In the macOS
- * WKWebView, a wholesale re-render (background subject resolution replaces rows) under a
- * stationary cursor leaves `:hover` stuck on the new node — its `mouseout` never fires — so the
- * row's action controls stay visible after the cursor leaves. We instead mark the hovered
- * row/header with a class via delegated listeners on the stable `#inbox` container.
- *
- * State lives in the DOM (the class itself), never a JS reference: during the re-render storm
- * while subjects resolve, the WKWebView can deliver `mouseover`s whose target is about to be (or
- * already) detached, so a tracked reference goes stale while live rows keep the class — and they
- * accumulate. Instead, every `mouseover` (and each render/leave/blur/scroll) SWEEPS the class off
- * the live DOM and then marks only the row/header currently under the cursor. This guarantees at
- * most one marked row at any time and self-heals on any pointer movement. */
+/* Row hover is driven by a JS-managed class instead of the CSS `:hover` pseudo — see
+ * list-kit.js for the full rationale (WKWebView re-render storms under a stationary cursor). */
+const hoverManager = createHoverManager({
+  containerSelector: "#inbox",
+  rowHoverClass: "n-row--hover",
+  headerHoverClass: "repo-header--hover",
+});
 
-/** Remove the hover marker from every row/header that still carries it. The single source of
- *  truth for clearing — sweeps the live DOM so no stray marker can survive (a tracked reference
- *  would miss rows marked via a mouseover whose target was detached mid-re-render). */
-function clearHover() {
-  const inbox = $("#inbox");
-  if (!inbox) return;
-  for (const el of inbox.querySelectorAll(".n-row--hover")) el.classList.remove("n-row--hover");
-  for (const el of inbox.querySelectorAll(".repo-header--hover")) {
-    el.classList.remove("repo-header--hover");
-  }
-}
-
-/** Mark exactly the row + header under the cursor as hovered, clearing everything else first. */
-function setHover(row, header) {
-  clearHover();
-  row?.classList.add("n-row--hover");
-  header?.classList.add("repo-header--hover");
-}
+/** Keyboard-selection ring: marks the focused row for programmatic/keyboard focus (mouse
+ *  clicks use `:focus-visible`). Cleared on the next mouse interaction. */
+const kbdFocus = createKbdFocusRing({ containerSelector: "#inbox" });
 
 /** Snapshot the inbox's current focus so a re-render can restore it. Returns null when
  *  focus isn't inside the inbox (so background re-renders never steal focus). */
@@ -226,7 +209,7 @@ function renderInbox() {
   const groups = filteredGroups();
   // The rows/headers we tracked for hover are about to be replaced — drop the markers so a
   // background re-render under a stationary cursor can't leave controls stuck-visible.
-  clearHover();
+  hoverManager.clear();
   // The toolbar "mark all as done" only makes sense when the active filter shows something.
   const markAll = $("#mark-all-done-btn");
   if (markAll) markAll.disabled = !groups.length;
@@ -631,64 +614,38 @@ function onInboxKeydown(e) {
  * r sync, 1–7 filter). These layer on TOP of the existing Tab + Enter a11y (they don't
  * replace it): j/k just move focus among the row anchors so the list is fast without Tabbing. */
 
-/** All notification rows currently in the DOM, in visual order. */
-function inboxRows() {
-  return [...$("#inbox").querySelectorAll(".n-row")];
-}
-
-/** The row the keyboard "cursor" is on: whichever row contains focus, or null. */
-function activeRow() {
-  const el = document.activeElement;
-  return el instanceof HTMLElement ? el.closest("#inbox .n-row") : null;
-}
-
 /** A row's primary focus target: its openable link, else its (revealed-on-focus) done
  *  button — so every row, openable or not, has a keyboard anchor. Marks the target with
- *  `kbd-focus` so the selection ring shows for programmatic/keyboard focus (mouse clicks use
- *  `:focus-visible`, which stays clean); the ring is cleared on the next mouse interaction. */
+ *  the kbd-focus ring so the selection shows for programmatic/keyboard focus. */
 function focusRow(row, kbd = true) {
   const target = row.querySelector(".n-open[tabindex]") || row.querySelector(".n-done");
   if (!target) return;
-  clearKbdFocus();
-  if (kbd) target.classList.add("kbd-focus");
+  if (kbd) kbdFocus.apply(target);
+  else kbdFocus.clear();
   target.focus();
 }
 
-/** Strip the keyboard-selection ring marker from all rows. */
-function clearKbdFocus() {
-  for (const el of $$("#inbox .kbd-focus")) el.classList.remove("kbd-focus");
-}
-
-/** Move the keyboard cursor by `delta` rows (clamped). From outside the list, enter at the
- *  first (j/↓) or last (k/↑) row. */
-function moveActiveRow(delta) {
-  const rows = inboxRows();
-  if (!rows.length) return;
-  const current = activeRow();
-  const at = current ? rows.indexOf(current) : -1;
-  const next =
-    at === -1
-      ? delta > 0
-        ? 0
-        : rows.length - 1
-      : Math.min(rows.length - 1, Math.max(0, at + delta));
-  focusRow(rows[next]);
-}
+/** Shared row navigator (j/k movement, activeRow, rows). */
+const nav = createRowNavigator({
+  containerSelector: "#inbox",
+  rowSelector: ".n-row",
+  focusRow,
+});
 
 function markActiveRowDone() {
-  const row = activeRow();
+  const row = nav.activeRow();
   // A done row (only in Bookmarks) can't be marked done again — its button is already gone.
   if (row?.dataset.threadId && row.dataset.done !== "true") markDone([row.dataset.threadId]);
 }
 
 function copyActiveRowUrl() {
-  const url = activeRow()?.querySelector(".n-open")?.dataset.url;
+  const url = nav.activeRow()?.querySelector(".n-open")?.dataset.url;
   if (url) copyNotificationUrl(url);
 }
 
 /** Toggle the bookmark on the row under the keyboard cursor. */
 function bookmarkActiveRow() {
-  const btn = activeRow()?.querySelector(".n-bookmark");
+  const btn = nav.activeRow()?.querySelector(".n-bookmark");
   if (btn) {
     const row = btn.closest(".n-row");
     if (row?.dataset.threadId) {
@@ -712,12 +669,12 @@ function onCommandKeydown(e) {
     case "j":
     case "ArrowDown":
       e.preventDefault();
-      moveActiveRow(1);
+      nav.moveActiveRow(1);
       return;
     case "k":
     case "ArrowUp":
       e.preventDefault();
-      moveActiveRow(-1);
+      nav.moveActiveRow(-1);
       return;
     case "d":
     case "e":
@@ -849,25 +806,9 @@ export function initInbox() {
   $("#inbox").addEventListener("click", onInboxClick);
   $("#inbox").addEventListener("keydown", onInboxKeydown);
   $("#inbox").addEventListener("contextmenu", onInboxContextMenu);
-  // A mouse interaction clears the keyboard-selection ring so it doesn't linger for pointer
-  // users (keyboard navigation re-applies it via focusRow).
-  $("#inbox").addEventListener("mousedown", clearKbdFocus);
-  // Row/header hover is tracked here (delegated) rather than via CSS `:hover` — see the
-  // hoverRow/hoverHeader note above for why. `mouseover` bubbles, so one listener covers every
-  // row; moving off all rows (onto a header/gap) or out of the list clears the markers.
-  $("#inbox").addEventListener("mouseover", (e) => {
-    // Normalize a text-node target (some WebViews target text nodes) to its element parent.
-    const el = e.target instanceof Element ? e.target : (e.target?.parentElement ?? null);
-    setHover(el?.closest(".n-row") ?? null, el?.closest(".repo-header") ?? null);
-  });
-  $("#inbox").addEventListener("mouseleave", clearHover);
-  // Scrolling the list under a stationary cursor fires no mouseover in the WKWebView, so a
-  // marked row would keep its controls as it scrolls away. Clear on scroll; the next pointer
-  // move re-marks the row actually under the cursor.
-  $("#inbox").addEventListener("scroll", clearHover, { passive: true });
-  // If the window loses focus while a row is hovered, the WebView may never deliver the
-  // mouseleave — clear the marker so controls don't linger while the app is inactive.
-  window.addEventListener("blur", clearHover);
+  // List-kit: hover tracking + keyboard focus ring (replaces inline implementations).
+  hoverManager.wire();
+  kbdFocus.wire();
   // Power-user triage shortcuts (j/k/d/e/c/r/1–6) — global so filter/sync keys work from
   // anywhere on the notifications pane, not just when a row has focus.
   document.addEventListener("keydown", onCommandKeydown);
@@ -899,3 +840,37 @@ export function initInbox() {
   window.addEventListener("blur", closeMenu);
   $("#inbox").addEventListener("scroll", closeMenu, true);
 }
+
+/* ─────────────────────────── Module registration ──────────────────────────── */
+
+// Register this module's lifecycle and keyboard shortcuts with the module system.
+// `load` is wired separately by main.js (it depends on account state), so we don't
+// register it here.
+
+registerModule("notifications", {
+  init: initInbox,
+});
+
+registerShortcutGroups([
+  {
+    group: "Navigation",
+    items: [
+      { keys: ["j", "↓"], desc: "Next notification" },
+      { keys: ["k", "↑"], desc: "Previous notification" },
+      { keys: ["Enter"], desc: "Open in browser" },
+    ],
+  },
+  {
+    group: "Triage",
+    items: [
+      { keys: ["d", "e"], desc: "Mark as done" },
+      { keys: ["c"], desc: "Copy link" },
+      { keys: ["b"], desc: "Bookmark / unbookmark" },
+      { keys: ["r"], desc: "Sync now" },
+    ],
+  },
+  {
+    group: "Filters",
+    items: [{ keys: ["1"], desc: "Switch smart filter (1 = All … 7 = Bookmarks)" }],
+  },
+]);

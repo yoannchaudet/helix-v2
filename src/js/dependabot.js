@@ -1,5 +1,5 @@
 import { invoke, listen } from "./api.js";
-import { $, html, toast, enqueueAnnounce } from "./dom.js";
+import { $, html, toast, enqueueAnnounce, clearAnnounceQueue } from "./dom.js";
 import { POLL_TICK_MS, STATES } from "./constants.js";
 import { relTime } from "./format.js";
 import {
@@ -16,9 +16,10 @@ import { operationsList, repoSection } from "./dependabot-view.js";
 import { sourceButton } from "./ui.js";
 import { isAuthenticated } from "./account.js";
 import { closeMenu, isMenuOpen, openContextMenu } from "./menu.js";
-import { isShortcutsOpen } from "./shortcuts.js";
+import { isShortcutsOpen, registerShortcutGroups } from "./shortcuts.js";
 import { dependabotMergePoll } from "./state.js";
-import { getActiveModule } from "./modules.js";
+import { getActiveModule, registerModule } from "./modules.js";
+import { createHoverManager, createRowNavigator } from "./list-kit.js";
 
 /* The Dependabot module: a read-only list of open Dependabot PRs grouped by repository, its
  * repo-only sidebar refinement, keyboard navigation, and its own sync flow. Pure row/section
@@ -274,10 +275,9 @@ function applyPendingDiscardState() {
   }
 }
 
+/** Clear hover markers via the shared hover manager. */
 function clearDependabotHover() {
-  for (const row of $("#dependabot")?.querySelectorAll(".n-row--hover") ?? []) {
-    row.classList.remove("n-row--hover");
-  }
+  hoverManager.clear();
 }
 
 function confirmDiscard(button) {
@@ -335,11 +335,11 @@ function resumePendingDiscards() {
   }
 }
 
-function onDependabotMouseOver(e) {
-  clearDependabotHover();
-  const el = e.target instanceof Element ? e.target : e.target?.parentElement;
-  el?.closest("#dependabot .n-row")?.classList.add("n-row--hover");
-}
+/* Row hover: same WKWebView workaround as the inbox — see list-kit.js for rationale. */
+const hoverManager = createHoverManager({
+  containerSelector: "#dependabot",
+  rowHoverClass: "n-row--hover",
+});
 
 /** Render the repo-only sidebar for the Dependabot module (counts + active highlight). */
 function renderSidebar() {
@@ -631,10 +631,17 @@ async function cancelMerge(operationId) {
 
 /* ------------------------- Keyboard command model ------------------------- */
 
-/** All PR rows currently in the DOM, in visual order. */
-function rows() {
-  return [...$("#dependabot").querySelectorAll(".n-row")];
+/** Focus a dependabot row (used by the navigator). */
+function focusRow(row) {
+  row.querySelector(".n-open[tabindex]")?.focus();
 }
+
+/** Shared row navigator (j/k movement, activeRow, rows). */
+const nav = createRowNavigator({
+  containerSelector: "#dependabot",
+  rowSelector: ".n-row",
+  focusRow,
+});
 
 async function processMergeOperations() {
   if (!isAuthenticated() || operationTicking || !activeMergeCount(mergeOperations)) return;
@@ -714,27 +721,6 @@ export function stopDependabotMergePolling(clearPendingDiscards = true) {
   }
 }
 
-/** The row the keyboard cursor is on, or null. */
-function activeRow() {
-  const el = document.activeElement;
-  return el instanceof HTMLElement ? el.closest("#dependabot .n-row") : null;
-}
-
-/** Move the keyboard cursor by `delta` rows (clamped); enter at an end from outside. */
-function moveActiveRow(delta) {
-  const all = rows();
-  if (!all.length) return;
-  const current = activeRow();
-  const at = current ? all.indexOf(current) : -1;
-  const next =
-    at === -1
-      ? delta > 0
-        ? 0
-        : all.length - 1
-      : Math.min(all.length - 1, Math.max(0, at + delta));
-  all[next].querySelector(".n-open[tabindex]")?.focus();
-}
-
 /** Global triage keydown: active only on the Dependabot pane, no modifier, not while typing
  *  or while a menu/overlay owns the keyboard. j/k navigate, Enter opens (handled on the row),
  *  r syncs. */
@@ -751,12 +737,12 @@ function onCommandKeydown(e) {
     case "j":
     case "ArrowDown":
       e.preventDefault();
-      moveActiveRow(1);
+      nav.moveActiveRow(1);
       return;
     case "k":
     case "ArrowUp":
       e.preventDefault();
-      moveActiveRow(-1);
+      nav.moveActiveRow(-1);
       return;
     case "r":
       e.preventDefault();
@@ -885,12 +871,10 @@ export function initDependabot() {
   if (list) {
     list.addEventListener("click", onListClick);
     list.addEventListener("keydown", onListKeydown);
-    list.addEventListener("mouseover", onDependabotMouseOver);
-    list.addEventListener("mouseleave", clearDependabotHover);
-    list.addEventListener("scroll", clearDependabotHover, { passive: true });
     list.addEventListener("scroll", closeMenu, true);
   }
-  window.addEventListener("blur", clearDependabotHover);
+  // List-kit: hover tracking (replaces inline mouseover/leave/scroll/blur wiring).
+  hoverManager.wire();
   document.addEventListener("keydown", onCommandKeydown);
   $("#dependabot-sync-btn")?.addEventListener("click", syncDependabot);
 
@@ -920,3 +904,27 @@ export function initDependabot() {
     reloadOperations();
   });
 }
+
+/* ─────────────────────────── Module registration ──────────────────────────── */
+
+// Register as a module with lifecycle: activate runs the on-open logic (load + staleness-gated
+// sync + missed-transition summary); deactivate clears stale announcement queues so queued
+// operation/sync announcements don't fire after the user moves to another module.
+
+registerModule("dependabot", {
+  init: initDependabot,
+  activate: onDependabotOpened,
+  deactivate: clearAnnounceQueue,
+});
+
+registerShortcutGroups([
+  {
+    group: "Dependabot",
+    items: [
+      { keys: ["j", "↓"], desc: "Next pull request" },
+      { keys: ["k", "↑"], desc: "Previous pull request" },
+      { keys: ["Enter"], desc: "Open in browser" },
+      { keys: ["r"], desc: "Sync Dependabot" },
+    ],
+  },
+]);
