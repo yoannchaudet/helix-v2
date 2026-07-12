@@ -399,6 +399,104 @@ pub async fn mark_thread_done(
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClosePullRequestOutcome {
+    Closed,
+    Merged,
+}
+
+#[derive(Debug)]
+pub struct ClosePullRequestResult {
+    pub outcome: ClosePullRequestOutcome,
+    pub rate: RateLimit,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClosePullRequestResponse {
+    state: String,
+    merged_at: Option<String>,
+}
+
+fn close_pull_request_request(
+    client: &reqwest::Client,
+    token: &str,
+    repo_full_name: &str,
+    number: i64,
+) -> reqwest::RequestBuilder {
+    authed(
+        client
+            .patch(format!("{API_BASE}/repos/{repo_full_name}/pulls/{number}"))
+            .json(&serde_json::json!({ "state": "closed" })),
+        token,
+    )
+}
+
+/// Close a pull request without deleting its head branch.
+///
+/// GitHub returns the updated pull request. A non-null `merged_at` means a concurrent merge won
+/// before this close was applied; callers must not report that as a successful discard.
+pub async fn close_pull_request(
+    client: &reqwest::Client,
+    token: &str,
+    repo_full_name: &str,
+    number: i64,
+) -> Result<ClosePullRequestResult, MutationError> {
+    let response = close_pull_request_request(client, token, repo_full_name, number)
+        .send()
+        .await
+        .map_err(|error| MutationError {
+            rate: RateLimit::default(),
+            error: GitHubError::Network(error.to_string()),
+        })?;
+    let status = response.status();
+    let mut rate = RateLimit::default();
+    rate.update_from(response.headers());
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(MutationError {
+            rate,
+            error: GitHubError::Unauthorized,
+        });
+    }
+    if status == reqwest::StatusCode::FORBIDDEN {
+        let body = response.text().await.unwrap_or_default();
+        return Err(MutationError {
+            rate,
+            error: GitHubError::Forbidden(body.trim().to_string()),
+        });
+    }
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(MutationError {
+            rate,
+            error: GitHubError::Status {
+                status,
+                body: body.trim().to_string(),
+            },
+        });
+    }
+    let pull: ClosePullRequestResponse = response.json().await.map_err(|error| MutationError {
+        rate: rate.clone(),
+        error: GitHubError::Parse {
+            what: "closed pull request",
+            source: error.to_string(),
+        },
+    })?;
+    let outcome = if pull.merged_at.is_some() {
+        ClosePullRequestOutcome::Merged
+    } else if pull.state.eq_ignore_ascii_case("closed") {
+        ClosePullRequestOutcome::Closed
+    } else {
+        return Err(MutationError {
+            rate,
+            error: GitHubError::Parse {
+                what: "closed pull request",
+                source: format!("GitHub returned unexpected state {:?}", pull.state),
+            },
+        });
+    };
+    Ok(ClosePullRequestResult { outcome, rate })
+}
+
 /// Rate-limit snapshot read from response headers.
 ///
 /// GitHub partitions rate limits into independent **buckets** (REST `core`, `search`,
@@ -2852,6 +2950,30 @@ fn next_page_url(headers: &HeaderMap) -> Option<String> {
 mod tests {
     use super::*;
     use reqwest::header::{HeaderMap, HeaderValue};
+
+    #[test]
+    fn close_pull_request_builds_the_documented_patch() {
+        let request =
+            close_pull_request_request(&reqwest::Client::new(), "token", "octo/widgets", 42)
+                .build()
+                .unwrap();
+        assert_eq!(request.method(), reqwest::Method::PATCH);
+        assert_eq!(
+            request.url().as_str(),
+            format!("{API_BASE}/repos/octo/widgets/pulls/42")
+        );
+        assert_eq!(
+            request.body().and_then(reqwest::Body::as_bytes),
+            Some(br#"{"state":"closed"}"#.as_slice())
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("X-GitHub-Api-Version")
+                .and_then(|value| value.to_str().ok()),
+            Some(API_VERSION)
+        );
+    }
 
     #[test]
     fn resolve_error_backs_off_only_on_rate_limits() {

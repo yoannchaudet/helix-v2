@@ -71,6 +71,7 @@ test("prRow has a merge affordance but no notification-only controls", () => {
   assert.ok(!row.includes("n-bookmark"));
   assert.ok(!row.includes("n-done"));
   assert.ok(row.includes("dep-merge-action"));
+  assert.ok(row.includes("dep-discard-action"));
   assert.ok(row.includes('data-pr-id="101"'));
 });
 
@@ -107,6 +108,7 @@ test("operationRow renders queue state, position, and cancellation", () => {
   assert.ok(row.includes("Queued"));
   assert.ok(row.includes("queue 2"));
   assert.ok(row.includes("dep-operation-cancel"));
+  assert.ok(row.includes("dep-discard-action--operation"));
   assert.ok(row.includes('data-operation-id="7"'));
   assert.ok(row.includes("Target: main"));
 });
@@ -130,6 +132,7 @@ test("terminal operations render errors without a cancellation action", () => {
   assert.ok(row.includes("Failed"));
   assert.ok(row.includes("&lt;conflict&gt;"));
   assert.ok(!row.includes("dep-operation-cancel"));
+  assert.ok(!row.includes("dep-discard-action"));
 });
 
 test("operationsList splits active and recent operations into repository groups", () => {

@@ -34,6 +34,9 @@ pub(crate) struct AppState {
     /// Serializes cancellation with GitHub mutation dispatch. Cancellation waits for an already
     /// dispatched request, while a mutation re-checks durable cancellation after acquiring it.
     pub(crate) dependabot_merge_mutation_guard: tokio::sync::Mutex<()>,
+    /// Serializes a full Dependabot fetch/reconcile pass with an explicit PR close. Without this,
+    /// a sync that fetched an open PR just before discard could reinsert it after close deleted it.
+    pub(crate) dependabot_pr_mutation_guard: tokio::sync::Mutex<()>,
 }
 
 /// Sink for the UI lifecycle/progress events the sync orchestration emits. Abstracting this
@@ -592,6 +595,7 @@ pub fn run() {
                 last_window_size: std::sync::Mutex::new(saved_size),
                 dependabot_merge_tick_running: std::sync::atomic::AtomicBool::new(false),
                 dependabot_merge_mutation_guard: tokio::sync::Mutex::new(()),
+                dependabot_pr_mutation_guard: tokio::sync::Mutex::new(()),
             });
 
             if let (Some((w, h)), Some(win)) = (saved_size, app.get_webview_window("main")) {
@@ -652,6 +656,7 @@ pub fn run() {
             dependabot_coordinator::dependabot_status,
             dependabot_coordinator::enqueue_dependabot_merge,
             dependabot_coordinator::cancel_dependabot_merge,
+            dependabot_coordinator::discard_dependabot_pr,
             dependabot_coordinator::list_dependabot_merge_operations,
             dependabot_coordinator::dependabot_merge_status,
             dependabot_coordinator::get_dependabot_merge_operation_detail,

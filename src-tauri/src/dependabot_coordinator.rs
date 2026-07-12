@@ -93,6 +93,9 @@ pub async fn sync_dependabot(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<DependabotSyncResult, String> {
+    // Keep the fetch and its eventual reconciliation atomic with respect to explicit closes:
+    // otherwise an already-fetched open row could be written back after discard removes it.
+    let _pr_mutation_lease = state.dependabot_pr_mutation_guard.lock().await;
     // Snapshot the repo list under the lock, then release it before any network I/O.
     let repos: Vec<(String, String)> = {
         let conn = state.db.0.lock().map_err(|e| e.to_string())?;
@@ -384,10 +387,11 @@ fn merge_status(conn: &rusqlite::Connection) -> Result<DependabotMergeStatus, St
 }
 
 #[tauri::command]
-pub fn enqueue_dependabot_merge(
+pub async fn enqueue_dependabot_merge(
     pr_id: i64,
     state: State<'_, AppState>,
 ) -> Result<dependabot::DependabotMergeOperation, String> {
+    let _mutation_lease = state.dependabot_merge_mutation_guard.lock().await;
     let conn = state.db.0.lock().map_err(|e| e.to_string())?;
     dependabot::enqueue_merge_operation(&conn, pr_id).map_err(|e| {
         if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
@@ -418,6 +422,118 @@ pub async fn cancel_dependabot_merge(
         serde_json::json!({ "operation_id": operation_id }),
     );
     Ok(operation)
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscardDependabotPrStatus {
+    Cancelling,
+    Closed,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DiscardDependabotPrResult {
+    pub status: DiscardDependabotPrStatus,
+    pub pr_id: i64,
+    pub operation_id: Option<i64>,
+}
+
+async fn discard_dependabot_pr_core<S, Close, Fut>(
+    db: &Db,
+    sink: S,
+    pr_id: i64,
+    close: Close,
+) -> Result<DiscardDependabotPrResult, String>
+where
+    S: EventSink,
+    Close: FnOnce(String, i64) -> Fut,
+    Fut:
+        std::future::Future<Output = Result<github::ClosePullRequestResult, github::MutationError>>,
+{
+    let (target, cancelled_operation) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let target = dependabot::get_cached_pr(&conn, pr_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| {
+                "This Dependabot PR is not in the local cache. Sync Dependabot and try again."
+                    .to_string()
+            })?;
+        let cancelled_operation = match dependabot::get_active_operation_for_pr(&conn, pr_id)
+            .map_err(|e| e.to_string())?
+        {
+            Some(operation) => {
+                dependabot::request_cancel(&conn, operation.id).map_err(|e| e.to_string())?
+            }
+            None => None,
+        };
+        (target, cancelled_operation)
+    };
+
+    if let Some(operation) = &cancelled_operation {
+        sink.emit(
+            "dependabot:operations-changed",
+            serde_json::json!({ "operation_id": operation.id }),
+        );
+        if operation.state != "cancelled" {
+            return Ok(DiscardDependabotPrResult {
+                status: DiscardDependabotPrStatus::Cancelling,
+                pr_id,
+                operation_id: Some(operation.id),
+            });
+        }
+    }
+
+    let result = close(target.repo_full_name, target.number).await;
+    let mut tracker = sync::RateTracker::default();
+    match result {
+        Ok(result) => {
+            tracker.observe(result.rate);
+            if result.outcome == github::ClosePullRequestOutcome::Merged {
+                let conn = db.0.lock().map_err(|e| e.to_string())?;
+                tracker.persist(&conn).map_err(|e| e.to_string())?;
+                return Err(format!(
+                    "#{} {} merged before Helix could discard it.",
+                    target.number, target.title
+                ));
+            }
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            dependabot::remove_cached_pr(&conn, pr_id).map_err(|e| e.to_string())?;
+            tracker.persist(&conn).map_err(|e| e.to_string())?;
+        }
+        Err(error) => {
+            tracker.observe(error.rate);
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            tracker.persist(&conn).map_err(|e| e.to_string())?;
+            return Err(format!(
+                "Couldn't close #{} {}: {}",
+                target.number, target.title, error.error
+            ));
+        }
+    }
+
+    sink.emit("dependabot:changed", serde_json::json!({ "pr_id": pr_id }));
+    Ok(DiscardDependabotPrResult {
+        status: DiscardDependabotPrStatus::Closed,
+        pr_id,
+        operation_id: cancelled_operation.map(|operation| operation.id),
+    })
+}
+
+#[tauri::command]
+pub async fn discard_dependabot_pr(
+    pr_id: i64,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<DiscardDependabotPrResult, String> {
+    let token = auth::read_token(&state.db)?
+        .ok_or_else(|| "Not connected — add a GitHub token first.".to_string())?;
+    let client = reqwest::Client::new();
+    let _pr_mutation_lease = state.dependabot_pr_mutation_guard.lock().await;
+    let _mutation_lease = state.dependabot_merge_mutation_guard.lock().await;
+    discard_dependabot_pr_core(&state.db, app, pr_id, move |repo, number| async move {
+        github::close_pull_request(&client, &token, &repo, number).await
+    })
+    .await
 }
 
 #[tauri::command]
@@ -2368,6 +2484,140 @@ mod tests {
             },
             rate: rate("core", remaining, 5000),
         }
+    }
+
+    #[test]
+    fn discard_core_closes_and_removes_a_cached_pr() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump a")]);
+        let sink = RecordingSink::default();
+        let result = tauri::async_runtime::block_on(discard_dependabot_pr_core(
+            &db,
+            sink.clone(),
+            1,
+            |repo, number| async move {
+                assert_eq!(repo, "octo/repo-a");
+                assert_eq!(number, 10);
+                Ok(github::ClosePullRequestResult {
+                    outcome: github::ClosePullRequestOutcome::Closed,
+                    rate: rate("core", 4990, 5000),
+                })
+            },
+        ))
+        .unwrap();
+
+        assert_eq!(result.status, DiscardDependabotPrStatus::Closed);
+        assert_eq!(pr_count(&db), 0);
+        assert_eq!(sink.names(), vec!["dependabot:changed"]);
+    }
+
+    #[test]
+    fn discard_core_preserves_the_pr_when_close_fails_or_merge_wins() {
+        for merged in [false, true] {
+            let db = db_with_token();
+            store(&db, &[pr(1, "octo/repo-a", 10, "Bump a")]);
+            let result = tauri::async_runtime::block_on(discard_dependabot_pr_core(
+                &db,
+                RecordingSink::default(),
+                1,
+                move |_, _| async move {
+                    if merged {
+                        Ok(github::ClosePullRequestResult {
+                            outcome: github::ClosePullRequestOutcome::Merged,
+                            rate: rate("core", 4980, 5000),
+                        })
+                    } else {
+                        Err(github::MutationError {
+                            rate: rate("core", 4980, 5000),
+                            error: GitHubError::Network("offline".to_string()),
+                        })
+                    }
+                },
+            ));
+            assert!(result
+                .unwrap_err()
+                .contains(if merged { "merged" } else { "offline" }));
+            assert_eq!(pr_count(&db), 1);
+        }
+    }
+
+    #[test]
+    fn discard_core_waits_for_active_merge_cancellation() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump a")]);
+        let operation_id = {
+            let conn = db.0.lock().unwrap();
+            let operation = dependabot::enqueue_merge_operation(&conn, 1).unwrap();
+            conn.execute(
+                "UPDATE dependabot_merge_operations SET state = 'delegated' WHERE id = ?1",
+                [operation.id],
+            )
+            .unwrap();
+            operation.id
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_close = calls.clone();
+        let result = tauri::async_runtime::block_on(discard_dependabot_pr_core(
+            &db,
+            RecordingSink::default(),
+            1,
+            move |_, _| {
+                calls_for_close.fetch_add(1, Ordering::SeqCst);
+                async {
+                    Ok(github::ClosePullRequestResult {
+                        outcome: github::ClosePullRequestOutcome::Closed,
+                        rate: RateLimit::default(),
+                    })
+                }
+            },
+        ))
+        .unwrap();
+
+        assert_eq!(result.status, DiscardDependabotPrStatus::Cancelling);
+        assert_eq!(result.operation_id, Some(operation_id));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(pr_count(&db), 1);
+        let conn = db.0.lock().unwrap();
+        assert_eq!(
+            dependabot::get_operation(&conn, operation_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            "cancel_requested"
+        );
+    }
+
+    #[test]
+    fn discard_core_cancels_queued_work_and_closes_immediately() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump a")]);
+        let operation_id = {
+            let conn = db.0.lock().unwrap();
+            dependabot::enqueue_merge_operation(&conn, 1).unwrap().id
+        };
+        let result = tauri::async_runtime::block_on(discard_dependabot_pr_core(
+            &db,
+            RecordingSink::default(),
+            1,
+            |_, _| async {
+                Ok(github::ClosePullRequestResult {
+                    outcome: github::ClosePullRequestOutcome::Closed,
+                    rate: RateLimit::default(),
+                })
+            },
+        ))
+        .unwrap();
+
+        assert_eq!(result.status, DiscardDependabotPrStatus::Closed);
+        assert_eq!(pr_count(&db), 0);
+        let conn = db.0.lock().unwrap();
+        assert_eq!(
+            dependabot::get_operation(&conn, operation_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            "cancelled"
+        );
     }
 
     /* -------------------------------- sync_dependabot ------------------------- */

@@ -26,6 +26,37 @@ pub struct StoreOutcome {
     pub removed: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedDependabotPr {
+    pub id: i64,
+    pub repo_full_name: String,
+    pub number: i64,
+    pub title: String,
+}
+
+pub fn get_cached_pr(
+    conn: &Connection,
+    pr_id: i64,
+) -> rusqlite::Result<Option<CachedDependabotPr>> {
+    conn.query_row(
+        "SELECT id, repo_full_name, number, title FROM dependabot_prs WHERE id = ?1",
+        [pr_id],
+        |row| {
+            Ok(CachedDependabotPr {
+                id: row.get(0)?,
+                repo_full_name: row.get(1)?,
+                number: row.get(2)?,
+                title: row.get(3)?,
+            })
+        },
+    )
+    .optional()
+}
+
+pub fn remove_cached_pr(conn: &Connection, pr_id: i64) -> rusqlite::Result<bool> {
+    Ok(conn.execute("DELETE FROM dependabot_prs WHERE id = ?1", [pr_id])? > 0)
+}
+
 /// Upsert the Dependabot PRs from a fetch and (optionally) reconcile local state.
 ///
 /// Existing rows are updated in place, but the resolution columns (`mergeable_state`,
@@ -433,7 +464,7 @@ fn operation_with_queue_position(
     Ok(operation)
 }
 
-fn get_active_operation_for_pr(
+pub fn get_active_operation_for_pr(
     conn: &Connection,
     pr_id: i64,
 ) -> rusqlite::Result<Option<DependabotMergeOperation>> {
@@ -1384,6 +1415,22 @@ mod tests {
         // No merge state resolved yet.
         assert_eq!(groups[0].prs[0].mergeable_state, None);
         assert_eq!(groups[0].prs[0].base_ref.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn targeted_cached_pr_removal_preserves_operation_history() {
+        let mut conn = mem_conn();
+        store_prs(&mut conn, &[pr(1, "octo/repo-a", 10, "Bump a")], true).unwrap();
+        let operation = enqueue_merge_operation(&conn, 1).unwrap();
+        terminalize(&conn, operation.id, "cancelled", None, None, None).unwrap();
+
+        let cached = get_cached_pr(&conn, 1).unwrap().unwrap();
+        assert_eq!(cached.repo_full_name, "octo/repo-a");
+        assert_eq!(cached.number, 10);
+        assert!(remove_cached_pr(&conn, 1).unwrap());
+        assert_eq!(count(&conn).unwrap(), 0);
+        assert!(get_operation(&conn, operation.id).unwrap().is_some());
+        assert!(!remove_cached_pr(&conn, 1).unwrap());
     }
 
     #[test]
