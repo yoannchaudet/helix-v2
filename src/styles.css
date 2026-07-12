@@ -979,6 +979,11 @@ code,
   background: var(--surface-hover);
 }
 
+.dep-operation-cancel:hover {
+  color: var(--error);
+  background: var(--surface-hover);
+}
+
 .n-bookmark:hover {
   color: var(--accent-strong);
   background: var(--surface-hover);
