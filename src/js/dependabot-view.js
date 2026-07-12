@@ -300,7 +300,7 @@ export function operationsList(operations, options = {}) {
     const repoGroups = [...byRepo.entries()]
       .map(([repo, repoOperations], index) => {
         const headingId = `operation-repo-${key}-${index}`;
-        return html`<section class="operation-repo-group" data-repo="${repo}" aria-labelledby="${headingId}">
+        return html`<section class="operation-repo-group" data-repo="${repo}" role="group" aria-labelledby="${headingId}">
           <div class="operation-repo-header">
             <h3 class="repo-name" id="${headingId}">${repo}</h3>
             <span class="repo-counts">${repoOperations.length}</span>

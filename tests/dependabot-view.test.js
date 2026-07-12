@@ -160,6 +160,7 @@ test("operationsList splits active and recent operations into repository groups"
   assert.ok(output.includes('data-operation-status="recent"'));
   assert.ok(output.includes('data-repo="octo/hello"'));
   assert.ok(output.includes('data-repo="acme/widgets"'));
+  assert.equal(output.match(/role="group"/g)?.length, 3);
   assert.equal(output.match(/class="operation-repo-group"/g)?.length, 3);
   assert.ok(output.indexOf("octo/hello") < output.indexOf("acme/widgets"));
   assert.ok(output.indexOf('data-operation-id="7"') < output.indexOf('data-operation-id="10"'));
