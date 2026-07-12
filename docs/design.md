@@ -432,7 +432,10 @@ module's **sidebar + content** split:
   are Dependabot-owned, approves the current head SHA, and auto-detects the base branch's merge
   strategy. Direct merges update a behind branch, then revalidate and reapprove its new head;
   expected PAT-authored update merge commits are tracked as a parent-linked chain without
-  allowing unrelated human commits. A ready direct PR is squash-merged with the validated SHA.
+  allowing unrelated human commits. A ready direct PR is merged with the validated SHA using the
+  first repository-enabled method in preference order: squash, rebase, then merge commit. If
+  GitHub rejects an advertised method as disallowed, Helix tries the next enabled method under
+  the same mutation guard.
 - Queue-required branches use GitHub's GraphQL auto-merge/enqueue/dequeue operations instead:
   Helix never updates or directly merges those branches, polls the queue entry and position, and
   lets GitHub own merge-group freshness. Helix still admits only one PR per repository at a time.

@@ -937,6 +937,44 @@ struct MergeResponse {
     message: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct RepositoryMergeSettings {
+    allow_squash_merge: bool,
+    allow_merge_commit: bool,
+    allow_rebase_merge: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectMergeMethod {
+    Squash,
+    Merge,
+    Rebase,
+}
+
+impl DirectMergeMethod {
+    fn as_api_value(self) -> &'static str {
+        match self {
+            Self::Squash => "squash",
+            Self::Merge => "merge",
+            Self::Rebase => "rebase",
+        }
+    }
+}
+
+fn enabled_direct_merge_methods(settings: &RepositoryMergeSettings) -> Vec<DirectMergeMethod> {
+    let mut methods = Vec::with_capacity(3);
+    if settings.allow_squash_merge {
+        methods.push(DirectMergeMethod::Squash);
+    }
+    if settings.allow_rebase_merge {
+        methods.push(DirectMergeMethod::Rebase);
+    }
+    if settings.allow_merge_commit {
+        methods.push(DirectMergeMethod::Merge);
+    }
+    methods
+}
+
 fn merge_error(
     status: reqwest::StatusCode,
     body: String,
@@ -1005,14 +1043,25 @@ fn merge_refusal_message(body: &str) -> String {
         .unwrap_or_else(|| "GitHub is still blocking this merge.".to_string())
 }
 
-fn squash_merge_is_disallowed(message: &str) -> bool {
-    message.eq_ignore_ascii_case("Squash merges are not allowed on this repository.")
+fn merge_method_is_disallowed(message: &str) -> bool {
+    [
+        "Squash merges are not allowed on this repository.",
+        "Merge commits are not allowed on this repository.",
+        "Rebase merges are not allowed on this repository.",
+    ]
+    .iter()
+    .any(|candidate| message.eq_ignore_ascii_case(candidate))
+}
+
+enum MergeAttemptResult {
+    Response(MergeResponse),
+    MethodDisallowed,
 }
 
 async fn merge_pull_request(
     request: reqwest::RequestBuilder,
     rates: &mut Vec<RateLimit>,
-) -> Result<MergeResponse, MergeRemoteError> {
+) -> Result<MergeAttemptResult, MergeRemoteError> {
     let response = request.send().await.map_err(|e| MergeRemoteError {
         class: MergeErrorClass::Transient,
         message: format!("network error: {e}"),
@@ -1023,26 +1072,26 @@ async fn merge_pull_request(
     rate.update_from(response.headers());
     rates.push(rate.clone());
     if status.is_success() {
-        return response.json().await.map_err(|e| MergeRemoteError {
-            class: MergeErrorClass::Transient,
-            message: format!("failed to parse merge pull request: {e}"),
-            rates: std::mem::take(rates),
-        });
+        return response
+            .json()
+            .await
+            .map(MergeAttemptResult::Response)
+            .map_err(|e| MergeRemoteError {
+                class: MergeErrorClass::Transient,
+                message: format!("failed to parse merge pull request: {e}"),
+                rates: std::mem::take(rates),
+            });
     }
     let body = response.text().await.unwrap_or_default().trim().to_string();
     if status == reqwest::StatusCode::METHOD_NOT_ALLOWED {
         let message = merge_refusal_message(&body);
-        if squash_merge_is_disallowed(&message) {
-            return Err(MergeRemoteError {
-                class: MergeErrorClass::Permanent,
-                message: format!("GitHub returned {status}: {body}"),
-                rates: std::mem::take(rates),
-            });
+        if merge_method_is_disallowed(&message) {
+            return Ok(MergeAttemptResult::MethodDisallowed);
         }
-        return Ok(MergeResponse {
+        return Ok(MergeAttemptResult::Response(MergeResponse {
             merged: false,
             message,
-        });
+        }));
     }
     Err(merge_error(status, body, &rate, rates))
 }
@@ -1333,6 +1382,26 @@ where
     // `unstable` is still mergeable but has a non-passing status, which can come from optional
     // checks. The merge endpoint remains authoritative if the REST mergeability snapshot is stale.
     if direct_merge_attempt_allowed(pull.mergeable_state.as_deref()) {
+        let merge_settings: RepositoryMergeSettings = merge_json(
+            authed_get(
+                client,
+                &format!("{API_BASE}/repos/{}", operation.repo_full_name),
+                token,
+            ),
+            "repository merge settings",
+            &mut rates,
+        )
+        .await?;
+        let merge_methods = enabled_direct_merge_methods(&merge_settings);
+        if merge_methods.is_empty() {
+            return Ok(MergeRemoteResult {
+                outcome: MergeRemoteOutcome::PermanentFailure {
+                    code: "no_merge_method",
+                    reason: "No direct merge method is enabled on this repository.".to_string(),
+                },
+                rates,
+            });
+        }
         let _mutation_lease = mutation_guard.lock().await;
         if is_cancelled() {
             return Ok(MergeRemoteResult {
@@ -1340,36 +1409,50 @@ where
                 rates,
             });
         }
-        let merged = merge_pull_request(
-            authed(
-                client
-                    .put(format!(
-                        "{API_BASE}/repos/{}/pulls/{}/merge",
-                        operation.repo_full_name, operation.number
-                    ))
-                    .json(&serde_json::json!({
-                        "sha": head_sha,
-                        "merge_method": "squash"
-                    })),
-                token,
-            ),
-            &mut rates,
-        )
-        .await?;
-        if merged.merged {
-            return Ok(MergeRemoteResult {
-                outcome: MergeRemoteOutcome::Merged {
-                    head_sha: Some(head_sha),
-                },
-                rates,
-            });
+        for merge_method in merge_methods {
+            let attempt = merge_pull_request(
+                authed(
+                    client
+                        .put(format!(
+                            "{API_BASE}/repos/{}/pulls/{}/merge",
+                            operation.repo_full_name, operation.number
+                        ))
+                        .json(&serde_json::json!({
+                            "sha": head_sha,
+                            "merge_method": merge_method.as_api_value()
+                        })),
+                    token,
+                ),
+                &mut rates,
+            )
+            .await?;
+            match attempt {
+                MergeAttemptResult::MethodDisallowed => continue,
+                MergeAttemptResult::Response(merged) if merged.merged => {
+                    return Ok(MergeRemoteResult {
+                        outcome: MergeRemoteOutcome::Merged {
+                            head_sha: Some(head_sha),
+                        },
+                        rates,
+                    });
+                }
+                MergeAttemptResult::Response(merged) => {
+                    return Ok(MergeRemoteResult {
+                        outcome: MergeRemoteOutcome::Pending {
+                            head_sha,
+                            approved: true,
+                            branch_update_requested: false,
+                            reason: Some(merged.message),
+                        },
+                        rates,
+                    });
+                }
+            }
         }
         return Ok(MergeRemoteResult {
-            outcome: MergeRemoteOutcome::Pending {
-                head_sha,
-                approved: true,
-                branch_update_requested: false,
-                reason: Some(merged.message),
+            outcome: MergeRemoteOutcome::PermanentFailure {
+                code: "no_merge_method",
+                reason: "GitHub rejected every repository-enabled direct merge method.".to_string(),
             },
             rates,
         });
@@ -2999,11 +3082,47 @@ mod tests {
     }
 
     #[test]
-    fn disallowed_squash_merge_is_a_permanent_refusal() {
-        assert!(squash_merge_is_disallowed(
+    fn repository_merge_settings_orders_all_supported_methods() {
+        let settings = |squash, merge, rebase| RepositoryMergeSettings {
+            allow_squash_merge: squash,
+            allow_merge_commit: merge,
+            allow_rebase_merge: rebase,
+        };
+
+        assert_eq!(
+            enabled_direct_merge_methods(&settings(true, true, true)),
+            vec![
+                DirectMergeMethod::Squash,
+                DirectMergeMethod::Rebase,
+                DirectMergeMethod::Merge
+            ]
+        );
+        assert_eq!(
+            enabled_direct_merge_methods(&settings(false, true, true)),
+            vec![DirectMergeMethod::Rebase, DirectMergeMethod::Merge]
+        );
+        assert_eq!(
+            enabled_direct_merge_methods(&settings(false, true, false)),
+            vec![DirectMergeMethod::Merge]
+        );
+        assert_eq!(
+            enabled_direct_merge_methods(&settings(false, false, false)),
+            Vec::<DirectMergeMethod>::new()
+        );
+    }
+
+    #[test]
+    fn disallowed_merge_method_responses_are_detected_for_fallback() {
+        assert!(merge_method_is_disallowed(
             "Squash merges are not allowed on this repository."
         ));
-        assert!(!squash_merge_is_disallowed("Pull Request is not mergeable"));
+        assert!(merge_method_is_disallowed(
+            "Merge commits are not allowed on this repository."
+        ));
+        assert!(merge_method_is_disallowed(
+            "Rebase merges are not allowed on this repository."
+        ));
+        assert!(!merge_method_is_disallowed("Pull Request is not mergeable"));
     }
 
     #[test]
