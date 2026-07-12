@@ -179,14 +179,15 @@ pub struct DependabotRepoGroup {
 ///
 /// Repos are ordered by full name; within a repo, most recently updated first.
 pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<DependabotRepoGroup>> {
-    let mut stmt = conn.prepare(
+    let sql = format!(
         "SELECT p.repo_full_name, p.id, p.number, p.title, p.html_url, p.author, p.base_ref,
                 p.updated_at, p.mergeable_state, o.id, o.state
          FROM dependabot_prs p
          LEFT JOIN dependabot_merge_operations o ON o.pr_id = p.id
-             AND o.state IN ('queued', 'validating', 'delegated', 'cancel_requested')
-         ORDER BY p.repo_full_name ASC, p.updated_at DESC, p.id ASC",
-    )?;
+             AND o.state IN ({ACTIVE_STATES})
+         ORDER BY p.repo_full_name ASC, p.updated_at DESC, p.id ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
 
     let rows = stmt.query_map([], |r| {
         Ok((
@@ -241,7 +242,11 @@ pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<DependabotRepoGro
     Ok(groups)
 }
 
-const ACTIVE_STATES: &str = "'queued', 'validating', 'delegated', 'cancel_requested'";
+/// SQL fragment listing the active operation states. Every runtime query that classifies a row
+/// as "active" must use this constant so the definition stays in one place. Schema partial
+/// indexes (in migrations) intentionally repeat the literal — they are self-contained and
+/// validated by the `active_states_match_schema_indexes` test below.
+pub(crate) const ACTIVE_STATES: &str = "'queued', 'validating', 'delegated', 'cancel_requested'";
 
 /// Durable operation returned by the merge-operation IPC. Snapshot fields never change after
 /// enqueue; live GitHub observations are represented by the SHA and lifecycle fields.
@@ -345,16 +350,17 @@ const OPERATION_COLUMNS: &str = "id, pr_id, repo_full_name, number, title, html_
 fn active_queue_positions(
     conn: &Connection,
 ) -> rusqlite::Result<std::collections::HashMap<i64, i64>> {
-    let mut stmt = conn.prepare(
+    let sql = format!(
         "SELECT o.id,
                 (SELECT COUNT(*) FROM dependabot_merge_operations earlier
                  WHERE earlier.repo_full_name = o.repo_full_name
-                   AND earlier.state IN ('queued', 'validating', 'delegated', 'cancel_requested')
+                   AND earlier.state IN ({ACTIVE_STATES})
                    AND (earlier.enqueued_at < o.enqueued_at
                         OR (earlier.enqueued_at = o.enqueued_at AND earlier.id <= o.id)))
          FROM dependabot_merge_operations o
-         WHERE o.state IN ('queued', 'validating', 'delegated', 'cancel_requested')",
-    )?;
+         WHERE o.state IN ({ACTIVE_STATES})"
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
     rows.collect()
 }
@@ -658,14 +664,14 @@ pub fn record_observation(
 }
 
 pub fn begin_merge_processing(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
-    Ok(conn.execute(
+    let sql = format!(
         "UPDATE dependabot_merge_operations
          SET state = CASE WHEN state = 'queued' THEN 'validating' ELSE state END,
              delegated_at = COALESCE(delegated_at, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
          WHERE id = ?1
-           AND state IN ('queued', 'validating', 'delegated', 'cancel_requested')",
-        [id],
-    )? > 0)
+           AND state IN ({ACTIVE_STATES})"
+    );
+    Ok(conn.execute(&sql, [id])? > 0)
 }
 
 pub fn merge_cancel_requested(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
@@ -2096,5 +2102,125 @@ mod tests {
         // Clearing the schedule returns to "due".
         schedule_next_action(&conn, operation.id, None).unwrap();
         assert!(is_next_action_due(&conn, operation.id).unwrap());
+    }
+
+    // ------------------------------------------------------------------
+    // Contract: runtime ACTIVE_STATES agrees with schema partial indexes
+    // ------------------------------------------------------------------
+
+    /// Parse the ACTIVE_STATES constant into a sorted set of bare state strings.
+    fn parse_active_states() -> Vec<String> {
+        let mut states: Vec<String> = ACTIVE_STATES
+            .split(',')
+            .map(|s| s.trim().trim_matches('\'').to_string())
+            .collect();
+        states.sort();
+        states
+    }
+
+    /// Extract state values from a `WHERE state IN (...)` clause in migration SQL.
+    fn extract_index_states(sql: &str, index_name: &str) -> Vec<String> {
+        // Find the CREATE INDEX containing the given name and extract its WHERE state IN (...).
+        let idx = sql
+            .find(index_name)
+            .unwrap_or_else(|| panic!("index {index_name} not found in schema"));
+        let after = &sql[idx..];
+        let where_idx = after
+            .find("WHERE state IN (")
+            .unwrap_or_else(|| panic!("no WHERE state IN clause for {index_name}"));
+        let paren_start = after[where_idx..].find('(').unwrap() + where_idx;
+        let paren_end = after[paren_start..].find(')').unwrap() + paren_start;
+        let inner = &after[paren_start + 1..paren_end];
+        let mut states: Vec<String> = inner
+            .split(',')
+            .map(|s| s.trim().trim_matches('\'').to_string())
+            .collect();
+        states.sort();
+        states
+    }
+
+    #[test]
+    fn active_states_match_schema_indexes() {
+        let runtime_active = parse_active_states();
+
+        // Collect ALL migration SQL (the schema source of truth).
+        let schema: String = crate::db::migrations().join("\n");
+
+        // The two partial indexes that classify rows as "active".
+        let idx_active_pr = extract_index_states(&schema, "idx_dependabot_merge_active_pr");
+        let idx_repo_fifo = extract_index_states(&schema, "idx_dependabot_merge_repo_fifo");
+
+        assert_eq!(
+            runtime_active, idx_active_pr,
+            "ACTIVE_STATES disagrees with idx_dependabot_merge_active_pr"
+        );
+        assert_eq!(
+            runtime_active, idx_repo_fifo,
+            "ACTIVE_STATES disagrees with idx_dependabot_merge_repo_fifo"
+        );
+    }
+
+    #[test]
+    fn active_and_terminal_states_are_disjoint_and_exhaustive() {
+        let active = parse_active_states();
+
+        let schema: String = crate::db::migrations().join("\n");
+        let terminal = extract_index_states(&schema, "idx_dependabot_merge_terminal");
+
+        // Parse the CHECK constraint from the schema to get ALL allowed states.
+        let check_marker = "CHECK (state IN";
+        let check_idx = schema
+            .find(check_marker)
+            .expect("CHECK (state IN ...) not found in schema");
+        let after_check = &schema[check_idx..];
+        let paren_start = after_check[check_marker.len()..].find('(').unwrap() + check_marker.len();
+        let paren_end = after_check[paren_start..].find(')').unwrap() + paren_start;
+        let mut allowed: Vec<String> = after_check[paren_start + 1..paren_end]
+            .split(',')
+            .map(|s| s.trim().trim_matches('\'').to_string())
+            .collect();
+        allowed.sort();
+
+        // active ∪ terminal must equal schema-allowed states.
+        let mut union: Vec<String> = active.iter().chain(terminal.iter()).cloned().collect();
+        union.sort();
+        assert_eq!(
+            union, allowed,
+            "active ∪ terminal doesn't cover all schema-allowed states"
+        );
+
+        // Disjoint: no state appears in both sets.
+        let overlap: Vec<_> = active.iter().filter(|s| terminal.contains(s)).collect();
+        assert!(
+            overlap.is_empty(),
+            "states appear in both active and terminal indexes: {overlap:?}"
+        );
+
+        // Exhaustive: inserting a row with each state and querying shows coverage.
+        let mut conn = mem_conn();
+        store_prs(&mut conn, &[pr(1, "octo/repo", 10, "Bump a")], true).unwrap();
+
+        for (i, state) in allowed.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO dependabot_merge_operations
+                     (pr_id, repo_full_name, number, title, html_url, pull_url,
+                      author, state, enqueued_at)
+                 VALUES (?1, 'octo/repo', 10, 'Bump', 'url', 'pull', 'bot', ?2,
+                         strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
+                rusqlite::params![1000 + i as i64, state],
+            )
+            .unwrap_or_else(|e| panic!("failed to insert state {state}: {e}"));
+        }
+
+        // Verify runtime active count matches the active set.
+        let active_sql = format!(
+            "SELECT COUNT(*) FROM dependabot_merge_operations WHERE state IN ({ACTIVE_STATES})"
+        );
+        let active_count: i64 = conn.query_row(&active_sql, [], |r| r.get(0)).unwrap();
+        assert_eq!(
+            active_count,
+            active.len() as i64,
+            "runtime active count doesn't match expected active states"
+        );
     }
 }
