@@ -2040,7 +2040,7 @@ pub struct MergeQueuePolicy {
 
 #[derive(Debug)]
 pub struct RefUpdateRestrictionResult {
-    /// `None` means the active-rules endpoint was inaccessible or inconclusive.
+    /// `None` means the active rules or their source ruleset bypass details were inconclusive.
     pub restricted: Option<bool>,
     pub rates: Vec<RateLimit>,
 }
