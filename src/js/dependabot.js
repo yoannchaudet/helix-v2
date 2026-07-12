@@ -180,6 +180,7 @@ function onDependabotMouseOver(e) {
 function renderSidebar() {
   const filterList = $("#dependabot-filter-list");
   if (filterList) {
+    const activeOperationCount = activeMergeCount(mergeOperations);
     // "All" mirrors the notifications smart filter: total open PRs, active when no repo is
     // refined, and clicking it clears any repo refinement.
     filterList.innerHTML =
@@ -195,7 +196,7 @@ function renderSidebar() {
         label: "Operations",
         attrs: html`data-filter="operations"`,
         active: activeView === "operations",
-        count: activeMergeCount(mergeOperations) ? String(activeMergeCount(mergeOperations)) : "",
+        count: activeOperationCount ? String(activeOperationCount) : "",
       });
     filterList.querySelector('[data-filter="all"]')?.addEventListener("click", clearRepo);
     filterList

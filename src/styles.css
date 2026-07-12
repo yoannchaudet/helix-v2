@@ -1080,8 +1080,7 @@ code,
 
 /* Connector between consecutive steps. Skipped on the first step of the whole flow and
    right after the branch marker (which already reads as a visual break). */
-.op-step + .op-step::before,
-.op-flow-marker + .op-step::before {
+.op-step + .op-step::before {
   content: "";
   flex: none;
   width: var(--space-16);
