@@ -343,6 +343,13 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE notification_dismissals RENAME COLUMN done_at TO dismissed_at;
     ALTER TABLE notification_dismissals ADD COLUMN subject_updated_at TEXT;
     "#,
+    // v17 — remove dead merge-operation lifecycle columns that are no longer read or written.
+    // SQLite is bundled via rusqlite, so DROP COLUMN is available across supported builds.
+    r#"
+    ALTER TABLE dependabot_merge_operations DROP COLUMN merge_command_at;
+    ALTER TABLE dependabot_merge_operations DROP COLUMN cancel_command_at;
+    ALTER TABLE dependabot_merge_operations DROP COLUMN last_action_at;
+    "#,
 ];
 
 /// Open the database at `db_path`, apply any pending migrations, and return the
@@ -399,6 +406,32 @@ pub fn table_names(conn: &Connection) -> rusqlite::Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn table_columns(conn: &Connection, table: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        let mut cols: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        cols.sort();
+        cols
+    }
+
+    fn table_indexes(conn: &Connection, table: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ?1")
+            .unwrap();
+        let mut indexes: Vec<String> = stmt
+            .query_map([table], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        indexes.sort();
+        indexes
+    }
 
     #[test]
     fn bootstrap_creates_v1_schema() {
@@ -685,5 +718,75 @@ mod tests {
             .unwrap();
         assert_eq!(title, "Bump x");
         assert_eq!(base_ref, None);
+    }
+
+    #[test]
+    fn upgrade_from_populated_v16_drops_dead_merge_operation_columns_with_schema_parity() {
+        let upgraded = Connection::open_in_memory().unwrap();
+        upgraded.pragma_update(None, "foreign_keys", "ON").unwrap();
+        for migration in &MIGRATIONS[..16] {
+            upgraded.execute_batch(migration).unwrap();
+        }
+        upgraded.pragma_update(None, "user_version", 16).unwrap();
+
+        upgraded
+            .execute(
+                "INSERT INTO dependabot_merge_operations
+                    (pr_id, repo_full_name, number, title, html_url, pull_url, author, state,
+                     merge_command_at, cancel_command_at, enqueued_at, delegated_at,
+                     last_checked_at, last_action_at, terminal_at, failure_code, failure_reason,
+                     last_error, update_branch_from_sha, phase, strategy, pull_node_id, base_ref,
+                     next_action_at, check_retry_count, merge_queue_position, auto_merge_enabled)
+                 VALUES
+                    (1, 'octo/repo', 10, 'Bump x', 'https://github.com/octo/repo/pull/10',
+                     'https://api.github.com/repos/octo/repo/pulls/10', 'dependabot[bot]',
+                     'delegated', '2026-01-01T00:01:00Z', NULL, '2026-01-01T00:00:00Z',
+                     '2026-01-01T00:02:00Z', '2026-01-01T00:03:00Z', '2026-01-01T00:04:00Z',
+                     NULL, NULL, NULL, NULL, NULL, 'merging', 'native_squash', NULL, 'main',
+                     NULL, 0, NULL, 0)",
+                [],
+            )
+            .unwrap();
+        let op_id = upgraded.last_insert_rowid();
+
+        run_migrations(&upgraded).unwrap();
+        assert_eq!(schema_version(&upgraded).unwrap(), MIGRATIONS.len() as i64);
+
+        let upgraded_cols = table_columns(&upgraded, "dependabot_merge_operations");
+        assert!(!upgraded_cols.contains(&"merge_command_at".to_string()));
+        assert!(!upgraded_cols.contains(&"cancel_command_at".to_string()));
+        assert!(!upgraded_cols.contains(&"last_action_at".to_string()));
+        assert!(upgraded
+            .query_row(
+                "SELECT COUNT(*) FROM dependabot_merge_operations WHERE id = ?1
+                 AND pr_id = 1 AND state = 'delegated' AND phase = 'merging'
+                 AND repo_full_name = 'octo/repo'",
+                [op_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            == 1);
+
+        let upgraded_indexes = table_indexes(&upgraded, "dependabot_merge_operations");
+        for required in [
+            "idx_dependabot_merge_active_pr",
+            "idx_dependabot_merge_repo_fifo",
+            "idx_dependabot_merge_terminal",
+        ] {
+            assert!(upgraded_indexes.contains(&required.to_string()));
+        }
+
+        let fresh = Connection::open_in_memory().unwrap();
+        fresh.pragma_update(None, "foreign_keys", "ON").unwrap();
+        run_migrations(&fresh).unwrap();
+
+        assert_eq!(
+            upgraded_cols,
+            table_columns(&fresh, "dependabot_merge_operations")
+        );
+        assert_eq!(
+            upgraded_indexes,
+            table_indexes(&fresh, "dependabot_merge_operations")
+        );
     }
 }

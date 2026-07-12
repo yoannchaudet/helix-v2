@@ -548,8 +548,7 @@ pub fn request_cancel(
             let updated = conn.execute(
                 "UPDATE dependabot_merge_operations
                  SET state = 'cancel_requested',
-                     failure_reason = 'Stopping before the next GitHub mutation.',
-                     last_action_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+                     failure_reason = 'Stopping before the next GitHub mutation.'
                  WHERE id = ?1 AND state IN ('validating', 'delegated')",
                 [id],
             )?;
@@ -699,7 +698,6 @@ pub fn mark_merge_progress(
              approved_head_sha = CASE WHEN ?3 THEN ?2 ELSE approved_head_sha END,
              delegated_at = COALESCE(delegated_at, strftime('%Y-%m-%dT%H:%M:%SZ','now')),
              last_checked_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
-             last_action_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
              update_branch_from_sha = CASE WHEN ?4 THEN ?2 ELSE NULL END,
              failure_code = NULL, failure_reason = ?5, last_error = NULL
          WHERE id = ?1",
