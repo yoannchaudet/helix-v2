@@ -241,6 +241,40 @@ test("operationFlow marks a branch marker naming the strategy, and only that bra
   assert.ok(queue.includes("Waiting in merge queue"));
 });
 
+test("operationFlow hides an unresolved strategy marker once an operation is terminal", () => {
+  const active = operationFlow(
+    buildOperationGraph({ state: "validating", phase: PHASES.VALIDATING }),
+  );
+  assert.ok(active.includes("Merge strategy not yet determined"));
+
+  for (const state of ["merged", "cancelled", "failed", "timed_out"]) {
+    const terminal = operationFlow(buildOperationGraph({ state, phase: PHASES.VALIDATING }));
+    assert.ok(!terminal.includes("Merge strategy not yet determined"));
+    assert.ok(!terminal.includes("op-flow-marker"));
+    assert.ok(terminal.includes('data-node-id="strategy_detection"'));
+  }
+
+  const direct = operationFlow(
+    buildOperationGraph({
+      state: "merged",
+      phase: PHASES.MERGING,
+      strategy: STRATEGIES.DIRECT,
+    }),
+  );
+  assert.ok(direct.includes("op-flow-marker"));
+  assert.ok(direct.includes("Direct merge"));
+
+  const queue = operationFlow(
+    buildOperationGraph({
+      state: "cancelled",
+      phase: PHASES.WAITING_MERGE_QUEUE,
+      strategy: STRATEGIES.MERGE_QUEUE,
+    }),
+  );
+  assert.ok(queue.includes("op-flow-marker"));
+  assert.ok(queue.includes("Merge queue"));
+});
+
 test("operationFlow escapes node labels/details even though they're internal strings", () => {
   const graph = buildOperationGraph({
     state: "failed",
