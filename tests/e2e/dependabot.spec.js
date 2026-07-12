@@ -79,6 +79,44 @@ test("cancels an active merge from Operations", async ({ page }) => {
   expect(calls.some((call) => call.cmd === "cancel_dependabot_merge")).toBe(true);
 });
 
+test("mock FIFO positions shift after the head is cancelled", async ({ page }) => {
+  const head = mergeOperation({
+    id: 17,
+    state: "delegated",
+    phase: "waiting_checks",
+    queue_position: 1,
+    enqueued_at: "2026-06-27T10:00:00Z",
+  });
+  const second = mergeOperation({
+    id: 18,
+    state: "queued",
+    phase: "queued",
+    queue_position: 2,
+    enqueued_at: "2026-06-27T10:01:00Z",
+  });
+  const third = mergeOperation({
+    id: 19,
+    state: "queued",
+    phase: "queued",
+    queue_position: 3,
+    enqueued_at: "2026-06-27T10:02:00Z",
+  });
+  await openDependabot(page, {
+    ...defaultFixtures(),
+    mergeOperations: [head, second, third],
+  });
+
+  const operations = await page.evaluate(async () => {
+    await window.__TAURI__.core.invoke("cancel_dependabot_merge", { operationId: 17 });
+    await window.__TAURI__.core.invoke("process_dependabot_merges");
+    return window.__TAURI__.core.invoke("list_dependabot_merge_operations");
+  });
+
+  expect(operations.find((operation) => operation.id === 17).queue_position).toBeNull();
+  expect(operations.find((operation) => operation.id === 18).queue_position).toBe(1);
+  expect(operations.find((operation) => operation.id === 19).queue_position).toBe(2);
+});
+
 test("preserves operation control focus across live refreshes", async ({ page }) => {
   const operation = {
     id: 18,
@@ -332,13 +370,18 @@ test("shows retry count from check_retry_count and distinguishes Helix's queue p
   // two must render distinctly, never conflated. `delegatedHead` occupies the repo's single
   // active slot so the mock's own processing tick (fired when the module opens) doesn't
   // auto-advance `waitingHelix` out of "queued" before we can assert its position.
-  const delegatedHead = mergeOperation({ id: 55, state: "delegated", phase: "waiting_checks" });
+  const delegatedHead = mergeOperation({
+    id: 55,
+    state: "delegated",
+    phase: "waiting_checks",
+    enqueued_at: "2026-06-27T09:59:00Z",
+  });
   const waitingHelix = mergeOperation({
     id: 52,
     state: "queued",
     phase: "queued",
     strategy: "unknown",
-    queue_position: 2,
+    enqueued_at: "2026-06-27T10:00:00Z",
   });
   await openDependabot(page, {
     ...defaultFixtures(),

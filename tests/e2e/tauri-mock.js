@@ -64,13 +64,39 @@ export function installTauriMock(fixtures) {
   // Test hook: let specs drive backend events directly (e.g. finish a withheld resolution pass).
   window.__mockEmit = emit;
 
+  const activeMergeStates = new Set(["queued", "validating", "delegated", "cancel_requested"]);
+  const recomputeMergeQueuePositions = () => {
+    const byRepo = new Map();
+    for (const operation of state.mergeOperations) {
+      operation.queue_position = null;
+      if (!activeMergeStates.has(operation.state)) continue;
+      const queue = byRepo.get(operation.repo_full_name) ?? [];
+      queue.push(operation);
+      byRepo.set(operation.repo_full_name, queue);
+    }
+    for (const queue of byRepo.values()) {
+      queue
+        .sort(
+          (a, b) =>
+            String(a.enqueued_at).localeCompare(String(b.enqueued_at)) ||
+            Number(a.id) - Number(b.id),
+        )
+        .forEach((operation, index) => {
+          operation.queue_position = index + 1;
+        });
+    }
+  };
+
   // Test hook: patch a merge operation (and optionally its stored detail payload) in place,
   // then fire `dependabot:operations-changed` — the app's own live-refresh event — so a spec
   // can simulate a phase transition / retry / queue-position update / new action-log event
   // without re-implementing the backend's processing state machine.
   window.__mockSetOperation = (operationId, patch = {}, detailPatch = undefined) => {
     const operation = state.mergeOperations.find((o) => o.id === operationId);
-    if (operation) Object.assign(operation, patch);
+    if (operation) {
+      Object.assign(operation, patch);
+      recomputeMergeQueuePositions();
+    }
     if (detailPatch !== undefined) {
       const key = String(operationId);
       const existing = state.mergeOperationDetails[key] ?? {};
@@ -258,11 +284,6 @@ export function installTauriMock(fixtures) {
         if (pr) found = { group, pr };
       }
       if (!found) throw new Error("Dependabot PR not found");
-      const sameRepo = state.mergeOperations.filter(
-        (o) =>
-          o.repo_full_name === found.group.full_name &&
-          ["queued", "validating", "delegated", "cancel_requested"].includes(o.state),
-      );
       const operation = {
         id: Math.max(0, ...state.mergeOperations.map((o) => o.id)) + 1,
         pr_id: prId,
@@ -273,7 +294,7 @@ export function installTauriMock(fixtures) {
         state: "queued",
         phase: "queued",
         strategy: "unknown",
-        queue_position: sameRepo.length + 1,
+        queue_position: null,
         check_retry_count: 0,
         merge_queue_position: null,
         next_action_at: null,
@@ -284,6 +305,7 @@ export function installTauriMock(fixtures) {
         terminal_at: null,
       };
       state.mergeOperations.push(operation);
+      recomputeMergeQueuePositions();
       state.mergeOperationDetails[String(operation.id)] = {
         operation,
         events: [
@@ -312,6 +334,7 @@ export function installTauriMock(fixtures) {
       operation.state = operation.state === "queued" ? "cancelled" : "cancel_requested";
       operation.queue_position = null;
       if (operation.state === "cancelled") operation.terminal_at = new Date().toISOString();
+      recomputeMergeQueuePositions();
       emit("dependabot:operations-changed", null);
       return { ...operation };
     },
@@ -323,7 +346,6 @@ export function installTauriMock(fixtures) {
         if (operation.state === "queued" && !delegatedRepos.has(operation.repo_full_name)) {
           operation.state = "delegated";
           operation.phase = "validating";
-          operation.queue_position = 1;
           operation.delegated_at = new Date().toISOString();
           delegatedRepos.add(operation.repo_full_name);
         } else if (operation.state === "cancel_requested") {
@@ -331,6 +353,7 @@ export function installTauriMock(fixtures) {
           operation.terminal_at = new Date().toISOString();
         }
       }
+      recomputeMergeQueuePositions();
       emit("dependabot:operations-changed", null);
       return handlers.dependabot_merge_status();
     },
