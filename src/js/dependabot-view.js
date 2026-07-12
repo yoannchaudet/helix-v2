@@ -288,12 +288,31 @@ export function operationsList(operations, options = {}) {
       expanded: operation.id === expandedId,
       detail: operation.id === expandedId ? (details[operation.id] ?? null) : null,
     });
-  const section = (label, items) =>
-    items.length
-      ? html`<section class="repo-section operation-section">
+  const section = (key, label, items) => {
+    if (!items.length) return "";
+    const byRepo = new Map();
+    for (const operation of items) {
+      const repo = operation.repo_full_name || "Unknown repository";
+      const repoOperations = byRepo.get(repo) || [];
+      repoOperations.push(operation);
+      byRepo.set(repo, repoOperations);
+    }
+    const repoGroups = [...byRepo.entries()]
+      .map(([repo, repoOperations], index) => {
+        const headingId = `operation-repo-${key}-${index}`;
+        return html`<section class="operation-repo-group" data-repo="${repo}" aria-labelledby="${headingId}">
+          <div class="operation-repo-header">
+            <h3 class="repo-name" id="${headingId}">${repo}</h3>
+            <span class="repo-counts">${repoOperations.length}</span>
+          </div>
+          <ul class="n-list">${rawHtml(repoOperations.map(renderRow).join(""))}</ul>
+        </section>`;
+      })
+      .join("");
+    return html`<section class="repo-section operation-section" data-operation-status="${key}">
           <div class="repo-header"><h2 class="repo-name">${label}</h2><span class="repo-counts">${items.length}</span></div>
-          <ul class="n-list">${rawHtml(items.map(renderRow).join(""))}</ul>
-        </section>`
-      : "";
-  return `${section("Active", active)}${section("Recent", recent)}`;
+          <div class="operation-repo-groups">${rawHtml(repoGroups)}</div>
+        </section>`;
+  };
+  return `${section("active", "Active", active)}${section("recent", "Recent", recent)}`;
 }

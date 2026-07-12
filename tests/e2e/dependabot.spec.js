@@ -59,6 +59,44 @@ test("queues a merge and shows it in Operations", async ({ page }) => {
   expect(calls.some((call) => call.cmd === "enqueue_dependabot_merge")).toBe(true);
 });
 
+test("groups active and recent operations by repository", async ({ page }) => {
+  const operations = [
+    mergeOperation({ id: 17, repo_full_name: "octo/hello" }),
+    mergeOperation({
+      id: 18,
+      pr_id: 103,
+      repo_full_name: "acme/widgets",
+      number: 9,
+      title: "Bump serde",
+      html_url: "https://github.com/acme/widgets/pull/9",
+      state: "queued",
+      phase: "queued",
+      strategy: "unknown",
+      delegated_at: null,
+      enqueued_at: "2026-06-27T10:01:00Z",
+    }),
+    mergeOperation({
+      id: 19,
+      state: "merged",
+      phase: "merging",
+      terminal_at: "2026-06-27T10:02:00Z",
+    }),
+  ];
+  await openDependabot(page, { ...defaultFixtures(), mergeOperations: operations });
+  await page.locator('#dependabot-filter-list [data-filter="operations"]').click();
+
+  const active = page.locator('#dependabot .operation-section[data-operation-status="active"]');
+  await expect(active.locator(".operation-repo-header .repo-name")).toHaveText([
+    "octo/hello",
+    "acme/widgets",
+  ]);
+  await expect(active.locator(".operation-repo-group")).toHaveCount(2);
+
+  const recent = page.locator('#dependabot .operation-section[data-operation-status="recent"]');
+  await expect(recent.locator(".operation-repo-group")).toHaveCount(1);
+  await expect(recent.locator(".operation-repo-header .repo-name")).toHaveText("octo/hello");
+});
+
 test("cancels an active merge from Operations", async ({ page }) => {
   const operation = {
     id: 17,

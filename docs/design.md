@@ -328,7 +328,8 @@ and each module owns — or omits — its own sidebar. The active module is acce
   smart-filter + repository **sidebar**.
 - **Dependabot** module — lists cached open Dependabot PRs by repository and owns a
   repository/Operations sidebar. Row-level merge actions create durable operations;
-  Operations shows active FIFO work plus the latest 100 terminal results. Expanding an
+  Operations shows active FIFO work plus the latest 100 terminal results, grouped by repository
+  within the Active and Recent sections. Expanding an
   operation reveals its strategy-specific flow, highlighted current step, next action, retry or
   GitHub queue position, and timestamped durable action log.
 - **Settings is *not* a module** — it's a focused, full-width **overlay** that temporarily
