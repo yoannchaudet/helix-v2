@@ -21,8 +21,8 @@ import { MODULES, DEFAULT_MODULE_ID, isModuleId, moduleAt } from "./modules-mode
  *   load()       — Called once after init to perform the initial data load.
  *   activate()   — Called when the module becomes visible (module switch or restore).
  *                  Use for staleness-gated syncs, on-return announcements, etc.
- *   deactivate() — Called when the module is hidden (another module or Settings takes
- *                  over). Use for clearing stale announcement queues, pausing timers, etc.
+ *   deactivate() — Called when the module is hidden by another module. Use for clearing
+ *                  stale announcement queues, pausing timers, etc.
  *
  * All callbacks are optional. Modules that don't register still work — they just don't get
  * lifecycle calls.

@@ -620,8 +620,8 @@ function onInboxKeydown(e) {
 function focusRow(row, kbd = true) {
   const target = row.querySelector(".n-open[tabindex]") || row.querySelector(".n-done");
   if (!target) return;
-  kbdFocus.clear();
   if (kbd) kbdFocus.apply(target);
+  else kbdFocus.clear();
   target.focus();
 }
 

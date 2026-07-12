@@ -24,8 +24,8 @@ const SHORTCUTS = [
 /** Module-registered shortcut groups (inserted before the General group). */
 const moduleShortcutGroups = [];
 
-/** Register one shortcut group for the cheatsheet overlay. Modules call this during their
- *  init to contribute their own keybindings. Groups appear before the built-in General group. */
+/** Register one shortcut group for the cheatsheet overlay. Modules call this during module
+ *  registration to contribute their own keybindings. Groups appear before the built-in General group. */
 export function registerShortcutGroup(group) {
   moduleShortcutGroups.push(group);
 }
