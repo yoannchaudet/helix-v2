@@ -98,6 +98,43 @@ export function announce(text) {
   });
 }
 
+/* -------------------------------- Announcement queue ------------------------------- */
+
+/** Queue of pending announcements — serialized so concurrent messages are not overwritten.
+ *  Each call to `enqueueAnnounce` pushes onto the queue; a drain loop pops and announces
+ *  one at a time with a 200ms gap, giving VoiceOver enough time to register each message
+ *  before the live-region text changes again.
+ *
+ *  This is opt-in: callers that only ever produce a single message at a time can keep using
+ *  `announce()` directly. `enqueueAnnounce` is for call sites where user-driven and poll-
+ *  driven announcements can race (e.g. sync progress + background operation transitions). */
+const announceQ = [];
+let announceDraining = false;
+const ANNOUNCE_GAP_MS = 200;
+
+export function enqueueAnnounce(text) {
+  if (!text) return;
+  announceQ.push(text);
+  if (!announceDraining) drainAnnounceQueue();
+}
+
+function drainAnnounceQueue() {
+  if (!announceQ.length) {
+    announceDraining = false;
+    return;
+  }
+  announceDraining = true;
+  const next = announceQ.shift();
+  announce(next);
+  setTimeout(drainAnnounceQueue, ANNOUNCE_GAP_MS);
+}
+
+/** Clear any queued (but not yet spoken) announcements — e.g. when leaving the Dependabot
+ *  module so stale poll-driven messages don't fire after the user moved on. */
+export function clearAnnounceQueue() {
+  announceQ.length = 0;
+}
+
 /** Copy `text` to the clipboard, returning whether it succeeded. Tries the async Clipboard
  *  API first, then falls back to a hidden-textarea `execCommand("copy")` — the async API is
  *  unavailable/blocked in the macOS WKWebView Tauri uses, so the fallback is what actually

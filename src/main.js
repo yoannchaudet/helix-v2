@@ -1,5 +1,5 @@
 import { invoke } from "./js/api.js";
-import { $$ } from "./js/dom.js";
+import { $$, clearAnnounceQueue } from "./js/dom.js";
 import { loadStorage } from "./js/storage.js";
 import { initUpdates } from "./js/updates.js";
 import { initSidebarResize } from "./js/sidebar-resize.js";
@@ -60,6 +60,7 @@ window.addEventListener("DOMContentLoaded", () => {
     onSwitch: (id) => {
       showSettings(false);
       if (id === "dependabot") onDependabotOpened();
+      else clearAnnounceQueue();
     },
   });
 

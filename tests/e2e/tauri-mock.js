@@ -109,6 +109,12 @@ export function installTauriMock(fixtures) {
     emit("dependabot:operations-changed", null);
   };
 
+  // Test hook: replace the mock dependabot groups entirely — lets a spec simulate a repo
+  // vanishing between snapshots (e.g. after a sync removes a repo that no longer has PRs).
+  window.__mockSetDependabot = (newGroups) => {
+    state.dependabot = JSON.parse(JSON.stringify(newGroups));
+  };
+
   const countAll = () => state.inbox.reduce((sum, g) => sum + g.notifications.length, 0);
 
   const handlers = {
