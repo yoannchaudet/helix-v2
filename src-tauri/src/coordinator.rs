@@ -33,6 +33,12 @@ mod tuning {
     /// (see `subjects:resolution-done`). A timed-out request is a normal per-subject failure:
     /// it's logged and retried on a later sync.
     pub const RESOLVE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+    /// Entire notification-list fetch deadline. This bounds pagination as a whole, rather than
+    /// relying only on the HTTP client's per-request timeout.
+    pub const SYNC_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+    /// Entire background subject-resolution pass deadline. Resolution is intentionally serial
+    /// to avoid GitHub secondary-rate limits, so its per-request timeout alone is insufficient.
+    pub const RESOLVE_PASS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 }
 
 /// Take the DB lock and run a best-effort write, logging (rather than surfacing) either a
@@ -76,7 +82,12 @@ pub async fn sync_now(
     // *same* credential — matching the original (a mid-sync sign-out/token swap must not
     // make resolution run under, or silently skip because of, a different token).
     let (result, token) = sync_now_core(&state.db, app.clone(), |token, on_page| async move {
-        github::fetch_all_notifications(&token, on_page).await
+        tokio::time::timeout(
+            tuning::SYNC_FETCH_TIMEOUT,
+            github::fetch_all_notifications(&token, on_page),
+        )
+        .await
+        .map_err(|_| github::GitHubError::Network("notification sync timed out".into()))?
     })
     .await?;
 
@@ -289,9 +300,14 @@ where
     // the classic secondary-limit trigger. Real network latency paces the loop; the reserve
     // check bounds primary-quota spend; and any back-off signal (a 403 / `Retry-After`) stops
     // the whole pass so we don't hammer into the limit — the rest resolves on a later sync.
+    let deadline = tokio::time::Instant::now() + tuning::RESOLVE_PASS_TIMEOUT;
     for p in &pending {
-        match resolve(p.subject_url.clone()).await {
-            Ok(result) => {
+        let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now()) else {
+            eprintln!("subject resolution pass timed out; remaining subjects will retry later");
+            break;
+        };
+        match tokio::time::timeout(remaining, resolve(p.subject_url.clone())).await {
+            Ok(Ok(result)) => {
                 rate.observe(result.rate.clone());
                 match db.0.lock() {
                     Ok(conn) => {
@@ -309,7 +325,7 @@ where
                     ),
                 }
             }
-            Err(err) => {
+            Ok(Err(err)) => {
                 // A failed resolution still spent quota — count it toward the reserve.
                 rate.observe(err.rate.clone());
                 if err.should_back_off() {
@@ -323,6 +339,10 @@ where
                     "subject resolution failed for {}: {}",
                     p.thread_id, err.error
                 );
+            }
+            Err(_) => {
+                eprintln!("subject resolution pass timed out; remaining subjects will retry later");
+                break;
             }
         }
 

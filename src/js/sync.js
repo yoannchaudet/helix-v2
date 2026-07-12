@@ -141,9 +141,9 @@ function renderSyncStats(status) {
     setSyncProgress(status.last_error, "error");
   } else if (resolving) {
     // The notifications list is stored, but background subject resolution (the Open/Closed/
-    // Merged pills) is still running — it's part of the sync, so hold the pill until the
-    // resolution pass finishes (see the `subjects:resolution-done` listener).
-    setSyncStatus("pending", "Syncing…");
+    // Merged pills) is still running — tell the user exactly what remains, and hold this state
+    // until the resolution pass finishes (see the `subjects:resolution-done` listener).
+    setSyncStatus("pending", "Resolving details…");
   } else if (status.last_status === "success") {
     // Green only confirms a sync that happened in this session. On launch we're showing
     // cached local state, so the same "success" record renders neutral with its age.
@@ -228,8 +228,8 @@ export async function syncNow() {
   // `subjects:resolution-done` could arrive before this continuation runs. The error path and
   // the resolution-done listener clear it.
   resolving = true;
-  setSyncStatus("pending", "Syncing…");
-  setSyncProgress("Starting…");
+  setSyncStatus("pending", "Fetching notifications…");
+  setSyncProgress("Contacting GitHub…");
 
   let result;
   try {
@@ -318,7 +318,14 @@ export function registerSyncEvents() {
     // Ignore stale events delivered after the sync has settled.
     if (!syncing) return;
     const { page, fetched } = event.payload ?? {};
-    setSyncProgress(`Fetching page ${page}… (${fetched} so far)`);
+    setSyncProgress(`Fetching notifications — page ${page} (${fetched} found)…`);
+  });
+  // The notification list is already visible by this point; GitHub subject details (links and
+  // state badges) now resolve in the background. Naming this phase explains the remaining wait.
+  listen("subjects:resolution-started", () => {
+    if (!resolving) return;
+    setSyncStatus("pending", "Resolving details…");
+    setSyncProgress("Fetching notification details…");
   });
   // Subject states (Open/Closed/Merged pills) resolve in the background after a sync;
   // reload the inbox once a batch lands so the pills appear progressively, and refresh
@@ -336,6 +343,7 @@ export function registerSyncEvents() {
     if (!resolving) return;
     resolving = false;
     setSyncBusy(false);
+    setSyncProgress("");
     loadSyncStatus();
     resetPollCountdown();
   });
