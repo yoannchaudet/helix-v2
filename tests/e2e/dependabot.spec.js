@@ -332,6 +332,23 @@ test("the sidebar lists repositories and refines the list", async ({ page }) => 
   await expect(page.locator("#dependabot .repo-section")).toHaveCount(2);
 });
 
+test("notification sidebar rerenders preserve Dependabot counts", async ({ page }) => {
+  await openDependabot(page);
+
+  const allCount = page.locator('#dependabot-filter-list [data-filter="all"] .source-count');
+  const octoCount = page.locator('#dependabot-repo-list [data-repo="octo/hello"] .source-count');
+  const acmeCount = page.locator('#dependabot-repo-list [data-repo="acme/widgets"] .source-count');
+  await expect(allCount).toHaveText("3");
+  await expect(octoCount).toHaveText("2");
+  await expect(acmeCount).toHaveText("1");
+
+  await page.locator('#filter-list [data-filter="all"]').evaluate((button) => button.click());
+
+  await expect(allCount).toHaveText("3");
+  await expect(octoCount).toHaveText("2");
+  await expect(acmeCount).toHaveText("1");
+});
+
 test("activating a PR row opens it in the browser via open_url", async ({ page }) => {
   await openDependabot(page);
 
