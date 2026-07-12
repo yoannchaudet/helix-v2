@@ -964,6 +964,12 @@ trait MergeBackend {
         base: &str,
     ) -> Result<github::MergeQueuePolicy, github::MergeRemoteError>;
 
+    async fn ref_update_restriction(
+        &self,
+        repo: &str,
+        base: &str,
+    ) -> Result<github::RefUpdateRestrictionResult, github::MergeRemoteError>;
+
     async fn diagnose(
         &self,
         repo: &str,
@@ -1071,6 +1077,14 @@ impl MergeBackend for RealMergeBackend<'_> {
         base: &str,
     ) -> Result<github::MergeQueuePolicy, github::MergeRemoteError> {
         github::detect_merge_queue_policy(&self.client, &self.token, repo, base).await
+    }
+
+    async fn ref_update_restriction(
+        &self,
+        repo: &str,
+        base: &str,
+    ) -> Result<github::RefUpdateRestrictionResult, github::MergeRemoteError> {
+        github::detect_ref_update_restriction(&self.client, &self.token, repo, base).await
     }
 
     async fn diagnose(
@@ -1925,6 +1939,15 @@ async fn direct_await_checks<B: MergeBackend>(
                     branch_update_requested: true,
                     reason: Some(
                         "Updating the stale branch and waiting for fresh checks.".to_string(),
+                    ),
+                });
+            }
+            let restriction = net!(*rates, backend.ref_update_restriction(&repo, base_ref));
+            if restriction.restricted == Some(true) {
+                return Ok(Outcome::PermanentFailure {
+                    code: "protected_ref",
+                    reason: format!(
+                        "The target branch `{base_ref}` is protected against updates for the authenticated GitHub account."
                     ),
                 });
             }
@@ -3067,7 +3090,7 @@ mod tests {
         ActionsRunFailure, BranchComparisonResult, ExactHeadCheckDiagnosis, ExternalCheckFailure,
         MergeQueueEntryStatus, MergeQueuePolicy, MergeQueueStrategy, MergeRemoteError,
         MergeRemoteOutcome, MergeRemoteResult, MutationOutcome, MutationResult, PrQueueStatus,
-        PrQueueStatusResult, PullHeadResult,
+        PrQueueStatusResult, PullHeadResult, RefUpdateRestrictionResult,
     };
     use std::collections::VecDeque;
 
@@ -3085,6 +3108,7 @@ mod tests {
     struct Script {
         process: VecDeque<NetResult<MergeRemoteResult>>,
         policy: VecDeque<NetResult<MergeQueuePolicy>>,
+        ref_restriction: VecDeque<NetResult<RefUpdateRestrictionResult>>,
         diagnose: VecDeque<NetResult<ExactHeadCheckDiagnosis>>,
         compare: VecDeque<NetResult<BranchComparisonResult>>,
         current_head: VecDeque<NetResult<PullHeadResult>>,
@@ -3101,6 +3125,7 @@ mod tests {
     struct Calls {
         process: usize,
         policy: usize,
+        ref_restriction: usize,
         diagnose: usize,
         compare: usize,
         current_head: usize,
@@ -3155,6 +3180,18 @@ mod tests {
         async fn detect_policy(&self, _repo: &str, _base: &str) -> NetResult<MergeQueuePolicy> {
             self.calls.lock().unwrap().policy += 1;
             Self::pop(&mut self.script.lock().unwrap().policy, "detect_policy")
+        }
+
+        async fn ref_update_restriction(
+            &self,
+            _repo: &str,
+            _base: &str,
+        ) -> NetResult<RefUpdateRestrictionResult> {
+            self.calls.lock().unwrap().ref_restriction += 1;
+            Self::pop(
+                &mut self.script.lock().unwrap().ref_restriction,
+                "ref_update_restriction",
+            )
         }
 
         async fn diagnose(&self, _repo: &str, _head: &str) -> NetResult<ExactHeadCheckDiagnosis> {
@@ -3279,6 +3316,13 @@ mod tests {
     fn policy(strategy: MergeQueueStrategy) -> MergeQueuePolicy {
         MergeQueuePolicy {
             strategy,
+            rates: rates_core(),
+        }
+    }
+
+    fn ref_restriction(restricted: Option<bool>) -> RefUpdateRestrictionResult {
+        RefUpdateRestrictionResult {
+            restricted,
             rates: rates_core(),
         }
     }
@@ -3517,6 +3561,7 @@ mod tests {
                 behind: false,
                 rates: rates_core(),
             })]),
+            ref_restriction: VecDeque::from([Ok(ref_restriction(None))]),
             ..Default::default()
         });
         {
@@ -3541,8 +3586,71 @@ mod tests {
                 .unwrap();
         assert_eq!(failure_code, None);
         assert_eq!(fake.calls().compare, 1);
+        assert_eq!(fake.calls().ref_restriction, 1);
         assert_eq!(fake.calls().update_branch, 0);
         assert!(statuses(&db, id).contains(&"pending".to_string()));
+    }
+
+    #[test]
+    fn direct_blocked_by_protected_target_ref_terminates() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        let fake = FakeBackend::new(Script {
+            process: VecDeque::from([Ok(blocked("sha1", "enterprise-3.16-release"))]),
+            diagnose: VecDeque::from([Ok(ExactHeadCheckDiagnosis {
+                rates: rates_core(),
+                ..Default::default()
+            })]),
+            compare: VecDeque::from([Ok(BranchComparisonResult {
+                behind: false,
+                rates: rates_core(),
+            })]),
+            ref_restriction: VecDeque::from([Ok(ref_restriction(Some(true)))]),
+            ..Default::default()
+        });
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::cache_merge_policy(
+                &conn,
+                "octo/repo-a",
+                "enterprise-3.16-release",
+                "direct",
+            )
+            .unwrap();
+            dependabot::set_phase(
+                &conn,
+                id,
+                "queued",
+                Some("direct"),
+                None,
+                Some("enterprise-3.16-release"),
+            )
+            .unwrap();
+        }
+
+        tick(&db, &fake);
+
+        let after = op(&db, id);
+        assert_eq!(after.state, "failed");
+        let failure_code: Option<String> =
+            db.0.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT failure_code FROM dependabot_merge_operations WHERE id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+        assert_eq!(failure_code.as_deref(), Some("protected_ref"));
+        assert!(after
+            .failure_reason
+            .as_deref()
+            .unwrap()
+            .contains("enterprise-3.16-release"));
+        assert_eq!(fake.calls().ref_restriction, 1);
+        assert_eq!(fake.calls().update_branch, 0);
+        assert!(statuses(&db, id).contains(&"failed".to_string()));
     }
 
     #[test]

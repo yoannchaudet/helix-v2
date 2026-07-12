@@ -452,6 +452,10 @@ module's **sidebar + content** split:
   Before dispatching a durable retry, Helix verifies that its recorded head SHA still matches the
   live PR head and retires stale retries without calling GitHub. A run that GitHub says cannot be
   rerun fails only its operation; unrelated repositories continue processing in the same tick.
+  If a direct PR remains blocked with a current branch and no pending or failing checks, Helix
+  inspects the active rules for its target branch. An active ref-update restriction whose source
+  ruleset says the current account can never bypass it terminalizes the operation as a protected
+  target ref; inaccessible or ambiguous rule details remain non-terminal.
   When the deadline passes on a queue operation, Helix disables native auto-merge and dequeues the
   PR (under the mutation guard) before terminalizing it as timed out; if that cleanup fails it stays
   active and retries rather than releasing the repo's FIFO head. A merge GitHub already completed
