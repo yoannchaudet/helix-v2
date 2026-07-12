@@ -1,5 +1,5 @@
 import { invoke, listen } from "./api.js";
-import { $, html, toast, enqueueAnnounce, clearAnnounceQueue } from "./dom.js";
+import { $, html, toast, enqueueAnnounce } from "./dom.js";
 import { POLL_TICK_MS, STATES } from "./constants.js";
 import { relTime } from "./format.js";
 import {
@@ -494,6 +494,7 @@ async function reloadOperations() {
     ]);
     if (generation !== loadGeneration) return;
     applySnapshot(groups, operations);
+    renderTitle();
     renderSidebar();
     if (!$("#view-dependabot")?.hidden) renderList();
     if (expandedOperationId != null) refreshExpandedOperationDetail();
@@ -687,6 +688,7 @@ export async function startDependabotMergePolling() {
     if (generation === loadGeneration) {
       applySnapshot(groups, operations);
       applyMergeStatus(status);
+      renderTitle();
       renderSidebar();
       if (!$("#view-dependabot")?.hidden) renderList();
       resumePendingDiscards();
