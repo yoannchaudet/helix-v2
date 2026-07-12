@@ -822,6 +822,7 @@ const EVENT_COLUMNS: &str =
 /// `head_sha`/`external_id`). The orchestrator narrates progress on every tick, so without this
 /// the audit trail would otherwise grow unboundedly for a long-running or slow-to-progress
 /// operation without conveying any new information.
+#[allow(clippy::too_many_arguments)]
 pub fn append_operation_event(
     conn: &Connection,
     operation_id: i64,
