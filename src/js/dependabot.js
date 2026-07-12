@@ -470,6 +470,7 @@ function rows() {
 
 async function processMergeOperations() {
   if (!isAuthenticated() || operationTicking || !activeMergeCount(mergeOperations)) return;
+  if (Date.now() < dependabotMergePoll.backoffUntilMs) return;
   operationTicking = true;
   operationPollElapsed = 0;
   try {
