@@ -738,7 +738,6 @@ pub fn record_merge_error(
     conn.execute(
         "UPDATE dependabot_merge_operations
          SET failure_code = ?2, failure_reason = ?3, last_error = ?3,
-             retry_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'),
              last_checked_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
          WHERE id = ?1",
         params![id, code, reason],

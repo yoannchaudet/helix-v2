@@ -223,7 +223,6 @@ const MIGRATIONS: &[&str] = &[
         delegated_at       TEXT,
         last_checked_at    TEXT,
         last_action_at     TEXT,
-        retry_at           TEXT,
         terminal_at        TEXT,
         failure_code       TEXT,
         failure_reason     TEXT,
