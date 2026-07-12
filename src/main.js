@@ -96,7 +96,9 @@ window.addEventListener("DOMContentLoaded", () => {
   loadSyncStatus();
   loadSettings();
   initUpdates();
-  loadAccount();
+  // Let modules run once account bootstrap settles (signed in or signed out), so
+  // auth-gated module activation can refresh from a stable auth state.
+  loadAccount().finally(() => activateCurrentModule());
 
   // The window starts hidden (see tauri.conf.json) to avoid a flash on launch;
   // reveal it from Rust now that the DOM is built and styled. First restore the last opened
