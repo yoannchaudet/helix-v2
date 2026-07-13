@@ -1717,8 +1717,10 @@ async fn orchestrate_operation<B: MergeBackend>(
                 backend,
                 &work,
                 &head_sha,
-                Some(&base_ref),
-                None,
+                DirectCheckContext {
+                    blocked_base_ref: Some(&base_ref),
+                    pending_reason: None,
+                },
                 timed_out,
                 &mut rates,
             )
@@ -1770,8 +1772,10 @@ async fn orchestrate_operation<B: MergeBackend>(
                 backend,
                 &work,
                 &head_sha,
-                None,
-                reason.as_deref(),
+                DirectCheckContext {
+                    blocked_base_ref: None,
+                    pending_reason: reason.as_deref(),
+                },
                 timed_out,
                 &mut rates,
             )
@@ -1944,13 +1948,17 @@ async fn orchestrate_operation<B: MergeBackend>(
 /// the failing check names; failed GitHub Actions runs are each scheduled (once per
 /// run+attempt) for a five-minute rerun; otherwise Helix keeps waiting for pending checks.
 /// The 90-minute deadline is evaluated before scheduling any new retry (requirement 4).
+struct DirectCheckContext<'a> {
+    blocked_base_ref: Option<&'a str>,
+    pending_reason: Option<&'a str>,
+}
+
 async fn direct_await_checks<B: MergeBackend>(
     db: &Db,
     backend: &B,
     work: &dependabot::MergeWork,
     head_sha: &str,
-    blocked_base_ref: Option<&str>,
-    pending_reason: Option<&str>,
+    context: DirectCheckContext<'_>,
     timed_out: bool,
     rates: &mut Vec<github::RateLimit>,
 ) -> Result<github::MergeRemoteOutcome, github::MergeRemoteError> {
@@ -2062,7 +2070,7 @@ async fn direct_await_checks<B: MergeBackend>(
     }
 
     if diagnosis.pending.is_empty() {
-        if let Some(base_ref) = blocked_base_ref {
+        if let Some(base_ref) = context.blocked_base_ref {
             if base_ref.is_empty() {
                 return Ok(Outcome::PermanentFailure {
                     code: "blocked_by_repository_rule",
@@ -2155,7 +2163,8 @@ async fn direct_await_checks<B: MergeBackend>(
             });
         }
         let head = head_sha.to_string();
-        let summary = pending_reason
+        let summary = context
+            .pending_reason
             .filter(|reason| !reason.is_empty())
             .unwrap_or("GitHub still blocks the merge; no pending or failing checks were found.");
         with_conn(db, rates, |conn| {
@@ -2400,7 +2409,19 @@ async fn queue_flow<B: MergeBackend>(
                 None,
             )
         })?;
-        return direct_await_checks(db, backend, work, head_sha, None, None, false, rates).await;
+        return direct_await_checks(
+            db,
+            backend,
+            work,
+            head_sha,
+            DirectCheckContext {
+                blocked_base_ref: None,
+                pending_reason: None,
+            },
+            false,
+            rates,
+        )
+        .await;
     }
 
     // Requirements still pending (not yet approved / checks not green) → idempotently enable
