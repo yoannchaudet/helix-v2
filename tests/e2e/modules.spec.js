@@ -1,13 +1,45 @@
 import { test, expect } from "@playwright/test";
 import { openApp, defaultFixtures, installTauriMock } from "./tauri-mock.js";
 
-/* The module system: the Lightroom-style title-bar picker, ⌘1/⌘2 jumps, and the
+/* The module system: the segmented title-bar picker, ⌘1/⌘2 jumps, and the
  * Settings-overlay interplay. */
 
-test("the picker shows both modules; Notifications is active by default", async ({ page }) => {
+test("the left-side module bar shows both modules and the active indicator", async ({ page }) => {
   await openApp(page);
 
+  const chromeOrder = await page.locator(".topchrome").evaluate((chrome) =>
+    [...chrome.children].map((child) => {
+      if (child.classList.contains("module-picker")) return "picker";
+      if (child.classList.contains("topchrome-brand")) return "brand";
+      return "actions";
+    }),
+  );
+  expect(chromeOrder).toEqual(["picker", "brand", "actions"]);
+
   await expect(page.locator(".module-tab")).toHaveCount(2);
+  await expect(page.locator(".module-picker-indicator")).toHaveCount(1);
+  await expect(page.locator(".module-picker-indicator")).toHaveAttribute("aria-hidden", "true");
+  await expect(page.locator(".module-picker-indicator")).toHaveCSS("pointer-events", "none");
+  await expect(page.locator(".module-picker-indicator")).toHaveCSS(
+    "transition-property",
+    "transform",
+  );
+  await expect(page.locator(".topchrome-brand")).toHaveCSS("text-align", "center");
+  await expect(page.locator(".module-picker")).toHaveAttribute("data-active-index", "0");
+  const geometry = await page.evaluate(() => {
+    const picker = document.querySelector(".module-picker").getBoundingClientRect();
+    const brand = document.querySelector(".topchrome-brand").getBoundingClientRect();
+    const indicator = document.querySelector(".module-picker-indicator").getBoundingClientRect();
+    const tab = document.querySelector(".module-tab").getBoundingClientRect();
+    return {
+      pickerRight: picker.right,
+      brandLeft: brand.left,
+      indicatorWidth: indicator.width,
+      tabWidth: tab.width,
+    };
+  });
+  expect(geometry.pickerRight).toBeLessThanOrEqual(geometry.brandLeft);
+  expect(Math.abs(geometry.indicatorWidth - geometry.tabWidth)).toBeLessThan(1);
   await expect(page.locator('.module-tab[data-module="notifications"]')).toHaveAttribute(
     "aria-current",
     "true",
@@ -19,8 +51,20 @@ test("the picker shows both modules; Notifications is active by default", async 
 test("clicking a module swaps the visible pane and active tab", async ({ page }) => {
   await openApp(page);
 
+  const indicator = page.locator(".module-picker-indicator");
+  const initialOffset = await indicator.evaluate(
+    (element) => new DOMMatrixReadOnly(getComputedStyle(element).transform).m41,
+  );
   await page.locator('.module-tab[data-module="dependabot"]').click();
 
+  await expect(page.locator(".module-picker")).toHaveAttribute("data-active-index", "1");
+  await expect
+    .poll(() =>
+      indicator.evaluate(
+        (element) => new DOMMatrixReadOnly(getComputedStyle(element).transform).m41,
+      ),
+    )
+    .toBeGreaterThan(initialOffset);
   await expect(page.locator("#view-dependabot")).toBeVisible();
   await expect(page.locator("#view-notifications")).toBeHidden();
   await expect(page.locator('.module-tab[data-module="dependabot"]')).toHaveAttribute(
@@ -42,6 +86,7 @@ test("⌘1 / ⌘2 jump straight to a module", async ({ page }) => {
   await expect(page.locator('.n-row[data-thread-id="t2"] .n-open')).toBeFocused();
 
   await page.keyboard.press("Meta+2");
+  await expect(page.locator(".module-picker")).toHaveAttribute("data-active-index", "1");
   await expect(page.locator("#view-dependabot")).toBeVisible();
   await expect(page.locator("#view-notifications")).toBeHidden();
   await expect(page.locator('#dependabot .n-row[data-pr-id="103"] .n-open')).toBeFocused();
@@ -50,6 +95,7 @@ test("⌘1 / ⌘2 jump straight to a module", async ({ page }) => {
   );
 
   await page.keyboard.press("Meta+1");
+  await expect(page.locator(".module-picker")).toHaveAttribute("data-active-index", "0");
   await expect(page.locator("#view-notifications")).toBeVisible();
   await expect(page.locator("#view-dependabot")).toBeHidden();
   await expect(page.locator('.n-row[data-thread-id="t3"] .n-open')).toBeFocused();
@@ -112,6 +158,37 @@ test("the picker stays in the chrome during Settings; switching modules leaves S
   await expect(page.locator("#view-dependabot")).toBeVisible();
 });
 
+test("the module bar fits the minimum window width and honors reduced motion", async ({ page }) => {
+  await page.setViewportSize({ width: 720, height: 700 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const fixtures = defaultFixtures();
+  fixtures.settings.theme = "dark";
+  await openApp(page, fixtures);
+
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  const geometry = await page.evaluate(() => {
+    const picker = document.querySelector(".module-picker").getBoundingClientRect();
+    const brand = document.querySelector(".topchrome-brand").getBoundingClientRect();
+    const actions = document.querySelector(".topchrome-actions").getBoundingClientRect();
+    const transitionDuration = Number.parseFloat(
+      getComputedStyle(document.querySelector(".module-picker-indicator")).transitionDuration,
+    );
+    return {
+      pickerLeft: picker.left,
+      pickerRight: picker.right,
+      brandLeft: brand.left,
+      brandRight: brand.right,
+      actionsLeft: actions.left,
+      transitionDuration,
+    };
+  });
+
+  expect(geometry.pickerLeft).toBeGreaterThanOrEqual(0);
+  expect(geometry.pickerRight).toBeLessThanOrEqual(geometry.brandLeft);
+  expect(geometry.brandRight).toBeLessThanOrEqual(geometry.actionsLeft);
+  expect(geometry.transitionDuration).toBeLessThan(0.001);
+});
+
 test("closing Settings returns to the active (non-default) module", async ({ page }) => {
   await openApp(page);
 
@@ -134,6 +211,7 @@ test("the last opened module is restored on launch", async ({ page }) => {
 
   await expect(page.locator("#view-dependabot")).toBeVisible();
   await expect(page.locator("#view-notifications")).toBeHidden();
+  await expect(page.locator(".module-picker")).toHaveAttribute("data-active-index", "1");
   await expect(page.locator('.module-tab[data-module="dependabot"]')).toHaveAttribute(
     "aria-current",
     "true",

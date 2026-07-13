@@ -5,10 +5,10 @@ import { registerShortcutGroups } from "./shortcuts.js";
 import { closeMenu } from "./menu.js";
 import { MODULES, DEFAULT_MODULE_ID, isModuleId, moduleAt } from "./modules-model.js";
 
-/* The module system: Helix's top-level destinations (à la Lightroom's modules). Each module
- * owns a content pane and is reached via the Lightroom-style picker in the title bar. The
- * picker lives in `#module-picker` and is rendered from the `MODULES` registry (the pure
- * data + helpers live in modules-model.js).
+/* The module system: Helix's top-level destinations. Each module owns a content pane and is
+ * reached via the segmented module bar in the title bar. The picker lives in
+ * `#module-picker` and is rendered from the `MODULES` registry (the pure data + helpers live
+ * in modules-model.js).
  *
  * Settings is intentionally NOT a module — it's a focused full-width *overlay* (see
  * settings.js) that temporarily covers the active module and returns to it on close.
@@ -111,9 +111,15 @@ export function showActiveModulePane() {
   document.querySelector(".app")?.setAttribute("data-module", activeModuleId);
 }
 
-/** Reflect the active module onto the picker buttons (accent the active one, expose it to
- *  assistive tech via `aria-current`). */
+/** Reflect the active module onto the picker buttons and sliding visual indicator. */
 function renderPickerState() {
+  const activeIndex = MODULES.findIndex((module) => module.id === activeModuleId);
+  const picker = $("#module-picker");
+  if (picker) {
+    picker.dataset.activeIndex = String(activeIndex);
+    picker.style.setProperty("--module-index", String(activeIndex));
+  }
+
   for (const btn of document.querySelectorAll(".module-tab")) {
     const active = btn.dataset.module === activeModuleId;
     btn.classList.toggle("module-tab--active", active);
@@ -176,16 +182,21 @@ export function activateCurrentModule() {
   registry[activeModuleId]?.activate?.();
 }
 
-/** Render the picker buttons into `#module-picker` and wire clicks + the ⌘N shortcuts.
+/** Render the picker indicator + buttons into `#module-picker` and wire clicks + the ⌘N
+ *  shortcuts.
  *  Then call each registered module's `init()` and `load()`. Call once on DOMContentLoaded,
  *  AFTER all modules have called `registerModule`. */
 export function initModules() {
   const picker = $("#module-picker");
   if (picker) {
-    picker.innerHTML = MODULES.map(
-      (m) =>
-        html`<button type="button" class="module-tab" data-module="${m.id}">${m.label}</button>`,
-    ).join("");
+    picker.style.setProperty("--module-count", String(MODULES.length));
+    picker.innerHTML = [
+      html`<span class="module-picker-indicator" aria-hidden="true"></span>`,
+      ...MODULES.map(
+        (m) =>
+          html`<button type="button" class="module-tab" data-module="${m.id}">${m.label}</button>`,
+      ),
+    ].join("");
     picker.addEventListener("click", (e) => {
       const btn = e.target instanceof Element ? e.target.closest(".module-tab") : null;
       if (btn) switchModule(btn.dataset.module, { trigger: "picker" });
