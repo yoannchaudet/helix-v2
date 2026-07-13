@@ -22,8 +22,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate:
+    name: Validate version tag
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Require a version tag
+        run: |
+          if [[ "$GITHUB_REF" != refs/tags/v* ]]; then
+            echo "::error::Release workflow must run at a v* tag; received $GITHUB_REF."
+            exit 1
+          fi
+
   release:
     name: Build, sign, notarize & publish
+    needs: validate
     runs-on: macos-latest
     # Signing + notarization secrets live in the protected `release` environment (restricted
     # to version tags), so only a tagged release can read them — routine CI never can.

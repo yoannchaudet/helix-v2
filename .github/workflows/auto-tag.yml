@@ -32,7 +32,11 @@ jobs:
           # bump-v0.3.0 → v0.3.0
           TAG="${TAG#vbump-}"
 
-          REMOTE_SHA=$(git ls-remote --tags origin "refs/tags/$TAG" | cut -f1)
+          # Annotated tags resolve through their peeled ^{} ref; lightweight tags use the tag ref.
+          REMOTE_SHA=$(git ls-remote --tags origin "refs/tags/$TAG^{}" | cut -f1)
+          if [[ -z "$REMOTE_SHA" ]]; then
+            REMOTE_SHA=$(git ls-remote --tags origin "refs/tags/$TAG" | cut -f1)
+          fi
           if [[ -n "$REMOTE_SHA" ]]; then
             if [[ "$REMOTE_SHA" != "$MERGE_SHA" ]]; then
               echo "::error::Tag $TAG already exists at $REMOTE_SHA, expected $MERGE_SHA."
