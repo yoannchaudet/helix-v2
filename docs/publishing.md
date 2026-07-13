@@ -8,7 +8,8 @@ How we build, sign, and ship Helix, and how in-app auto-update works.
 ## Overview
 
 - Releases are built by [`.github/workflows/release.yml`](../.github/workflows/release.yml),
-  triggered by pushing a **version tag** (`v*`).
+  either dispatched at a **version tag** (`v*`) by the auto-tag workflow or triggered by a
+  manually pushed version tag.
 - Each release is a **universal** (Intel + Apple Silicon) macOS app, **code-signed** with an
   Apple *Developer ID Application* certificate and **notarized**, so it installs with no
   Gatekeeper warnings.
@@ -118,10 +119,12 @@ The release workflow declares `environment: release`, so it can read these; CI b
 2. **Merge the bump PR** to `main`. Everything after this is automatic:
    - The [auto-tag workflow](../.github/workflows/auto-tag.yml) detects the merged `bump-v*`
      branch, creates the `v<X.Y.Z>` tag, and pushes it.
-   - The tag push triggers the [release workflow](../.github/workflows/release.yml), which
-     builds, signs, notarizes, and creates a **draft** GitHub Release with the `.dmg` +
-     updater assets and an **auto-generated changelog**. (If you added a required reviewer to
-     the `release` environment, the run waits for your approval before it starts.)
+   - Because GitHub suppresses workflow events caused by tag pushes made with `GITHUB_TOKEN`,
+     the auto-tag workflow explicitly dispatches the
+     [release workflow](../.github/workflows/release.yml) at the new tag. It builds, signs,
+     notarizes, and creates a **draft** GitHub Release with the `.dmg` + updater assets and an
+     **auto-generated changelog**. (If you added a required reviewer to the `release`
+     environment, the run waits for your approval before it starts.)
 
 3. **Review the draft release** and **publish** it. The changelog is pre-populated from merged
    PRs (categorized by label — see [`.github/release.yml`](../.github/release.yml)). Edit it
@@ -137,6 +140,12 @@ The release workflow declares `environment: release`, so it can read these; CI b
 > git checkout main && git pull
 > git tag v0.2.0
 > git push origin v0.2.0
+> ```
+> A tag pushed with your credentials triggers the release workflow directly. If the auto-tag
+> workflow pushed the tag but failed while dispatching the release, keep the existing tag and
+> dispatch the release at that ref:
+> ```sh
+> gh workflow run release.yml --ref v0.2.0
 > ```
 
 ## How auto-update reaches users

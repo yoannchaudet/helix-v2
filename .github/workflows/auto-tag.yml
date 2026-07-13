@@ -1,13 +1,14 @@
 name: Auto-tag release
 
-# When a bump PR merges to main, automatically create and push the version tag
-# so the release workflow kicks off without any manual intervention.
+# When a bump PR merges to main, create and push the version tag, then explicitly dispatch the
+# release workflow at that tag. Pushes made with GITHUB_TOKEN do not emit downstream push events.
 on:
   pull_request:
     types: [closed]
     branches: [main]
 
 permissions:
+  actions: write
   contents: write
 
 jobs:
@@ -23,6 +24,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Create and push tag
+        id: tag
         env:
           TAG: v${{ github.event.pull_request.head.ref }}
           MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
@@ -30,12 +32,44 @@ jobs:
           # bump-v0.3.0 → v0.3.0
           TAG="${TAG#vbump-}"
 
-          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; then
-            echo "::error::Tag $TAG already exists on the remote."
-            exit 1
+          # Annotated tags resolve through their peeled ^{} ref; lightweight tags use the tag ref.
+          REMOTE_SHA=$(git ls-remote --tags origin "refs/tags/$TAG^{}" | cut -f1)
+          if [[ -z "$REMOTE_SHA" ]]; then
+            REMOTE_SHA=$(git ls-remote --tags origin "refs/tags/$TAG" | cut -f1)
+          fi
+          if [[ -n "$REMOTE_SHA" ]]; then
+            if [[ "$REMOTE_SHA" != "$MERGE_SHA" ]]; then
+              echo "::error::Tag $TAG already exists at $REMOTE_SHA, expected $MERGE_SHA."
+              exit 1
+            fi
+            echo "Tag $TAG already points to $MERGE_SHA; checking whether release was dispatched."
+          else
+            # Tag the actual merge commit on main, not the PR merge ref.
+            git tag "$TAG" "$MERGE_SHA"
+            git push origin "$TAG"
+            echo "Pushed tag $TAG at $MERGE_SHA"
           fi
 
-          # Tag the actual merge commit on main, not the PR merge ref.
-          git tag "$TAG" "$MERGE_SHA"
-          git push origin "$TAG"
-          echo "Pushed tag $TAG at $MERGE_SHA"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "merge_sha=$MERGE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch release workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          MERGE_SHA: ${{ steps.tag.outputs.merge_sha }}
+        run: |
+          EXISTING_RUN=$(gh run list \
+            --workflow release.yml \
+            --commit "$MERGE_SHA" \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId // empty')
+
+          if [[ -n "$EXISTING_RUN" ]]; then
+            echo "Release workflow run $EXISTING_RUN already exists for $TAG; not dispatching a duplicate."
+            exit 0
+          fi
+
+          gh workflow run release.yml --ref "$TAG"
+          echo "Dispatched release workflow for $TAG"

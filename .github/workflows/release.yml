@@ -1,17 +1,18 @@
 name: Release
 
-# Triggered automatically when the auto-tag workflow pushes a version tag after a bump PR
-# merges (or manually via `git tag v0.2.0 && git push origin v0.2.0`). The app version in
-# `src-tauri/tauri.conf.json` must match the tag (without the leading `v`). This builds a
-# universal (Intel + Apple Silicon) macOS app, signs + notarizes it with the Apple Developer
-# ID, signs the updater bundle with the minisign key, and publishes a DRAFT GitHub Release
-# with the .dmg + updater assets (latest.json, .app.tar.gz, .sig) and an auto-generated
-# changelog. Review the draft, then publish it — the in-app updater only sees published
-# releases.
+# Dispatched at the new version tag by the auto-tag workflow after a bump PR merges, or triggered
+# by a manual version-tag push. The app version in `src-tauri/tauri.conf.json` must match the tag
+# (without the leading `v`). This builds a universal (Intel + Apple Silicon) macOS app, signs +
+# notarizes it with the Apple Developer ID, signs the updater bundle with the minisign key, and
+# publishes a DRAFT GitHub Release with the .dmg + updater assets (latest.json, .app.tar.gz, .sig)
+# and an auto-generated changelog. Review the draft, then publish it — the in-app updater only
+# sees published releases.
 on:
   push:
     tags:
       - "v*"
+  # A manual dispatch must select a v* tag so the release environment permits the run.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -21,8 +22,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate:
+    name: Validate version tag
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Require a version tag
+        run: |
+          if [[ "$GITHUB_REF" != refs/tags/v* ]]; then
+            echo "::error::Release workflow must run at a v* tag; received $GITHUB_REF."
+            exit 1
+          fi
+
   release:
     name: Build, sign, notarize & publish
+    needs: validate
     runs-on: macos-latest
     # Signing + notarization secrets live in the protected `release` environment (restricted
     # to version tags), so only a tagged release can read them — routine CI never can.
