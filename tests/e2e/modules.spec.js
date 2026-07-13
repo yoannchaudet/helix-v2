@@ -24,7 +24,7 @@ test("the left-side module bar shows both modules and the active indicator", asy
     "transition-property",
     "transform",
   );
-  await expect(page.locator(".topchrome-brand")).toHaveCSS("text-align", "center");
+  await expect(page.locator(".topchrome-brand")).toHaveCSS("justify-content", "center");
   await expect(page.locator(".module-picker")).toHaveAttribute("data-active-index", "0");
   const geometry = await page.evaluate(() => {
     const picker = document.querySelector(".module-picker").getBoundingClientRect();
@@ -216,4 +216,30 @@ test("the last opened module is restored on launch", async ({ page }) => {
     "aria-current",
     "true",
   );
+});
+
+test("right-clicking the brand flips it to reveal the app version", async ({ page }) => {
+  await openApp(page);
+
+  const brand = page.locator("#brand-flip");
+  const back = page.locator("#brand-version");
+
+  // The default fixture reports app version 0.1.0; the back face is prepared but hidden.
+  await expect(back).toHaveText("v0.1.0");
+  await expect(brand).not.toHaveClass(/is-flipped/);
+  await expect(back).toHaveAttribute("aria-hidden", "true");
+
+  // Right-click flips the card (and suppresses the native context menu); the version face
+  // becomes the exposed one. No need to wait out the 5s auto-revert — assert the immediate state.
+  await brand.click({ button: "right" });
+  await expect(brand).toHaveClass(/is-flipped/);
+  await expect(brand).toHaveAttribute("aria-pressed", "true");
+  await expect(back).toHaveAttribute("aria-hidden", "false");
+  await expect(page.locator(".brand-face-front")).toHaveAttribute("aria-hidden", "true");
+
+  // Right-clicking again flips it straight back.
+  await brand.click({ button: "right" });
+  await expect(brand).not.toHaveClass(/is-flipped/);
+  await expect(brand).toHaveAttribute("aria-pressed", "false");
+  await expect(back).toHaveAttribute("aria-hidden", "true");
 });

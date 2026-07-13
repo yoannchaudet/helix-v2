@@ -21,6 +21,7 @@ import {
   restoreLastModule,
 } from "./js/modules.js";
 import { initShortcuts } from "./js/shortcuts.js";
+import { initBrandFlip } from "./js/brand-flip.js";
 
 // Note: inbox.js and dependabot.js self-register with the module system (registerModule)
 // at import time, including their lifecycle, sidebar selector, and shortcut groups. The
@@ -55,6 +56,7 @@ window.addEventListener("DOMContentLoaded", () => {
 
   initSidebarResize();
   initShortcuts();
+  initBrandFlip();
 
   // Module system: render the title-bar module picker, wire ⌘1/⌘2, then call each
   // registered module's init() and load(). Modules register themselves via side-effect
