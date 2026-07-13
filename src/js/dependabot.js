@@ -19,7 +19,12 @@ import { closeMenu, isMenuOpen, openContextMenu } from "./menu.js";
 import { isShortcutsOpen } from "./shortcuts.js";
 import { dependabotMergePoll } from "./state.js";
 import { getActiveModule, registerModule } from "./modules.js";
-import { createHoverManager, createRowNavigator, createListFocusRetainer } from "./list-kit.js";
+import {
+  createHoverManager,
+  createKbdFocusRing,
+  createRowNavigator,
+  createListFocusRetainer,
+} from "./list-kit.js";
 
 /* The Dependabot module: a read-only list of open Dependabot PRs grouped by repository, its
  * repo-only sidebar refinement, keyboard navigation, and its own sync flow. Pure row/section
@@ -181,6 +186,7 @@ const focusRetainer = createListFocusRetainer({
       return {
         kind: "operation",
         id: row.dataset.operationId,
+        kbd: active.classList.contains("kbd-focus"),
         part: active.classList.contains("dep-discard-action")
           ? "discard"
           : active.classList.contains("dep-operation-cancel")
@@ -194,6 +200,7 @@ const focusRetainer = createListFocusRetainer({
       ? {
           kind: "pr",
           id: row.dataset.prId,
+          kbd: active.classList.contains("kbd-focus"),
           part: active.classList.contains("dep-discard-action")
             ? "discard"
             : active.classList.contains("dep-merge-action")
@@ -218,6 +225,8 @@ const focusRetainer = createListFocusRetainer({
             : row.querySelector(".n-open[tabindex]"),
 });
 
+const kbdFocus = createKbdFocusRing({ containerSelector: "#dependabot" });
+
 /** Snapshot the focused PR row id so a re-render can restore focus (the list re-renders
  *  wholesale on refine/sync, which would otherwise drop focus to <body>). */
 function captureFocus() {
@@ -226,7 +235,14 @@ function captureFocus() {
 
 /** Restore focus to the same PR/operation control after a re-render. */
 function applyFocus(target, { preventScroll = false } = {}) {
-  return focusRetainer.apply(target, { preventScroll });
+  const landed = focusRetainer.apply(target, { preventScroll });
+  if (!landed) return false;
+  const active = document.activeElement;
+  if (active instanceof HTMLElement) {
+    if (target?.kbd) kbdFocus.apply(active);
+    else kbdFocus.clear();
+  }
+  return true;
 }
 
 /** Render the central PR list for the active repo refinement. A live re-render (e.g. from a
@@ -438,7 +454,7 @@ function selectRepo(fullName, kbd = false) {
   renderTitle();
   renderSidebar();
   renderList();
-  if (kbd) $("#dependabot").querySelector(".n-row")?.querySelector(".n-open[tabindex]")?.focus();
+  if (kbd) focusFirstRow(true);
   announceView();
 }
 
@@ -631,8 +647,18 @@ async function cancelMerge(operationId) {
 /* ------------------------- Keyboard command model ------------------------- */
 
 /** Focus a dependabot row (used by the navigator). */
-function focusRow(row) {
-  row.querySelector(".n-open[tabindex]")?.focus();
+function focusRow(row, kbd = true) {
+  const target = row.querySelector(".n-open[tabindex]");
+  if (!target) return;
+  if (kbd) kbdFocus.apply(target);
+  else kbdFocus.clear();
+  target.focus();
+}
+
+function focusFirstRow(kbd = true, force = false) {
+  if (!kbd && !force) return;
+  const first = $("#dependabot")?.querySelector(".n-row");
+  if (first) focusRow(first, kbd);
 }
 
 /** Shared row navigator (j/k movement, activeRow, rows). */
@@ -849,8 +875,11 @@ export async function syncDependabot() {
 /** Called by main.js when the Dependabot module becomes active: render cached PRs, then
  *  auto-sync if stale (never synced this session, or older than the staleness window). Also
  *  announces a concise summary of current operation state and any missed terminal transitions. */
-export async function onDependabotOpened() {
+export async function onDependabotOpened(context = {}) {
+  if (context.trigger === "picker") kbdFocus.clear();
   await loadDependabot();
+  if (context.trigger === "shortcut") focusFirstRow(true);
+  if (context.trigger === "picker") focusFirstRow(false, true);
   announceReturnSummary();
   if (!isAuthenticated()) return;
   // Wait for the persisted last-sync time to load before the staleness gate, so restoring into
@@ -860,6 +889,11 @@ export async function onDependabotOpened() {
   if (!lastSyncAt || Date.now() - lastSyncAt > AUTO_SYNC_STALE_MS) {
     syncDependabot();
   }
+}
+
+function onDependabotClosed() {
+  kbdFocus.clear();
+  clearAnnounceQueue();
 }
 
 /* ---------------------------------- Init --------------------------------- */
@@ -874,6 +908,7 @@ export function initDependabot() {
   }
   // List-kit: hover tracking (replaces inline mouseover/leave/scroll/blur wiring).
   hoverManager.wire();
+  kbdFocus.wire();
   document.addEventListener("keydown", onCommandKeydown);
   $("#dependabot-sync-btn")?.addEventListener("click", syncDependabot);
 
@@ -914,7 +949,7 @@ registerModule("dependabot", {
   sidebarSelector: "#sidebar-dependabot",
   init: initDependabot,
   activate: onDependabotOpened,
-  deactivate: clearAnnounceQueue,
+  deactivate: onDependabotClosed,
   shortcuts: [
     {
       group: "Dependabot",

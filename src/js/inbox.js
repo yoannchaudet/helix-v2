@@ -147,6 +147,7 @@ const inboxFocusRetainer = createListFocusRetainer({
   rowSelector: ".n-row",
   captureTarget: (row, active) => ({
     threadId: row.dataset.threadId,
+    kbd: active.classList.contains("kbd-focus"),
     part: active.classList.contains("n-done") ? "done" : "open",
   }),
   matchRow: (row, target) => row.dataset.threadId === target.threadId,
@@ -172,10 +173,18 @@ function applyInboxFocus(target, { preventScroll = false } = {}) {
   if (target.selector) {
     const el = $(target.selector);
     if (!el) return false;
+    kbdFocus.clear();
     el.focus({ preventScroll });
     return true;
   }
-  return inboxFocusRetainer.apply(target, { preventScroll });
+  const landed = inboxFocusRetainer.apply(target, { preventScroll });
+  if (!landed) return false;
+  const active = document.activeElement;
+  if (active instanceof HTMLElement) {
+    if (target.kbd) kbdFocus.apply(active);
+    else kbdFocus.clear();
+  }
+  return true;
 }
 
 /** Pick where focus should land after `removedIds` are removed from the current view:
@@ -422,10 +431,10 @@ function selectRepo(repoId, kbd = false) {
 /** Move keyboard focus to the first notification row, so a freshly chosen filter/repo has a
  *  clear selection (and single-key commands like b/d/c act on a real row, not whatever last
  *  held focus). No-op when the view is empty. */
-function focusFirstRow(kbd = true) {
-  // Only steal focus for keyboard-driven switches; a mouse selection leaves focus alone so
-  // no ring is painted.
-  if (!kbd) return;
+function focusFirstRow(kbd = true, force = false) {
+  // Keep existing behavior for filter/repo clicks: only keyboard-driven intra-module actions
+  // steal focus, unless a module-switch activation explicitly forces a reset target.
+  if (!kbd && !force) return;
   const first = $("#inbox").querySelector(".n-row");
   if (first) focusRow(first, kbd);
 }
@@ -448,6 +457,17 @@ function markInboxStale() {
 async function refreshInboxIfStale() {
   if (!inboxStale) return;
   await loadInbox();
+}
+
+async function onNotificationsOpened(context = {}) {
+  if (context.trigger === "picker") kbdFocus.clear();
+  await refreshInboxIfStale();
+  if (context.trigger === "shortcut") focusFirstRow(true);
+  if (context.trigger === "picker") focusFirstRow(false, true);
+}
+
+function onNotificationsClosed() {
+  kbdFocus.clear();
 }
 
 export async function loadInbox() {
@@ -870,7 +890,8 @@ export function initInbox() {
 registerModule("notifications", {
   sidebarSelector: "#sidebar-notifications",
   init: initInbox,
-  activate: refreshInboxIfStale,
+  activate: onNotificationsOpened,
+  deactivate: onNotificationsClosed,
   shortcuts: [
     {
       group: "Navigation",

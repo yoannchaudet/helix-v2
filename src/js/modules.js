@@ -75,6 +75,10 @@ export function registerModule(id, config) {
   registry[id] = { ...config };
 }
 
+function switchTrigger(options) {
+  return options?.trigger || "unknown";
+}
+
 /** The currently active module's id. */
 export function getActiveModule() {
   return activeModuleId;
@@ -121,9 +125,10 @@ function renderPickerState() {
 /** Switch to a module by id. No-op for an unknown id. Always re-shows the active module pane
  *  and dismisses the Settings overlay (via `onBeforeSwitch`), so it doubles as "leave Settings".
  *  Calls `deactivate()` on the outgoing module and `activate()` on the incoming one. */
-export function switchModule(id) {
+export function switchModule(id, options = {}) {
   if (!isModuleId(id)) return;
   const outgoing = activeModuleId;
+  const trigger = switchTrigger(options);
   // App-shell hook fires first (dismisses Settings, closes transient UI).
   hooks.onBeforeSwitch?.();
   // Dismiss transient UI tied to the outgoing module so it can't linger over the new one:
@@ -134,7 +139,7 @@ export function switchModule(id) {
   closeMenu(false);
   // Lifecycle: deactivate the outgoing module (only if actually changing modules).
   if (outgoing !== id) {
-    registry[outgoing]?.deactivate?.();
+    registry[outgoing]?.deactivate?.({ from: outgoing, to: id, trigger });
   }
   activeModuleId = id;
   showActiveModulePane();
@@ -142,7 +147,7 @@ export function switchModule(id) {
   // Lifecycle: activate the incoming module (only if actually changed, to avoid re-running
   // expensive activation on a same-module click that just dismisses Settings).
   if (outgoing !== id) {
-    registry[id]?.activate?.();
+    registry[id]?.activate?.({ from: outgoing, to: id, trigger });
   }
   // Persist the choice so the next launch reopens this module. Writes are chained (not just
   // fire-and-forget) so a slow earlier write can't land after a later one and restore a stale
@@ -158,7 +163,7 @@ export function switchModule(id) {
 export async function restoreLastModule() {
   try {
     const id = await invoke("get_last_module");
-    if (isModuleId(id) && id !== activeModuleId) switchModule(id);
+    if (isModuleId(id) && id !== activeModuleId) switchModule(id, { trigger: "restore" });
   } catch {
     /* fall back to the default module */
   }
@@ -183,7 +188,7 @@ export function initModules() {
     ).join("");
     picker.addEventListener("click", (e) => {
       const btn = e.target instanceof Element ? e.target.closest(".module-tab") : null;
-      if (btn) switchModule(btn.dataset.module);
+      if (btn) switchModule(btn.dataset.module, { trigger: "picker" });
     });
   }
 
@@ -195,7 +200,7 @@ export function initModules() {
     const mod = moduleAt(Number(e.key) - 1);
     if (mod) {
       e.preventDefault();
-      switchModule(mod.id);
+      switchModule(mod.id, { trigger: "shortcut" });
     }
   });
 
