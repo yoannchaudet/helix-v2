@@ -2047,6 +2047,20 @@ fn rules_indicate_merge_queue(rules: &[BranchRuleItem]) -> bool {
     rules.iter().any(|rule| rule.rule_type == "merge_queue")
 }
 
+fn resolve_merge_queue_strategy(
+    rest_requires_queue: bool,
+    graphql_has_queue: Option<bool>,
+) -> MergeQueueStrategy {
+    if rest_requires_queue {
+        return MergeQueueStrategy::MergeQueue;
+    }
+    match graphql_has_queue {
+        Some(true) => MergeQueueStrategy::MergeQueue,
+        Some(false) => MergeQueueStrategy::Direct,
+        None => MergeQueueStrategy::Unknown,
+    }
+}
+
 /// Rulesets that actively restrict updates to the matching ref. A missing ruleset ID makes the
 /// result inconclusive because bypass permission cannot then be checked safely.
 fn update_rule_ruleset_ids(rules: &[BranchRuleItem]) -> Option<std::collections::BTreeSet<i64>> {
@@ -2245,17 +2259,17 @@ pub async fn detect_ref_update_restriction(
 
 /// Detect whether `base_branch` in `repo_full_name` merges directly or requires GitHub's merge
 /// queue. The active branch-rules REST endpoint (`GET .../rules/branches/{branch}`, looking for
-/// a `merge_queue` rule) is authoritative and tried first; the classic
+/// a `merge_queue` rule) is tried first as a positive signal; an absent rule is not definitive
+/// because GitHub can omit an active queue from that response. The classic
 /// `BranchProtectionRule.requiresMergeQueue` GraphQL field is not present in the current public
 /// schema (verified against the schema `octokit/graphql-schema` mirrors from introspection), so
-/// the fallback instead asks `Repository.mergeQueue(branch:)` — a schema-confirmed field that
+/// the confirmation asks `Repository.mergeQueue(branch:)` — a schema-confirmed field that
 /// resolves to the active `MergeQueue` for that branch (from either a ruleset or classic branch
 /// protection) or `null` if none applies. See this function's summary note for the coordinator.
 ///
-/// Only a REST 404/non-rate 403 triggers the GraphQL fallback; any other REST error (auth, rate
-/// limit, network, 5xx) propagates directly. If the fallback itself is inconclusive (GraphQL
-/// error, or the repository/ref can't be resolved), the result is [`MergeQueueStrategy::Unknown`]
-/// rather than a guessed `Direct`.
+/// REST auth, rate-limit, network, and server errors still propagate directly. If GraphQL is
+/// inconclusive (error, or the repository/ref can't be resolved), the result is
+/// [`MergeQueueStrategy::Unknown`] rather than a guessed `Direct`.
 pub async fn detect_merge_queue_policy(
     client: &reqwest::Client,
     token: &str,
@@ -2263,16 +2277,16 @@ pub async fn detect_merge_queue_policy(
     base_branch: &str,
 ) -> Result<MergeQueuePolicy, MergeRemoteError> {
     let mut rates = Vec::new();
-    match fetch_branch_rules(client, token, repo_full_name, base_branch, &mut rates).await? {
-        BranchRulesOutcome::Rules(rules) => {
-            let strategy = if rules_indicate_merge_queue(&rules) {
-                MergeQueueStrategy::MergeQueue
-            } else {
-                MergeQueueStrategy::Direct
-            };
-            return Ok(MergeQueuePolicy { strategy, rates });
-        }
-        BranchRulesOutcome::Inconclusive => {}
+    let rest_requires_queue =
+        match fetch_branch_rules(client, token, repo_full_name, base_branch, &mut rates).await? {
+            BranchRulesOutcome::Rules(rules) => rules_indicate_merge_queue(&rules),
+            BranchRulesOutcome::Inconclusive => false,
+        };
+    if rest_requires_queue {
+        return Ok(MergeQueuePolicy {
+            strategy: MergeQueueStrategy::MergeQueue,
+            rates,
+        });
     }
 
     let Some((owner, repo)) = repo_full_name.split_once('/') else {
@@ -2300,11 +2314,8 @@ pub async fn detect_merge_queue_policy(
     .await
     {
         Ok(data) => {
-            let strategy = match data.repository {
-                Some(repo) if repo.merge_queue.is_some() => MergeQueueStrategy::MergeQueue,
-                Some(_) => MergeQueueStrategy::Direct,
-                None => MergeQueueStrategy::Unknown,
-            };
+            let graphql_has_queue = data.repository.map(|repo| repo.merge_queue.is_some());
+            let strategy = resolve_merge_queue_strategy(false, graphql_has_queue);
             Ok(MergeQueuePolicy { strategy, rates })
         }
         Err(err) => Ok(MergeQueuePolicy {
@@ -3496,6 +3507,26 @@ mod tests {
         // Repository itself couldn't be resolved — ambiguous, must not default to "direct".
         let data: MergeQueueLookupData = serde_json::from_str(r#"{"repository": null}"#).unwrap();
         assert!(data.repository.is_none());
+    }
+
+    #[test]
+    fn merge_queue_policy_requires_graphql_confirmation_before_direct() {
+        assert_eq!(
+            resolve_merge_queue_strategy(true, None),
+            MergeQueueStrategy::MergeQueue
+        );
+        assert_eq!(
+            resolve_merge_queue_strategy(false, Some(true)),
+            MergeQueueStrategy::MergeQueue
+        );
+        assert_eq!(
+            resolve_merge_queue_strategy(false, Some(false)),
+            MergeQueueStrategy::Direct
+        );
+        assert_eq!(
+            resolve_merge_queue_strategy(false, None),
+            MergeQueueStrategy::Unknown
+        );
     }
 
     /* -------------------------------- GraphQL --------------------------------- */
