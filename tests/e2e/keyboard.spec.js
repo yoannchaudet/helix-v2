@@ -29,6 +29,8 @@ test("d marks the active row done", async ({ page }) => {
 
   await expect(page.locator('.n-row[data-thread-id="t3"]')).toHaveCount(0);
   await expect(page.locator("#inbox .n-row")).toHaveCount(2);
+  await expect(page.locator('.n-row[data-thread-id="t1"] .n-open')).toBeFocused();
+  await expect(page.locator('.n-row[data-thread-id="t1"] .n-open')).toHaveClass(/kbd-focus/);
 });
 
 test("b bookmarks the active row", async ({ page }) => {

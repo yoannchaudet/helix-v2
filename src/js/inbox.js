@@ -193,6 +193,8 @@ function applyInboxFocus(target, { preventScroll = false } = {}) {
 function focusTargetAfterRemoval(removedIds) {
   const flat = visibleNotifications();
   const removedSet = new Set(removedIds);
+  const active = document.activeElement;
+  const kbd = active instanceof HTMLElement && active.classList.contains("kbd-focus");
   const survivor = focusNeighborAfterRemoval(flat, removedIds, (n) => n.thread_id);
   // None of the removed threads are in the current view (e.g. the list changed while a
   // confirm menu was open). Don't force focus anywhere — let renderInbox's preserved-focus
@@ -201,7 +203,7 @@ function focusTargetAfterRemoval(removedIds) {
   // Nothing left to focus in the list — keep focus in a sensible place by sending it to the
   // inbox container (made programmatically focusable in renderInbox's empty branch).
   if (!survivor) return { selector: "#inbox" };
-  return { threadId: survivor.thread_id, part: "open" };
+  return { threadId: survivor.thread_id, part: "open", kbd };
 }
 
 /* ------------------------------- Rendering ------------------------------- */
