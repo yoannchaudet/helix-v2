@@ -246,9 +246,9 @@ code,
   height: 100%;
 }
 
-/* App-level top chrome: the full-width title-bar strip hosting the brand, the module picker,
-   and Settings. The macOS overlay title bar draws the traffic lights over its top-left, so
-   inset the left padding to clear them (macOS only). */
+/* App-level top chrome: the full-width title-bar strip hosting the module picker, brand, and
+   Settings. The macOS overlay title bar draws the traffic lights over its top-left, so inset
+   the left padding to clear them (macOS only). */
 .topchrome {
   display: flex;
   align-items: center;
@@ -266,8 +266,8 @@ code,
 }
 
 .topchrome-brand {
-  /* Fill the space between the (traffic-light-inset) left edge and the picker, centering the
-     wordmark within it. */
+  /* Fill the draggable space between the left-side picker and Settings, with the wordmark
+     centered inside that remaining region. */
   flex: 1;
   text-align: center;
   font-size: 13px;
@@ -468,20 +468,45 @@ code,
 }
 
 /* ============================= Module picker ============================== */
-/* Lightroom-style module switcher: subtle text tabs living in the top chrome, pushed to the
-   right (Lightroom puts the module picker top-right). The brand sits on the left; this picker
-   takes the remaining space up to the Settings action. */
+/* Left-side segmented module switcher. The active bubble is translated by the registry index
+   that modules.js exposes as `--module-index`; equal-width segments keep that movement purely
+   CSS-driven and stable as the window resizes. */
 .module-picker {
-  display: flex;
+  --module-count: 1;
+  --module-index: 0;
+  --module-segment-w: 112px;
+
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(var(--module-count), var(--module-segment-w));
   align-items: center;
-  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-pill);
+  background: var(--hover);
   /* The picker sits inside the `.topchrome` drag region. Let pointer events fall through the
-     container (and its gaps) to the attributed `.topchrome` so the empty space stays draggable;
-     the `.module-tab` buttons below re-enable pointer events so they remain clickable. */
+     container to the attributed `.topchrome`; its buttons re-enable pointer events. */
   pointer-events: none;
 }
 
+.module-picker-indicator {
+  position: absolute;
+  top: var(--space-2);
+  bottom: var(--space-2);
+  left: var(--space-2);
+  width: var(--module-segment-w);
+  border: 1px solid rgba(var(--accent-rgb), 0.18);
+  border-radius: var(--radius-pill);
+  background: var(--accent-tint);
+  box-shadow: 0 1px 2px rgba(var(--text-rgb), 0.08);
+  pointer-events: none;
+  transform: translateX(calc(var(--module-index) * var(--module-segment-w)));
+  transition: transform var(--duration-pop) cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
 .module-tab {
+  position: relative;
+  z-index: 1;
   appearance: none;
   border: 0;
   background: transparent;
@@ -491,8 +516,8 @@ code,
   font-weight: 600;
   pointer-events: auto;
   letter-spacing: 0.01em;
-  padding: var(--space-4) var(--space-10);
-  border-radius: var(--radius-lg);
+  padding: var(--space-5) var(--space-10);
+  border-radius: var(--radius-pill);
   cursor: pointer;
   transition:
     color var(--duration-fast) ease,
@@ -507,7 +532,7 @@ code,
 .module-tab--active,
 .module-tab--active:hover {
   color: var(--accent-strong);
-  background: var(--accent-tint);
+  background: transparent;
 }
 
 .module-tab:focus-visible {

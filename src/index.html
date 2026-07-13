@@ -12,13 +12,13 @@
   <body>
     <div class="app">
       <!-- ========================= Top module chrome ========================== -->
-      <!-- App-level chrome spanning the full title-bar strip: brand, the Lightroom-style
-           module picker, and Settings. It sits ABOVE the sidebar+content split, so modules
-           are a top-level concept and each module owns (or omits) its own sidebar. -->
+      <!-- App-level chrome spanning the full title-bar strip: the left-side module bar,
+           brand, and Settings. It sits ABOVE the sidebar+content split, so modules are a
+           top-level concept and each module owns (or omits) its own sidebar. -->
       <header class="topchrome" data-tauri-drag-region>
-        <span class="topchrome-brand" data-tauri-drag-region>Helix</span>
         <!-- Module picker: populated from the MODULES registry by modules.js (initModules). -->
         <nav class="module-picker" id="module-picker" aria-label="Modules"></nav>
+        <span class="topchrome-brand" data-tauri-drag-region>Helix</span>
         <div class="topchrome-actions">
           <button type="button" class="icon-btn" id="open-settings" title="Settings (⌘,)" aria-label="Settings">
             <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><circle cx="8" cy="8" r="2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 1.7v1.6M8 12.7v1.6M14.3 8h-1.6M3.3 8H1.7M12.5 3.5l-1.1 1.1M4.6 11.4l-1.1 1.1M12.5 12.5l-1.1-1.1M4.6 4.6L3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>

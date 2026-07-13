@@ -324,12 +324,13 @@ single merged/closed/open state pill and does not classify issues further.)
 
 ### Modules — top-level destinations
 Helix is organized into **modules** (à la Adobe Lightroom): independent top-level features,
-each with its own content pane, switched via a **Lightroom-style picker** that lives in an
-**app-level top chrome** spanning the full title-bar strip (`#module-picker` in the
-`.topchrome` header, rendered from the `MODULES` registry in `src/js/modules-model.js`). The
-chrome sits *above* the sidebar+content split, so modules are a genuinely top-level concept
-and each module owns — or omits — its own sidebar. The active module is accent-emphasized;
-`⌘1` / `⌘2` jump straight to a module by position.
+each with its own content pane, switched via a **segmented module bar** on the left side of
+the **app-level top chrome** (`#module-picker` in the `.topchrome` header, rendered from the
+`MODULES` registry in `src/js/modules-model.js`). The chrome spans the full title-bar strip
+and sits *above* the sidebar+content split, so modules are a genuinely top-level concept and
+each module owns — or omits — its own sidebar. A rounded accent indicator animates between
+the named segments when the active module changes; `⌘1` / `⌘2` jump straight to a module by
+position.
 - **Notifications** module — the inbox described below (the original v1 feature). It owns the
   smart-filter + repository **sidebar**.
 - **Dependabot** module — lists cached open Dependabot PRs by repository and owns a
@@ -349,12 +350,12 @@ and each module owns — or omits — its own sidebar. The active module is acce
 
 ### Shell — native macOS layout
 A vibrant layout that fills the window edge-to-edge (no centered column, no marketing hero):
-a full-width **top module chrome** (brand + module picker + Settings), and below it the active
+a full-width **top module chrome** (module picker + brand + Settings), and below it the active
 module's **sidebar + content** split:
 - **Top chrome** (`.topchrome`): the overlay title-bar strip (`titleBarStyle: "Overlay"`,
   `hiddenTitle: true`, transparent window + `macOSPrivateApi`); it reserves the traffic-light
-  region on macOS, and is a window drag region. Hosts the **Helix** wordmark (left), the
-  **module picker** (right, Lightroom-style), and the **Settings** gear (`⌘,`).
+  region on macOS, and is a window drag region. Hosts the left-side segmented **module
+  picker**, the **Helix** wordmark, and the **Settings** gear (`⌘,`).
 - **Sidebar** (`NSVisualEffect` *Sidebar* vibrancy via the `window-vibrancy` crate),
   **module-scoped**: for Notifications it shows the cross-cutting smart filters (**All**,
   **Mentions**, **Team mentions**, **Review requests**, **Assigned**, **Cleanup**) with live
