@@ -24,7 +24,7 @@ test("the left-side module bar shows both modules and the active indicator", asy
     "transition-property",
     "transform",
   );
-  await expect(page.locator(".topchrome-brand")).toHaveCSS("text-align", "center");
+  await expect(page.locator(".topchrome-brand")).toHaveCSS("justify-content", "center");
   await expect(page.locator(".module-picker")).toHaveAttribute("data-active-index", "0");
   const geometry = await page.evaluate(() => {
     const picker = document.querySelector(".module-picker").getBoundingClientRect();

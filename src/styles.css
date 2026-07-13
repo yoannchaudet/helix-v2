@@ -269,13 +269,68 @@ code,
   /* Fill the draggable space between the left-side picker and Settings, with the wordmark
      centered inside that remaining region. */
   flex: 1;
-  text-align: center;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  /* Sits inside the `.topchrome` drag region: let pointer events fall through to the
+     attributed chrome so the empty space stays draggable; the inner button re-enables them. */
+  pointer-events: none;
+}
+
+/* Clickable brand card: a flat button that hosts the 3D flip. Re-enables pointer events so the
+   click registers even though the surrounding chrome is a drag region. */
+.brand-flip {
+  appearance: none;
+  border: 0;
+  margin: 0;
+  padding: var(--space-3) var(--space-8);
+  background: transparent;
+  cursor: default;
+  pointer-events: auto;
+  /* Establish the 3D viewing context for the inner card. */
+  perspective: 400px;
+  line-height: 1;
+}
+
+.brand-flip-inner {
+  position: relative;
+  display: inline-block;
+  /* Keep the faces pointer-inert so left-drag / right-click resolve to the button itself, which
+     is the `data-tauri-drag-region` target — that lets a left-drag move the window while the
+     button's contextmenu handler still fires on right-click. */
+  pointer-events: none;
+  transform-style: preserve-3d;
+  /* Flip duration: intentionally ~3× the app's --duration-medium so the reveal reads as a
+     deliberate card turn rather than a quick swap. */
+  transition: transform 0.48s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* Flipped state (toggled by brand-flip.js) rotates the card to reveal the back face. */
+.brand-flip.is-flipped .brand-flip-inner {
+  transform: rotateY(180deg);
+}
+
+.brand-face {
+  display: block;
   font-size: 13px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   color: var(--muted);
   user-select: none;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
+/* The back face is pre-rotated so it reads correctly once the card flips 180°. It's stacked on
+   top of the front face so both occupy the same box (the card sizes to the front wordmark). */
+.brand-face-back {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transform: rotateY(180deg);
 }
 
 .topchrome-actions {
