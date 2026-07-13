@@ -1717,7 +1717,10 @@ async fn orchestrate_operation<B: MergeBackend>(
                 backend,
                 &work,
                 &head_sha,
-                Some(&base_ref),
+                DirectCheckContext {
+                    blocked_base_ref: Some(&base_ref),
+                    pending_reason: None,
+                },
                 timed_out,
                 &mut rates,
             )
@@ -1764,9 +1767,19 @@ async fn orchestrate_operation<B: MergeBackend>(
                 });
             }
             // Direct strategy, head accepted + approved, but not mergeable yet → diagnose checks.
-            let outcome =
-                direct_await_checks(db, backend, &work, &head_sha, None, timed_out, &mut rates)
-                    .await?;
+            let outcome = direct_await_checks(
+                db,
+                backend,
+                &work,
+                &head_sha,
+                DirectCheckContext {
+                    blocked_base_ref: None,
+                    pending_reason: reason.as_deref(),
+                },
+                timed_out,
+                &mut rates,
+            )
+            .await?;
             Ok(github::MergeRemoteResult { outcome, rates })
         }
         Outcome::Prepared {
@@ -1935,12 +1948,17 @@ async fn orchestrate_operation<B: MergeBackend>(
 /// the failing check names; failed GitHub Actions runs are each scheduled (once per
 /// run+attempt) for a five-minute rerun; otherwise Helix keeps waiting for pending checks.
 /// The 90-minute deadline is evaluated before scheduling any new retry (requirement 4).
+struct DirectCheckContext<'a> {
+    blocked_base_ref: Option<&'a str>,
+    pending_reason: Option<&'a str>,
+}
+
 async fn direct_await_checks<B: MergeBackend>(
     db: &Db,
     backend: &B,
     work: &dependabot::MergeWork,
     head_sha: &str,
-    blocked_base_ref: Option<&str>,
+    context: DirectCheckContext<'_>,
     timed_out: bool,
     rates: &mut Vec<github::RateLimit>,
 ) -> Result<github::MergeRemoteOutcome, github::MergeRemoteError> {
@@ -2052,7 +2070,7 @@ async fn direct_await_checks<B: MergeBackend>(
     }
 
     if diagnosis.pending.is_empty() {
-        if let Some(base_ref) = blocked_base_ref {
+        if let Some(base_ref) = context.blocked_base_ref {
             if base_ref.is_empty() {
                 return Ok(Outcome::PermanentFailure {
                     code: "blocked_by_repository_rule",
@@ -2144,6 +2162,40 @@ async fn direct_await_checks<B: MergeBackend>(
                 reason: Some(summary.to_string()),
             });
         }
+        let head = head_sha.to_string();
+        let summary = context
+            .pending_reason
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .unwrap_or("GitHub still blocks the merge; no pending or failing checks were found.");
+        with_conn(db, rates, |conn| {
+            dependabot::set_phase(
+                conn,
+                op_id,
+                dependabot::MergePhase::WaitingRequirements,
+                None,
+                None,
+                None,
+            )?;
+            dependabot::schedule_next_action(conn, op_id, None)?;
+            dependabot::append_operation_event(
+                conn,
+                op_id,
+                "waiting_requirements",
+                "requirement",
+                "pending",
+                summary,
+                Some("No pending or failing checks were visible at the accepted head."),
+                Some(&head),
+                None,
+            )
+        })?;
+        return Ok(Outcome::Pending {
+            head_sha: head,
+            approved: true,
+            branch_update_requested: false,
+            reason: Some(summary.to_string()),
+        });
     }
 
     // Only pending checks remain: keep waiting, re-polling on the next FIFO pass.
@@ -2358,7 +2410,19 @@ async fn queue_flow<B: MergeBackend>(
                 None,
             )
         })?;
-        return direct_await_checks(db, backend, work, head_sha, None, false, rates).await;
+        return direct_await_checks(
+            db,
+            backend,
+            work,
+            head_sha,
+            DirectCheckContext {
+                blocked_base_ref: None,
+                pending_reason: None,
+            },
+            false,
+            rates,
+        )
+        .await;
     }
 
     // Requirements still pending (not yet approved / checks not green) → idempotently enable
@@ -3682,6 +3746,18 @@ mod tests {
         }
     }
 
+    fn pending_with_reason(head: &str, reason: &str) -> MergeRemoteResult {
+        MergeRemoteResult {
+            outcome: MergeRemoteOutcome::Pending {
+                head_sha: head.to_string(),
+                approved: true,
+                branch_update_requested: false,
+                reason: Some(reason.to_string()),
+            },
+            rates: rates_core(),
+        }
+    }
+
     fn blocked(head: &str, base: &str) -> MergeRemoteResult {
         MergeRemoteResult {
             outcome: MergeRemoteOutcome::Blocked {
@@ -3891,6 +3967,48 @@ mod tests {
         assert_eq!(fake.calls().rerun, 0);
         assert_eq!(fake.calls().compare, 0);
         assert!(statuses(&db, id).contains(&"pending".to_string()));
+    }
+
+    #[test]
+    fn direct_refusal_with_no_visible_checks_preserves_github_reason() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        let refusal = "Changes must be made through the merge queue.";
+        let fake = FakeBackend::new(Script {
+            process: VecDeque::from([Ok(pending_with_reason("sha1", refusal))]),
+            diagnose: VecDeque::from([Ok(ExactHeadCheckDiagnosis {
+                rates: rates_core(),
+                ..Default::default()
+            })]),
+            ..Default::default()
+        });
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "direct").unwrap();
+            dependabot::set_phase(
+                &conn,
+                id,
+                dependabot::MergePhase::Queued,
+                Some("direct"),
+                None,
+                Some("main"),
+            )
+            .unwrap();
+        }
+
+        tick(&db, &fake);
+
+        let after = op(&db, id);
+        assert_eq!(after.phase, "waiting_requirements");
+        assert_eq!(after.failure_reason.as_deref(), Some(refusal));
+        let operation_events = events(&db, id);
+        assert!(operation_events
+            .iter()
+            .any(|event| event.summary == refusal));
+        assert!(!operation_events
+            .iter()
+            .any(|event| event.summary.contains("status check")));
     }
 
     #[test]
