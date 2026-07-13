@@ -29,11 +29,15 @@
       <div class="app-body">
       <!-- =============================== Sidebar =============================== -->
       <!-- Module-scoped: each module shows its own sidebar sources (Notifications: smart
-           filters + repositories; Dependabot: repositories only), toggled by data-module.
+           filters + repositories; Dependabot: repositories only), toggled by modules.js.
            The whole sidebar is hidden while the Settings overlay is open. -->
       <aside class="sidebar">
         <!-- Notifications module sources: smart filters + repositories. -->
-        <nav class="sources sidebar-module sidebar-module--notifications" aria-label="Notification views">
+       <nav
+         class="sources sidebar-module sidebar-module--notifications"
+         id="sidebar-notifications"
+         aria-label="Notification views"
+       >
           <!-- Smart filters are rendered from FILTERS by inbox.js (renderFilterList). -->
           <ul class="source-list" id="filter-list"></ul>
 
@@ -45,7 +49,12 @@
 
         <!-- Dependabot module sources: repositories only (no smart filters). Rendered by
              dependabot.js (renderSidebar). -->
-        <nav class="sources sidebar-module sidebar-module--dependabot" aria-label="Dependabot views">
+        <nav
+          class="sources sidebar-module sidebar-module--dependabot"
+          id="sidebar-dependabot"
+          aria-label="Dependabot views"
+          hidden
+        >
           <!-- The "All" entry (total open PRs) is rendered by dependabot.js (renderSidebar). -->
           <ul class="source-list" id="dependabot-filter-list"></ul>
 

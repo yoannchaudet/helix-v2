@@ -1,7 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { latestUpdatedAt, sortReposByRecency } from "../src/js/list-kit-model.js";
+import {
+  latestUpdatedAt,
+  sortReposByRecency,
+  focusNeighborAfterRemoval,
+} from "../src/js/list-kit-model.js";
 
 /* ------------------------------ latestUpdatedAt ------------------------------ */
 
@@ -83,4 +87,30 @@ test("sortReposByRecency: does not mutate input", () => {
     (r) => r.name,
   );
   assert.deepEqual(repos, original);
+});
+
+/* -------------------------- focusNeighborAfterRemoval -------------------------- */
+
+test("focusNeighborAfterRemoval: picks the next surviving item after removed block", () => {
+  const items = [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }];
+  const survivor = focusNeighborAfterRemoval(items, ["b", "c"], (item) => item.id);
+  assert.equal(survivor?.id, "d");
+});
+
+test("focusNeighborAfterRemoval: falls back to previous survivor when no next item", () => {
+  const items = [{ id: "a" }, { id: "b" }, { id: "c" }];
+  const survivor = focusNeighborAfterRemoval(items, ["b", "c"], (item) => item.id);
+  assert.equal(survivor?.id, "a");
+});
+
+test("focusNeighborAfterRemoval: returns null when removed ids are not visible", () => {
+  const items = [{ id: "a" }, { id: "b" }];
+  const survivor = focusNeighborAfterRemoval(items, ["x"], (item) => item.id);
+  assert.equal(survivor, null);
+});
+
+test("focusNeighborAfterRemoval: returns null when no survivors remain", () => {
+  const items = [{ id: "a" }, { id: "b" }];
+  const survivor = focusNeighborAfterRemoval(items, ["a", "b"], (item) => item.id);
+  assert.equal(survivor, null);
 });

@@ -23,13 +23,27 @@ let pollTimer = null;
 /** Seconds elapsed since the last sync; reset to 0 after every sync. */
 let pollElapsed = 0;
 
-/** Called when a sync (or background subject resolution) makes the inbox stale; wired by
- *  main.js to reload the inbox. Kept as a hook so the inbox view can stay in main.js
- *  without sync importing it (which would create a cycle). */
-let onInboxStale = null;
+/** Module-owned stale listeners notified when notifications change after a sync/resolution. */
+const staleListeners = new Map();
 
-export function configureSync({ onInboxStale: inboxStale } = {}) {
-  onInboxStale = inboxStale ?? null;
+export function registerSyncStaleListener(key, callback) {
+  if (!key) return;
+  if (typeof callback !== "function") {
+    staleListeners.delete(key);
+    return;
+  }
+  staleListeners.set(key, callback);
+}
+
+async function notifySyncStaleListeners() {
+  const results = await Promise.allSettled(
+    [...staleListeners.values()].map((callback) => Promise.resolve().then(() => callback())),
+  );
+  for (const result of results) {
+    if (result.status === "rejected") {
+      console.error("sync stale listener failed:", result.reason);
+    }
+  }
 }
 
 /* ------------------------------ Rate limits ------------------------------- */
@@ -263,7 +277,7 @@ export async function syncNow() {
   // a refresh failure here must not end the resolving phase (only resolution-done does that).
   try {
     await loadSyncStatus();
-    await onInboxStale?.();
+    await notifySyncStaleListeners();
     // A successful sync proves the Keychain is now readable, so refresh the account
     // section to clear any stale "failed to read token" error from an earlier cancel.
     await loadAccount();
@@ -331,7 +345,7 @@ export function registerSyncEvents() {
   // reload the inbox once a batch lands so the pills appear progressively, and refresh
   // the sync stats so the rate-limit count reflects the extra resolution calls.
   listen("subjects:resolved", () => {
-    onInboxStale?.();
+    notifySyncStaleListeners();
     loadSyncStatus();
   });
   // The resolution pass finished (drained, hit the rate reserve, or backed off) — this is the

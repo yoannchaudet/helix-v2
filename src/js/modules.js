@@ -1,6 +1,7 @@
 import { $, html } from "./dom.js";
 import { invoke } from "./api.js";
 import { isShortcutsOpen } from "./shortcuts.js";
+import { registerShortcutGroups } from "./shortcuts.js";
 import { closeMenu } from "./menu.js";
 import { MODULES, DEFAULT_MODULE_ID, isModuleId, moduleAt } from "./modules-model.js";
 
@@ -14,7 +15,7 @@ import { MODULES, DEFAULT_MODULE_ID, isModuleId, moduleAt } from "./modules-mode
  *
  * ## Module contract
  *
- * Modules register their lifecycle via `registerModule(id, callbacks)`. The contract is:
+ * Modules register their capabilities via `registerModule(id, config)`. The contract is:
  *
  *   init()       — Called once during `initModules()` (DOMContentLoaded). Wire DOM
  *                  listeners and one-time setup here.
@@ -23,6 +24,9 @@ import { MODULES, DEFAULT_MODULE_ID, isModuleId, moduleAt } from "./modules-mode
  *                  Use for staleness-gated syncs, on-return announcements, etc.
  *   deactivate() — Called when the module is hidden by another module. Use for clearing
  *                  stale announcement queues, pausing timers, etc.
+ *   sidebarSelector — CSS selector for this module's sidebar nav. modules.js toggles
+ *                  it via the `hidden` attribute as the active module changes.
+ *   shortcuts    — Shortcut groups contributed to the shortcuts overlay.
  *
  * All callbacks are optional. Modules that don't register still work — they just don't get
  * lifecycle calls.
@@ -35,8 +39,8 @@ import { MODULES, DEFAULT_MODULE_ID, isModuleId, moduleAt } from "./modules-mode
  *  the previously opened module on launch. */
 let activeModuleId = DEFAULT_MODULE_ID;
 
-/** Registered module lifecycle callbacks, keyed by module id.
- *  Shape: `{ [id]: { init?, load?, activate?, deactivate? } }`. */
+/** Registered module config, keyed by module id.
+ *  Shape: `{ [id]: { init?, load?, activate?, deactivate?, sidebarSelector?, shortcuts? } }`. */
 const registry = {};
 
 /** App-shell hooks, set by main.js to avoid import cycles. `onBeforeSwitch()` fires
@@ -52,18 +56,23 @@ export function configureModules(overrides) {
   Object.assign(hooks, overrides);
 }
 
-/** Register a module's lifecycle callbacks. Call at module init time (before `initModules`).
+/** Register a module's config. Call at module init time (before `initModules`).
  *
  * @param {string} id       The module id (must match a MODULES entry).
- * @param {Object} callbacks
- * @param {Function} [callbacks.init]       One-time setup (DOMContentLoaded).
- * @param {Function} [callbacks.load]       Initial data load (called after all inits).
- * @param {Function} [callbacks.activate]   Called when the module becomes visible.
- * @param {Function} [callbacks.deactivate] Called when the module is hidden.
+ * @param {Object} config
+ * @param {Function} [config.init]       One-time setup (DOMContentLoaded).
+ * @param {Function} [config.load]       Initial data load (called after all inits).
+ * @param {Function} [config.activate]   Called when the module becomes visible.
+ * @param {Function} [config.deactivate] Called when the module is hidden.
+ * @param {string} [config.sidebarSelector] CSS selector for this module sidebar.
+ * @param {Array} [config.shortcuts]     Shortcut groups for the shortcuts overlay.
  */
-export function registerModule(id, callbacks) {
+export function registerModule(id, config) {
   if (!isModuleId(id)) throw new Error(`registerModule: unknown module id "${id}"`);
-  registry[id] = { ...callbacks };
+  if (config?.shortcuts != null && !Array.isArray(config.shortcuts)) {
+    throw new Error(`registerModule: "${id}" shortcuts must be an array`);
+  }
+  registry[id] = { ...config };
 }
 
 /** The currently active module's id. */
@@ -86,6 +95,14 @@ export function showActiveModulePane() {
   for (const m of MODULES) {
     const pane = $(`#${m.paneId}`);
     if (pane) pane.hidden = m.id !== activeModuleId;
+  }
+  for (const sidebar of document.querySelectorAll(".sidebar-module")) {
+    sidebar.hidden = true;
+  }
+  const sidebarSelector = registry[activeModuleId]?.sidebarSelector;
+  if (sidebarSelector) {
+    const sidebar = $(sidebarSelector);
+    if (sidebar) sidebar.hidden = false;
   }
   document.querySelector(".app")?.setAttribute("data-module", activeModuleId);
 }
@@ -183,6 +200,10 @@ export function initModules() {
   });
 
   // Module lifecycle: init each registered module, then load.
+  for (const m of MODULES) {
+    const groups = registry[m.id]?.shortcuts;
+    if (groups?.length) registerShortcutGroups(groups);
+  }
   for (const m of MODULES) {
     registry[m.id]?.init?.();
   }

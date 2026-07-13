@@ -302,15 +302,7 @@ code,
   display: none;
 }
 
-/* Only the active module's sidebar sources are shown (Notifications: filters + repos;
-   Dependabot: repos only). */
-.sidebar-module {
-  display: none;
-}
-.app[data-module="notifications"] .sidebar-module--notifications,
-.app[data-module="dependabot"] .sidebar-module--dependabot {
-  display: block;
-}
+/* Module sidebars are toggled by modules.js via each section's `hidden` attribute. */
 
 /* Sidebar resize handle: an invisible hit area straddling the sidebar/content seam,
    with a hairline that lights up on hover/drag. */

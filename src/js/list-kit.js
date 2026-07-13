@@ -159,3 +159,53 @@ export function createRowNavigator({ containerSelector, rowSelector, focusRow })
 
   return { rows, activeRow, moveActiveRow };
 }
+
+/* ───────────────────────── Focus capture + restore ──────────────────────────
+ *
+ * Captures which row/control currently owns focus in a list container, then restores that
+ * focus target after a wholesale re-render. Each caller owns how targets are encoded and how
+ * rows/controls are matched; this helper only centralizes the container/focus plumbing. */
+
+/**
+ * Create a list focus retainer.
+ *
+ * @param {Object} config
+ * @param {string} config.containerSelector
+ * @param {string} config.rowSelector
+ * @param {Function} config.captureTarget `(row: Element, active: Element) => any`
+ * @param {Function} config.matchRow      `(row: Element, target: any) => boolean`
+ * @param {Function} config.resolveElement `(row: Element, target: any) => Element|null`
+ * @returns {{ capture: () => any, apply: (target: any, options?: { preventScroll?: boolean }) => boolean }}
+ */
+export function createListFocusRetainer({
+  containerSelector,
+  rowSelector,
+  captureTarget,
+  matchRow,
+  resolveElement,
+}) {
+  function capture() {
+    const active = document.activeElement;
+    const container = $(containerSelector);
+    if (!active || !container || !container.contains(active)) return null;
+    const row = active.closest(rowSelector);
+    if (!row) return null;
+    return captureTarget(row, active);
+  }
+
+  function apply(target, { preventScroll = false } = {}) {
+    if (!target) return false;
+    const container = $(containerSelector);
+    if (!container) return false;
+    const row = [...container.querySelectorAll(rowSelector)].find((candidate) =>
+      matchRow(candidate, target),
+    );
+    if (!row) return false;
+    const el = resolveElement(row, target);
+    if (!el) return false;
+    el.focus({ preventScroll });
+    return true;
+  }
+
+  return { capture, apply };
+}

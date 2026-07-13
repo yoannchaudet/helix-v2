@@ -30,3 +30,17 @@ export function sortReposByRecency(items, getItems, getName) {
     })
     .map((x) => x.item);
 }
+
+/** Given a flat, visible item list and a set of removed ids, pick the nearest surviving
+ *  neighbor after the first removed item (else before it). Returns `null` when no removed id
+ *  is visible or when the view has no surviving items. */
+export function focusNeighborAfterRemoval(items, removedIds, getId) {
+  const removed = new Set(removedIds);
+  const firstRemoved = items.findIndex((item) => removed.has(getId(item)));
+  if (firstRemoved === -1) return null;
+  const after = items.slice(firstRemoved + 1).find((item) => !removed.has(getId(item)));
+  if (after) return after;
+  return (
+    [...items.slice(0, firstRemoved)].reverse().find((item) => !removed.has(getId(item))) ?? null
+  );
+}
