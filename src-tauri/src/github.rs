@@ -2315,7 +2315,7 @@ pub async fn detect_merge_queue_policy(
     {
         Ok(data) => {
             let graphql_has_queue = data.repository.map(|repo| repo.merge_queue.is_some());
-            let strategy = resolve_merge_queue_strategy(false, graphql_has_queue);
+            let strategy = resolve_merge_queue_strategy(rest_requires_queue, graphql_has_queue);
             Ok(MergeQueuePolicy { strategy, rates })
         }
         Err(err) => Ok(MergeQueuePolicy {

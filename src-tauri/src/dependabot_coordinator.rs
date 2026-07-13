@@ -2165,6 +2165,7 @@ async fn direct_await_checks<B: MergeBackend>(
         let head = head_sha.to_string();
         let summary = context
             .pending_reason
+            .map(str::trim)
             .filter(|reason| !reason.is_empty())
             .unwrap_or("GitHub still blocks the merge; no pending or failing checks were found.");
         with_conn(db, rates, |conn| {
