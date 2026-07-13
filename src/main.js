@@ -12,6 +12,7 @@ import {
   registerSyncEvents,
 } from "./js/sync.js";
 import { initSettings, loadSettings, showSettings } from "./js/settings.js";
+import "./js/inbox.js";
 import { startDependabotMergePolling, stopDependabotMergePolling } from "./js/dependabot.js";
 import {
   initModules,
