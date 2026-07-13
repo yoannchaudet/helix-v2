@@ -36,13 +36,43 @@ test("clicking a module swaps the visible pane and active tab", async ({ page })
 test("⌘1 / ⌘2 jump straight to a module", async ({ page }) => {
   await openApp(page);
 
+  await page.keyboard.press("j");
+  await page.keyboard.press("j");
+  await page.keyboard.press("j");
+  await expect(page.locator('.n-row[data-thread-id="t2"] .n-open')).toBeFocused();
+
   await page.keyboard.press("Meta+2");
   await expect(page.locator("#view-dependabot")).toBeVisible();
   await expect(page.locator("#view-notifications")).toBeHidden();
+  await expect(page.locator('#dependabot .n-row[data-pr-id="103"] .n-open')).toBeFocused();
+  await expect(page.locator('#dependabot .n-row[data-pr-id="103"] .n-open')).toHaveClass(
+    /kbd-focus/,
+  );
 
   await page.keyboard.press("Meta+1");
   await expect(page.locator("#view-notifications")).toBeVisible();
   await expect(page.locator("#view-dependabot")).toBeHidden();
+  await expect(page.locator('.n-row[data-thread-id="t3"] .n-open')).toBeFocused();
+  await expect(page.locator('.n-row[data-thread-id="t3"] .n-open')).toHaveClass(/kbd-focus/);
+  await expect(page.locator('.n-row[data-thread-id="t2"] .n-open')).not.toHaveClass(/kbd-focus/);
+});
+
+test("clicking module tabs does not force a first-row keyboard focus ring", async ({ page }) => {
+  await openApp(page);
+
+  await page.keyboard.press("j");
+  await page.keyboard.press("j");
+  await page.keyboard.press("j");
+  await expect(page.locator('.n-row[data-thread-id="t2"] .n-open')).toBeFocused();
+
+  await page.locator('.module-tab[data-module="dependabot"]').click();
+  await expect(page.locator('#dependabot .n-row[data-pr-id="103"] .n-open')).toBeFocused();
+  await expect(page.locator("#dependabot .n-open.kbd-focus")).toHaveCount(0);
+
+  await page.locator('.module-tab[data-module="notifications"]').click();
+  await expect(page.locator('.n-row[data-thread-id="t3"] .n-open')).toBeFocused();
+  await expect(page.locator('.n-row[data-thread-id="t2"] .n-open')).not.toBeFocused();
+  await expect(page.locator("#inbox .n-open.kbd-focus")).toHaveCount(0);
 });
 
 test("each module shows its own sidebar sources; Settings hides the sidebar", async ({ page }) => {
