@@ -1563,6 +1563,14 @@ pub struct ActionsRunFailure {
     pub conclusion: Option<String>,
 }
 
+/// A GitHub Actions workflow run that GitHub will not start until a maintainer approves it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WorkflowRunApproval {
+    pub run_id: i64,
+    pub run_attempt: i64,
+    pub name: Option<String>,
+}
+
 /// A failed check run or legacy commit status from a non-Actions source. Helix has no way to
 /// safely rerun these on the user's behalf (see requirement 7 in the phase-2 plan): the PAT
 /// can't rerequest a third-party check suite, so this is surfaced for the human to act on.
@@ -1577,6 +1585,7 @@ pub struct ExternalCheckFailure {
 #[derive(Debug, Default)]
 pub struct ExactHeadCheckDiagnosis {
     pub pending: Vec<PendingCheck>,
+    pub approval_required: Vec<WorkflowRunApproval>,
     pub actions_failures: Vec<ActionsRunFailure>,
     pub external_failures: Vec<ExternalCheckFailure>,
     pub rates: Vec<RateLimit>,
@@ -1647,8 +1656,12 @@ fn is_check_pending_status(status: &str) -> bool {
 fn is_failure_conclusion(conclusion: &str) -> bool {
     matches!(
         conclusion,
-        "failure" | "timed_out" | "cancelled" | "action_required" | "startup_failure"
+        "failure" | "timed_out" | "cancelled" | "startup_failure"
     )
+}
+
+fn is_approval_required_conclusion(conclusion: Option<&str>) -> bool {
+    conclusion == Some("action_required")
 }
 
 /// Whether a legacy commit-status `state` (`docs.github.com/en/rest/commits/statuses`) is a
@@ -1673,6 +1686,7 @@ pub async fn diagnose_exact_head_checks(
 ) -> Result<ExactHeadCheckDiagnosis, MergeRemoteError> {
     let mut rates = Vec::new();
     let mut pending = Vec::new();
+    let mut approval_required = Vec::new();
     let mut actions_failures = Vec::new();
     let mut external_failures = Vec::new();
 
@@ -1737,6 +1751,14 @@ pub async fn diagnose_exact_head_checks(
             });
             continue;
         }
+        if is_approval_required_conclusion(run.conclusion.as_deref()) {
+            approval_required.push(WorkflowRunApproval {
+                run_id: run.id,
+                run_attempt: run.run_attempt.unwrap_or(1),
+                name: run.name,
+            });
+            continue;
+        }
         if run.conclusion.as_deref().is_some_and(is_failure_conclusion) {
             actions_failures.push(ActionsRunFailure {
                 run_id: run.id,
@@ -1778,6 +1800,7 @@ pub async fn diagnose_exact_head_checks(
 
     Ok(ExactHeadCheckDiagnosis {
         pending,
+        approval_required,
         actions_failures,
         external_failures,
         rates,
@@ -2005,6 +2028,65 @@ where
         outcome: MutationOutcome::Applied,
         rates,
     })
+}
+
+/// Approve a workflow run that GitHub is holding for maintainer authorization
+/// (`POST .../actions/runs/{run_id}/approve`). GitHub returns 201 when approval is applied,
+/// 204 when this user already approved it, and 409 when the run is no longer awaiting approval;
+/// all three are successful reconciliation outcomes for the processor.
+pub async fn approve_workflow_run<Cancelled>(
+    client: &reqwest::Client,
+    token: &str,
+    repo_full_name: &str,
+    run_id: i64,
+    mutation_guard: &tokio::sync::Mutex<()>,
+    is_cancelled: Cancelled,
+) -> Result<MutationResult, MergeRemoteError>
+where
+    Cancelled: Fn() -> bool,
+{
+    let mut rates = Vec::new();
+    let _mutation_lease = mutation_guard.lock().await;
+    if is_cancelled() {
+        return Ok(MutationResult {
+            outcome: MutationOutcome::Cancelled,
+            rates,
+        });
+    }
+    let response = authed(
+        client.post(format!(
+            "{API_BASE}/repos/{repo_full_name}/actions/runs/{run_id}/approve"
+        )),
+        token,
+    )
+    .send()
+    .await
+    .map_err(|e| MergeRemoteError {
+        class: MergeErrorClass::Transient,
+        message: format!("network error: {e}"),
+        rates: std::mem::take(&mut rates),
+    })?;
+    let status = response.status();
+    let mut rate = RateLimit::default();
+    rate.update_from(response.headers());
+    rates.push(rate.clone());
+    if workflow_approval_status_is_success(status) {
+        return Ok(MutationResult {
+            outcome: MutationOutcome::Applied,
+            rates,
+        });
+    }
+    let body = response.text().await.unwrap_or_default().trim().to_string();
+    Err(merge_error(status, body, &rate, &mut rates))
+}
+
+fn workflow_approval_status_is_success(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::CREATED
+            | reqwest::StatusCode::NO_CONTENT
+            | reqwest::StatusCode::CONFLICT
+    )
 }
 
 /* -------------------------- Merge-queue policy detection ------------------- */
@@ -3341,24 +3423,21 @@ mod tests {
 
     #[test]
     fn failure_conclusions_exclude_green_and_neutral_outcomes() {
-        for conclusion in [
-            "failure",
-            "timed_out",
-            "cancelled",
-            "action_required",
-            "startup_failure",
-        ] {
+        for conclusion in ["failure", "timed_out", "cancelled", "startup_failure"] {
             assert!(
                 is_failure_conclusion(conclusion),
                 "{conclusion} should be a failure"
             );
         }
-        for conclusion in ["success", "neutral", "skipped", "stale"] {
+        for conclusion in ["success", "neutral", "skipped", "stale", "action_required"] {
             assert!(
                 !is_failure_conclusion(conclusion),
                 "{conclusion} should not be a failure"
             );
         }
+        assert!(is_approval_required_conclusion(Some("action_required")));
+        assert!(!is_approval_required_conclusion(Some("failure")));
+        assert!(!is_approval_required_conclusion(None));
     }
 
     #[test]
@@ -3438,6 +3517,22 @@ mod tests {
         );
         assert_eq!(parsed.workflow_runs[1].run_attempt, None);
         assert!(is_check_pending_status(&parsed.workflow_runs[1].status));
+    }
+
+    #[test]
+    fn workflow_approval_accepts_applied_already_approved_and_raced_statuses() {
+        assert!(workflow_approval_status_is_success(
+            reqwest::StatusCode::CREATED
+        ));
+        assert!(workflow_approval_status_is_success(
+            reqwest::StatusCode::NO_CONTENT
+        ));
+        assert!(workflow_approval_status_is_success(
+            reqwest::StatusCode::CONFLICT
+        ));
+        assert!(!workflow_approval_status_is_success(
+            reqwest::StatusCode::FORBIDDEN
+        ));
     }
 
     #[test]

@@ -4,6 +4,7 @@
     "validating",
     "updating_branch",
     "waiting_requirements",
+    "approving_workflows",
     "waiting_checks",
     "retry_scheduled",
     "retrying_checks",

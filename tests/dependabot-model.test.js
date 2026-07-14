@@ -138,6 +138,7 @@ test("buildOperationGraph (direct strategy): every shared phase maps to a node",
     PHASES.QUEUED,
     PHASES.VALIDATING,
     PHASES.UPDATING_BRANCH,
+    PHASES.APPROVING_WORKFLOWS,
     PHASES.WAITING_CHECKS,
   ]) {
     const graph = buildOperationGraph({ state: "queued", phase, strategy: STRATEGIES.DIRECT });
@@ -145,6 +146,17 @@ test("buildOperationGraph (direct strategy): every shared phase maps to a node",
     assert.ok(node, `expected a node for phase ${phase}`);
     assert.equal(node.state, "current");
   }
+});
+
+test("buildOperationGraph labels workflow approval as a shared phase", () => {
+  const graph = buildOperationGraph({
+    state: "delegated",
+    phase: PHASES.APPROVING_WORKFLOWS,
+    strategy: STRATEGIES.DIRECT,
+  });
+  assert.equal(nodeById(graph, "approving_workflows").state, "current");
+  assert.equal(nodeById(graph, "approving_workflows").label, "Approving workflows");
+  assert.equal(nodeById(graph, "waiting_checks").state, "upcoming");
 });
 
 test("buildOperationGraph: an actual retry marks the retry pair done, not skipped", () => {

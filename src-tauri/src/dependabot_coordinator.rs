@@ -649,6 +649,10 @@ fn phase_explanation(operation: &dependabot::DependabotMergeOperation) -> (Strin
             "GitHub still reports this pull request as blocked, but no pending or failing checks are visible yet.".to_string(),
             "Wait for GitHub to publish the remaining requirement or allow the merge.".to_string(),
         ),
+        dependabot::MergePhase::ApprovingWorkflows => (
+            "Approving GitHub Actions workflow runs for the accepted pull request head.".to_string(),
+            "Wait for GitHub to start the approved workflows and publish their checks.".to_string(),
+        ),
         dependabot::MergePhase::WaitingChecks => (
             "Waiting for required status checks to finish on the pull request.".to_string(),
             "Once checks succeed, continue toward merging; retry them if any fail.".to_string(),
@@ -1112,6 +1116,12 @@ trait MergeBackend {
         run_id: i64,
     ) -> Result<github::MutationResult, github::MergeRemoteError>;
 
+    async fn approve_workflow(
+        &self,
+        repo: &str,
+        run_id: i64,
+    ) -> Result<github::MutationResult, github::MergeRemoteError>;
+
     async fn queue_status(
         &self,
         repo: &str,
@@ -1246,6 +1256,22 @@ impl MergeBackend for RealMergeBackend<'_> {
         run_id: i64,
     ) -> Result<github::MutationResult, github::MergeRemoteError> {
         github::rerun_failed_jobs(
+            &self.client,
+            &self.token,
+            repo,
+            run_id,
+            self.mutation_guard,
+            self.is_cancelled(),
+        )
+        .await
+    }
+
+    async fn approve_workflow(
+        &self,
+        repo: &str,
+        run_id: i64,
+    ) -> Result<github::MutationResult, github::MergeRemoteError> {
+        github::approve_workflow_run(
             &self.client,
             &self.token,
             repo,
@@ -1712,7 +1738,7 @@ async fn orchestrate_operation<B: MergeBackend>(
             })
         }
         Outcome::Blocked { head_sha, base_ref } => {
-            let outcome = direct_await_checks(
+            let outcome = await_checks(
                 db,
                 backend,
                 &work,
@@ -1767,7 +1793,7 @@ async fn orchestrate_operation<B: MergeBackend>(
                 });
             }
             // Direct strategy, head accepted + approved, but not mergeable yet → diagnose checks.
-            let outcome = direct_await_checks(
+            let outcome = await_checks(
                 db,
                 backend,
                 &work,
@@ -1953,7 +1979,128 @@ struct DirectCheckContext<'a> {
     pending_reason: Option<&'a str>,
 }
 
-async fn direct_await_checks<B: MergeBackend>(
+async fn approve_required_workflows<B: MergeBackend>(
+    db: &Db,
+    backend: &B,
+    work: &dependabot::MergeWork,
+    head_sha: &str,
+    approvals: &[github::WorkflowRunApproval],
+    rates: &mut Vec<github::RateLimit>,
+) -> Result<Option<github::MergeRemoteOutcome>, github::MergeRemoteError> {
+    use github::MergeRemoteOutcome as Outcome;
+    if approvals.is_empty() {
+        return Ok(None);
+    }
+
+    let op_id = work.operation.id;
+    let repo = work.operation.repo_full_name.clone();
+    let live_head = net!(*rates, backend.current_head(&work.operation.pull_url)).head_sha;
+    if live_head != head_sha {
+        with_conn(db, rates, |conn| {
+            dependabot::set_phase(
+                conn,
+                op_id,
+                dependabot::MergePhase::Validating,
+                None,
+                None,
+                None,
+            )?;
+            dependabot::schedule_next_action(conn, op_id, None)?;
+            dependabot::append_operation_event(
+                conn,
+                op_id,
+                "validating",
+                "workflow_approval",
+                "stale",
+                "Skipped workflow approval because the pull request head changed.",
+                Some(&format!(
+                    "Approval head: {head_sha}; current head: {live_head}."
+                )),
+                Some(head_sha),
+                None,
+            )
+        })?;
+        return Ok(Some(Outcome::Waiting));
+    }
+
+    let approval_count = approvals.len();
+    with_conn(db, rates, |conn| {
+        dependabot::set_phase(
+            conn,
+            op_id,
+            dependabot::MergePhase::ApprovingWorkflows,
+            None,
+            None,
+            None,
+        )?;
+        dependabot::append_operation_event(
+            conn,
+            op_id,
+            "approving_workflows",
+            "workflow_approval",
+            "start",
+            &format!("Approving {approval_count} GitHub Actions workflow run(s)."),
+            None,
+            Some(head_sha),
+            None,
+        )
+    })?;
+
+    for approval in approvals {
+        let mutation = net!(*rates, backend.approve_workflow(&repo, approval.run_id));
+        if mutation.outcome == github::MutationOutcome::Cancelled {
+            return Ok(Some(Outcome::Cancelled));
+        }
+        let name = approval
+            .name
+            .as_deref()
+            .unwrap_or("Unnamed GitHub Actions workflow");
+        with_conn(db, rates, |conn| {
+            dependabot::append_operation_event(
+                conn,
+                op_id,
+                "approving_workflows",
+                "workflow_approval",
+                "approved",
+                &format!("Approved workflow run `{name}`."),
+                None,
+                Some(head_sha),
+                Some(&approval.run_id.to_string()),
+            )
+        })?;
+    }
+
+    with_conn(db, rates, |conn| {
+        dependabot::set_phase(
+            conn,
+            op_id,
+            dependabot::MergePhase::WaitingChecks,
+            None,
+            None,
+            None,
+        )?;
+        dependabot::schedule_next_action(conn, op_id, None)?;
+        dependabot::append_operation_event(
+            conn,
+            op_id,
+            "waiting_checks",
+            "workflow_approval",
+            "waiting",
+            "Approved the workflow runs; waiting for GitHub to start their checks.",
+            None,
+            Some(head_sha),
+            None,
+        )
+    })?;
+    Ok(Some(Outcome::Pending {
+        head_sha: head_sha.to_string(),
+        approved: true,
+        branch_update_requested: false,
+        reason: Some("Approved workflows; waiting for their checks to run.".to_string()),
+    }))
+}
+
+async fn await_checks<B: MergeBackend>(
     db: &Db,
     backend: &B,
     work: &dependabot::MergeWork,
@@ -1967,6 +2114,19 @@ async fn direct_await_checks<B: MergeBackend>(
     let repo = work.operation.repo_full_name.clone();
 
     let diagnosis = net!(*rates, backend.diagnose(&repo, head_sha));
+
+    if let Some(outcome) = approve_required_workflows(
+        db,
+        backend,
+        work,
+        head_sha,
+        &diagnosis.approval_required,
+        rates,
+    )
+    .await?
+    {
+        return Ok(outcome);
+    }
 
     if !diagnosis.external_failures.is_empty() {
         let names = diagnosis
@@ -2388,15 +2548,16 @@ async fn queue_flow<B: MergeBackend>(
         });
     }
 
-    // Not merged and not in the queue. If it was previously enrolled and its checks have failed,
-    // it was ejected — diagnose (failed Actions runs reschedule and re-enroll on the next pass).
+    // Not merged and not in the queue. A previously enrolled PR is diagnosed after queue ejection.
+    // Before first enrollment, only release approval-required workflows: unrelated failing checks
+    // may not be required by the merge queue and must not prevent GitHub from evaluating eligibility.
     let was_enrolled =
         work.operation.auto_merge_enabled || work.operation.merge_queue_position.is_some();
     let checks_failed = matches!(
         status.check_status.as_deref(),
         Some("FAILURE") | Some("ERROR")
     );
-    if was_enrolled && checks_failed {
+    if checks_failed && was_enrolled {
         with_conn(db, rates, |conn| {
             dependabot::append_operation_event(
                 conn,
@@ -2410,7 +2571,7 @@ async fn queue_flow<B: MergeBackend>(
                 None,
             )
         })?;
-        return direct_await_checks(
+        return await_checks(
             db,
             backend,
             work,
@@ -2423,6 +2584,24 @@ async fn queue_flow<B: MergeBackend>(
             rates,
         )
         .await;
+    }
+    if checks_failed {
+        let diagnosis = net!(
+            *rates,
+            backend.diagnose(&work.operation.repo_full_name, head_sha)
+        );
+        if let Some(outcome) = approve_required_workflows(
+            db,
+            backend,
+            work,
+            head_sha,
+            &diagnosis.approval_required,
+            rates,
+        )
+        .await?
+        {
+            return Ok(outcome);
+        }
     }
 
     // Requirements still pending (not yet approved / checks not green) → idempotently enable
@@ -3540,7 +3719,7 @@ mod tests {
         ActionsRunFailure, BranchComparisonResult, ExactHeadCheckDiagnosis, ExternalCheckFailure,
         MergeQueueEntryStatus, MergeQueuePolicy, MergeQueueStrategy, MergeRemoteError,
         MergeRemoteOutcome, MergeRemoteResult, MutationOutcome, MutationResult, PrQueueStatus,
-        PrQueueStatusResult, PullHeadResult, RefUpdateRestrictionResult,
+        PrQueueStatusResult, PullHeadResult, RefUpdateRestrictionResult, WorkflowRunApproval,
     };
     use std::collections::VecDeque;
 
@@ -3564,6 +3743,7 @@ mod tests {
         current_head: VecDeque<NetResult<PullHeadResult>>,
         update_branch: VecDeque<NetResult<MutationResult>>,
         rerun: VecDeque<NetResult<MutationResult>>,
+        approve: VecDeque<NetResult<MutationResult>>,
         queue: VecDeque<NetResult<PrQueueStatusResult>>,
         enable: VecDeque<NetResult<MutationResult>>,
         disable: VecDeque<NetResult<MutationResult>>,
@@ -3582,6 +3762,8 @@ mod tests {
         update_branch: usize,
         rerun: usize,
         rerun_ids: Vec<i64>,
+        approve: usize,
+        approve_ids: Vec<i64>,
         queue: usize,
         enable: usize,
         disable: usize,
@@ -3689,6 +3871,15 @@ mod tests {
             Self::pop(&mut self.script.lock().unwrap().rerun, "rerun")
         }
 
+        async fn approve_workflow(&self, _repo: &str, run_id: i64) -> NetResult<MutationResult> {
+            {
+                let mut calls = self.calls.lock().unwrap();
+                calls.approve += 1;
+                calls.approve_ids.push(run_id);
+            }
+            Self::pop(&mut self.script.lock().unwrap().approve, "approve_workflow")
+        }
+
         async fn queue_status(&self, _repo: &str, _number: i64) -> NetResult<PrQueueStatusResult> {
             self.calls.lock().unwrap().queue += 1;
             Self::pop(&mut self.script.lock().unwrap().queue, "queue_status")
@@ -3755,6 +3946,14 @@ mod tests {
                 reason: Some(reason.to_string()),
             },
             rates: rates_core(),
+        }
+    }
+
+    fn approval(run_id: i64, name: &str) -> WorkflowRunApproval {
+        WorkflowRunApproval {
+            run_id,
+            run_attempt: 1,
+            name: Some(name.to_string()),
         }
     }
 
@@ -3967,6 +4166,143 @@ mod tests {
         assert_eq!(fake.calls().rerun, 0);
         assert_eq!(fake.calls().compare, 0);
         assert!(statuses(&db, id).contains(&"pending".to_string()));
+    }
+
+    #[test]
+    fn direct_action_required_runs_are_approved_for_the_exact_head() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        let fake = FakeBackend::new(Script {
+            process: VecDeque::from([Ok(pending("sha1", false))]),
+            diagnose: VecDeque::from([Ok(ExactHeadCheckDiagnosis {
+                approval_required: vec![approval(100, "build"), approval(200, "dependency review")],
+                rates: rates_core(),
+                ..Default::default()
+            })]),
+            current_head: VecDeque::from([Ok(pull_head("sha1"))]),
+            approve: VecDeque::from([Ok(applied()), Ok(applied())]),
+            ..Default::default()
+        });
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "direct").unwrap();
+            dependabot::set_phase(
+                &conn,
+                id,
+                dependabot::MergePhase::Queued,
+                Some("direct"),
+                None,
+                Some("main"),
+            )
+            .unwrap();
+        }
+
+        tick(&db, &fake);
+
+        let after = op(&db, id);
+        assert_eq!(after.phase, "waiting_checks");
+        assert_eq!(
+            after.failure_reason.as_deref(),
+            Some("Approved workflows; waiting for their checks to run.")
+        );
+        let calls = fake.calls();
+        assert_eq!(calls.current_head, 1);
+        assert_eq!(calls.approve_ids, vec![100, 200]);
+        assert_eq!(calls.rerun, 0);
+        let operation_events = events(&db, id);
+        assert!(operation_events
+            .iter()
+            .any(|event| event.phase == "approving_workflows" && event.status == "start"));
+        assert_eq!(
+            operation_events
+                .iter()
+                .filter(|event| {
+                    event.phase == "approving_workflows" && event.status == "approved"
+                })
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn workflow_approval_skips_every_run_when_the_head_changed() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        let fake = FakeBackend::new(Script {
+            process: VecDeque::from([Ok(pending("sha1", false))]),
+            diagnose: VecDeque::from([Ok(ExactHeadCheckDiagnosis {
+                approval_required: vec![approval(100, "build"), approval(200, "lint")],
+                rates: rates_core(),
+                ..Default::default()
+            })]),
+            current_head: VecDeque::from([Ok(pull_head("sha2"))]),
+            ..Default::default()
+        });
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "direct").unwrap();
+            dependabot::set_phase(
+                &conn,
+                id,
+                dependabot::MergePhase::Queued,
+                Some("direct"),
+                None,
+                Some("main"),
+            )
+            .unwrap();
+        }
+
+        tick(&db, &fake);
+
+        assert_eq!(op(&db, id).phase, "validating");
+        assert_eq!(fake.calls().approve, 0);
+        assert!(events(&db, id)
+            .iter()
+            .any(|event| event.kind == "workflow_approval" && event.status == "stale"));
+    }
+
+    #[test]
+    fn workflow_approval_honors_cancellation_between_runs() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        let fake = FakeBackend::new(Script {
+            process: VecDeque::from([Ok(pending("sha1", false))]),
+            diagnose: VecDeque::from([Ok(ExactHeadCheckDiagnosis {
+                approval_required: vec![approval(100, "build"), approval(200, "lint")],
+                rates: rates_core(),
+                ..Default::default()
+            })]),
+            current_head: VecDeque::from([Ok(pull_head("sha1"))]),
+            approve: VecDeque::from([
+                Ok(applied()),
+                Ok(MutationResult {
+                    outcome: MutationOutcome::Cancelled,
+                    rates: rates_core(),
+                }),
+            ]),
+            ..Default::default()
+        });
+        {
+            let conn = db.0.lock().unwrap();
+            dependabot::cache_merge_policy(&conn, "octo/repo-a", "main", "direct").unwrap();
+            dependabot::set_phase(
+                &conn,
+                id,
+                dependabot::MergePhase::Queued,
+                Some("direct"),
+                None,
+                Some("main"),
+            )
+            .unwrap();
+        }
+
+        tick(&db, &fake);
+
+        assert_eq!(op(&db, id).state, "cancelled");
+        assert_eq!(fake.calls().approve_ids, vec![100, 200]);
     }
 
     #[test]
@@ -4535,6 +4871,73 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn queue_strategy_approves_required_workflows_before_first_enqueue() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        let mut status = pr_status("sha1");
+        status.check_status = Some("FAILURE".to_string());
+        let fake = FakeBackend::new(Script {
+            process: VecDeque::from([Ok(prepared("sha1", "main", "PR_1", Some("clean")))]),
+            policy: VecDeque::from([Ok(policy(MergeQueueStrategy::MergeQueue))]),
+            queue: VecDeque::from([Ok(queue_result(Some(status)))]),
+            diagnose: VecDeque::from([Ok(ExactHeadCheckDiagnosis {
+                approval_required: vec![approval(100, "build")],
+                rates: rates_core(),
+                ..Default::default()
+            })]),
+            current_head: VecDeque::from([Ok(pull_head("sha1"))]),
+            approve: VecDeque::from([Ok(applied())]),
+            ..Default::default()
+        });
+
+        tick(&db, &fake);
+
+        let after = op(&db, id);
+        assert_eq!(after.strategy, "merge_queue");
+        assert_eq!(after.phase, "waiting_checks");
+        let calls = fake.calls();
+        assert_eq!(calls.approve_ids, vec![100]);
+        assert_eq!(calls.enqueue, 0);
+        assert_eq!(calls.enable, 0);
+    }
+
+    #[test]
+    fn queue_strategy_ignores_non_required_failures_before_first_enqueue() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump")]);
+        let id = enqueue_op(&db, 1);
+        let mut status = pr_status("sha1");
+        status.check_status = Some("FAILURE".to_string());
+        let fake = FakeBackend::new(Script {
+            process: VecDeque::from([Ok(prepared("sha1", "main", "PR_1", Some("clean")))]),
+            policy: VecDeque::from([Ok(policy(MergeQueueStrategy::MergeQueue))]),
+            queue: VecDeque::from([Ok(queue_result(Some(status)))]),
+            diagnose: VecDeque::from([Ok(ExactHeadCheckDiagnosis {
+                external_failures: vec![ExternalCheckFailure {
+                    name: "optional check".to_string(),
+                    conclusion: Some("failure".to_string()),
+                    details_url: None,
+                }],
+                rates: rates_core(),
+                ..Default::default()
+            })]),
+            enqueue: VecDeque::from([Ok(applied())]),
+            ..Default::default()
+        });
+
+        tick(&db, &fake);
+
+        let after = op(&db, id);
+        assert_eq!(after.state, "delegated");
+        assert_eq!(after.phase, "waiting_merge_queue");
+        let calls = fake.calls();
+        assert_eq!(calls.diagnose, 1);
+        assert_eq!(calls.enqueue, 1);
+        assert_eq!(calls.enable, 0);
     }
 
     #[test]
