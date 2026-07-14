@@ -194,6 +194,25 @@ test("forgets only a stuck local operation after warning that GitHub may still m
   await expect(row.locator(".dep-operation-cancel")).toHaveCount(0);
   await expect(row.locator(".dep-operation-forget")).toHaveCount(1);
   await expect(row.locator(".dep-discard-action")).toHaveCount(1);
+  const actionStyles = await row.evaluate((element) => {
+    const properties = [
+      "backgroundColor",
+      "borderStyle",
+      "borderWidth",
+      "height",
+      "padding",
+      "width",
+    ];
+    const snapshot = (selector) => {
+      const style = getComputedStyle(element.querySelector(selector));
+      return Object.fromEntries(properties.map((property) => [property, style[property]]));
+    };
+    return {
+      forget: snapshot(".dep-operation-forget"),
+      discard: snapshot(".dep-discard-action"),
+    };
+  });
+  expect(actionStyles.forget).toEqual(actionStyles.discard);
 
   await row.locator(".dep-operation-forget").click();
   await expect(
