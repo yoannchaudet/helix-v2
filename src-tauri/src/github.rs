@@ -744,6 +744,7 @@ async fn get_page<T: for<'de> serde::Deserialize<'de>>(
 }
 
 /// List open pull requests from supported automation bots in one repository (paginated + paced).
+/// The Dependabot-specific name is retained to match the module's existing internal API.
 async fn list_open_dependabot_prs(
     client: &reqwest::Client,
     token: &str,
