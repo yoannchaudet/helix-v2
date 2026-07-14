@@ -424,6 +424,42 @@ pub async fn cancel_dependabot_merge(
     Ok(operation)
 }
 
+fn forget_stuck_dependabot_merge_core<S: EventSink>(
+    db: &Db,
+    sink: S,
+    operation_id: i64,
+) -> Result<(), String> {
+    let outcome = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        dependabot::forget_stuck_merge_operation(&conn, operation_id).map_err(|e| e.to_string())?
+    };
+    match outcome {
+        dependabot::ForgetStuckOperationOutcome::Deleted => {
+            sink.emit(
+                "dependabot:operations-changed",
+                serde_json::json!({ "operation_id": operation_id, "forgotten": true }),
+            );
+            Ok(())
+        }
+        dependabot::ForgetStuckOperationOutcome::NotFound => {
+            Err("Dependabot merge operation was not found.".to_string())
+        }
+        dependabot::ForgetStuckOperationOutcome::NotEligible => Err(
+            "This operation is no longer a stuck cancellation and cannot be forgotten.".to_string(),
+        ),
+    }
+}
+
+#[tauri::command]
+pub async fn forget_stuck_dependabot_merge(
+    operation_id: i64,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let _mutation_lease = state.dependabot_merge_mutation_guard.lock().await;
+    forget_stuck_dependabot_merge_core(&state.db, app, operation_id)
+}
+
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DiscardDependabotPrStatus {
@@ -2845,6 +2881,48 @@ mod tests {
         assert_eq!(result.status, DiscardDependabotPrStatus::Closed);
         assert_eq!(pr_count(&db), 0);
         assert_eq!(sink.names(), vec!["dependabot:changed"]);
+    }
+
+    #[test]
+    fn forget_stuck_merge_core_deletes_only_an_eligible_operation_and_emits() {
+        let db = db_with_token();
+        store(&db, &[pr(1, "octo/repo-a", 10, "Bump a")]);
+        let operation_id = {
+            let conn = db.0.lock().unwrap();
+            let operation = dependabot::enqueue_merge_operation(&conn, 1).unwrap();
+            dependabot::mark_merge_progress(&conn, operation.id, "sha", true, false, None).unwrap();
+            dependabot::set_queue_metadata(&conn, operation.id, Some(1), true).unwrap();
+            dependabot::request_cancel(&conn, operation.id).unwrap();
+            dependabot::record_merge_error(
+                &conn,
+                operation.id,
+                "github_permanent",
+                "dequeue failed",
+                false,
+            )
+            .unwrap();
+            operation.id
+        };
+        let sink = RecordingSink::default();
+
+        forget_stuck_dependabot_merge_core(&db, sink.clone(), operation_id).unwrap();
+
+        assert_eq!(sink.count("dependabot:operations-changed"), 1);
+        let remaining: i64 =
+            db.0.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM dependabot_merge_operations WHERE id = ?1",
+                    [operation_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+        assert_eq!(remaining, 0);
+        assert_eq!(
+            forget_stuck_dependabot_merge_core(&db, sink.clone(), operation_id).unwrap_err(),
+            "Dependabot merge operation was not found."
+        );
+        assert_eq!(sink.count("dependabot:operations-changed"), 1);
     }
 
     #[test]

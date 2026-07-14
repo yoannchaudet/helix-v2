@@ -11,6 +11,7 @@ import {
   filterDependabotGroups,
   githubQueueSummary,
   isActiveMergeOperation,
+  isStuckCancellationCleanup,
   operationStateSummary,
   PHASES,
   queueSummary,
@@ -99,6 +100,28 @@ test("merge operations sort active FIFO before newest terminal history", () => {
   );
   assert.equal(activeMergeCount(operations), 2);
   assert.equal(isActiveMergeOperation(operations[0]), false);
+});
+
+test("isStuckCancellationCleanup requires cancellation, an error, and remote queue metadata", () => {
+  const stuck = {
+    state: "cancel_requested",
+    last_error: "GraphQL dequeue failed",
+    merge_queue_position: 1,
+    auto_merge_enabled: true,
+  };
+  assert.equal(isStuckCancellationCleanup(stuck), true);
+  assert.equal(isStuckCancellationCleanup({ ...stuck, merge_queue_position: null }), true);
+  assert.equal(
+    isStuckCancellationCleanup({
+      ...stuck,
+      auto_merge_enabled: false,
+      merge_queue_position: null,
+    }),
+    false,
+  );
+  assert.equal(isStuckCancellationCleanup({ ...stuck, last_error: "  " }), false);
+  assert.equal(isStuckCancellationCleanup({ ...stuck, state: "delegated" }), false);
+  assert.equal(isStuckCancellationCleanup({ ...stuck, state: "cancelled" }), false);
 });
 
 /* ---------------------------------------------------------------------------------------

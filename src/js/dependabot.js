@@ -310,6 +310,31 @@ function confirmDiscard(button) {
   ]);
 }
 
+function confirmForgetOperation(button) {
+  const operationId = Number(button.dataset.operationId);
+  if (!Number.isFinite(operationId)) return;
+  const title = button.dataset.operationTitle || "this operation";
+  const rect = button.getBoundingClientRect();
+  openContextMenu(rect.left, rect.bottom + 4, [
+    {
+      label: `Confirm: forget ${title} locally — Helix will stop retrying, but GitHub may still merge the pull request`,
+      danger: true,
+      action: () => forgetOperation(operationId),
+    },
+    { label: "Cancel", action: () => {} },
+  ]);
+}
+
+async function forgetOperation(operationId) {
+  try {
+    await invoke("forget_stuck_dependabot_merge", { operationId });
+    enqueueAnnounce("Forgot the local operation. GitHub may still merge the pull request.");
+    await reloadOperations();
+  } catch (err) {
+    toast(String(err), "error");
+  }
+}
+
 function beginDiscard(prId) {
   pendingDiscardPrIds.add(prId);
   applyPendingDiscardState();
@@ -555,6 +580,11 @@ function onListClick(e) {
     cancelMerge(cancel.dataset.operationId);
     return;
   }
+  const forget = el?.closest(".dep-operation-forget");
+  if (forget?.dataset.operationId) {
+    confirmForgetOperation(forget);
+    return;
+  }
   const open = el?.closest(".n-open");
   if (open?.dataset.url) openPr(open.dataset.url);
 }
@@ -605,7 +635,7 @@ function onListKeydown(e) {
   if (e.key !== "Enter") return;
   if (
     e.target.closest?.(
-      ".dep-merge-action, .dep-discard-action, .dep-operation-cancel, .dep-operation-disclosure",
+      ".dep-merge-action, .dep-discard-action, .dep-operation-cancel, .dep-operation-forget, .dep-operation-disclosure",
     )
   ) {
     return;

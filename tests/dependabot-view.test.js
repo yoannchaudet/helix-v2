@@ -169,6 +169,31 @@ test("active operations render explicit last errors with error styling", () => {
   assert.ok(row.includes('class="operation-detail operation-detail--error"'));
 });
 
+test("only a stuck cancellation renders the local forget action", () => {
+  const stuck = {
+    ...baseOperation,
+    state: "cancel_requested",
+    last_error: "GraphQL dequeue failed",
+    merge_queue_position: 1,
+    auto_merge_enabled: true,
+  };
+  const row = operationRow(stuck);
+  assert.ok(row.includes("dep-operation-forget"));
+  assert.ok(row.includes("Forget stuck merge operation"));
+  assert.ok(!row.includes("dep-operation-cancel"));
+  assert.ok(row.includes("dep-discard-action--operation"));
+
+  assert.ok(!operationRow({ ...stuck, last_error: null }).includes("dep-operation-forget"));
+  assert.ok(
+    !operationRow({
+      ...stuck,
+      merge_queue_position: null,
+      auto_merge_enabled: false,
+    }).includes("dep-operation-forget"),
+  );
+  assert.ok(!operationRow({ ...stuck, state: "delegated" }).includes("dep-operation-forget"));
+});
+
 test("operationsList splits active and recent operations into repository groups", () => {
   const output = operationsList([
     baseOperation,

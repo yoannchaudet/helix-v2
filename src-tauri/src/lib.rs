@@ -674,6 +674,7 @@ pub fn run() {
             dependabot_coordinator::dependabot_status,
             dependabot_coordinator::enqueue_dependabot_merge,
             dependabot_coordinator::cancel_dependabot_merge,
+            dependabot_coordinator::forget_stuck_dependabot_merge,
             dependabot_coordinator::discard_dependabot_pr,
             dependabot_coordinator::list_dependabot_merge_operations,
             dependabot_coordinator::dependabot_merge_status,

@@ -948,6 +948,7 @@ code,
 .dep-merge-action,
 .dep-discard-action,
 .dep-operation-cancel,
+.dep-operation-forget,
 .dep-operation-disclosure {
   flex: none;
   display: inline-flex;
@@ -993,6 +994,7 @@ code,
 .dep-merge-action,
 .dep-discard-action,
 .dep-operation-cancel,
+.dep-operation-forget,
 .dep-operation-disclosure {
   width: var(--control-icon-md);
   height: var(--control-icon-md);
@@ -1000,6 +1002,7 @@ code,
 }
 
 .dep-operation-cancel,
+.dep-operation-forget,
 .dep-discard-action--operation,
 .dep-operation-disclosure,
 .dep-merge-action.is-on {
@@ -1034,6 +1037,7 @@ code,
 .dep-merge-action:focus-visible,
 .dep-discard-action:focus-visible,
 .dep-operation-cancel:focus-visible,
+.dep-operation-forget:focus-visible,
 .dep-operation-disclosure:focus-visible,
 .repo-done:focus-visible {
   opacity: 1;
@@ -1056,7 +1060,8 @@ code,
   background: var(--surface-hover);
 }
 
-.dep-operation-cancel:hover {
+.dep-operation-cancel:hover,
+.dep-operation-forget:hover {
   color: var(--error);
   background: var(--surface-hover);
 }
@@ -1083,6 +1088,7 @@ code,
 .dep-merge-action:focus-visible,
 .dep-discard-action:focus-visible,
 .dep-operation-cancel:focus-visible,
+.dep-operation-forget:focus-visible,
 .dep-operation-disclosure:focus-visible,
 .repo-done:focus-visible {
   outline: 2px solid var(--accent);

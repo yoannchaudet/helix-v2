@@ -572,6 +572,48 @@ pub fn request_cancel(
     operation_with_queue_position(conn, id)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForgetStuckOperationOutcome {
+    Deleted,
+    NotFound,
+    NotEligible,
+}
+
+pub fn is_stuck_cancellation_cleanup(operation: &DependabotMergeOperation) -> bool {
+    operation.state == "cancel_requested"
+        && operation
+            .last_error
+            .as_deref()
+            .is_some_and(|error| !error.trim().is_empty())
+        && (operation.auto_merge_enabled || operation.merge_queue_position.is_some())
+}
+
+pub fn forget_stuck_merge_operation(
+    conn: &Connection,
+    id: i64,
+) -> rusqlite::Result<ForgetStuckOperationOutcome> {
+    let Some(operation) = get_operation(conn, id)? else {
+        return Ok(ForgetStuckOperationOutcome::NotFound);
+    };
+    if !is_stuck_cancellation_cleanup(&operation) {
+        return Ok(ForgetStuckOperationOutcome::NotEligible);
+    }
+    let last_error = operation.last_error.as_deref().unwrap_or_default();
+
+    let deleted = conn.execute(
+        "DELETE FROM dependabot_merge_operations
+         WHERE id = ?1
+           AND state = 'cancel_requested'
+           AND last_error = ?2
+           AND (auto_merge_enabled = 1 OR merge_queue_position IS NOT NULL)",
+        params![id, last_error],
+    )?;
+    if deleted == 0 {
+        return Ok(ForgetStuckOperationOutcome::NotEligible);
+    }
+    Ok(ForgetStuckOperationOutcome::Deleted)
+}
+
 pub fn merge_runtime(conn: &Connection) -> rusqlite::Result<DependabotMergeRuntime> {
     conn.query_row(
         "SELECT last_tick_at, last_error, github_poll_floor_s, backoff_until
@@ -2031,6 +2073,103 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn forget_stuck_operation_requires_failed_remote_cleanup_and_cascades() {
+        let mut conn = mem_conn();
+        store_prs(
+            &mut conn,
+            &[
+                pr(1, "octo/repo-a", 10, "Eligible"),
+                pr(2, "octo/repo-a", 11, "No error"),
+                pr(3, "octo/repo-a", 12, "No remote cleanup"),
+                pr(4, "octo/repo-a", 13, "Still delegated"),
+            ],
+            true,
+        )
+        .unwrap();
+
+        let eligible = enqueue_merge_operation(&conn, 1).unwrap();
+        mark_merge_progress(&conn, eligible.id, "sha", true, false, None).unwrap();
+        set_queue_metadata(&conn, eligible.id, Some(1), true).unwrap();
+        request_cancel(&conn, eligible.id).unwrap();
+        record_merge_error(
+            &conn,
+            eligible.id,
+            "github_permanent",
+            "dequeue failed",
+            false,
+        )
+        .unwrap();
+        schedule_check_retry(&conn, eligible.id, "sha", 99, 1).unwrap();
+        assert!(is_stuck_cancellation_cleanup(
+            &get_operation(&conn, eligible.id).unwrap().unwrap()
+        ));
+
+        let no_error = enqueue_merge_operation(&conn, 2).unwrap();
+        mark_merge_progress(&conn, no_error.id, "sha", true, false, None).unwrap();
+        set_queue_metadata(&conn, no_error.id, Some(2), true).unwrap();
+        request_cancel(&conn, no_error.id).unwrap();
+        record_merge_error(&conn, no_error.id, "github_permanent", "\t\n", false).unwrap();
+
+        let no_cleanup = enqueue_merge_operation(&conn, 3).unwrap();
+        mark_merge_progress(&conn, no_cleanup.id, "sha", true, false, None).unwrap();
+        request_cancel(&conn, no_cleanup.id).unwrap();
+        record_merge_error(
+            &conn,
+            no_cleanup.id,
+            "github_permanent",
+            "cleanup failed",
+            false,
+        )
+        .unwrap();
+
+        let delegated = enqueue_merge_operation(&conn, 4).unwrap();
+        mark_merge_progress(&conn, delegated.id, "sha", true, false, None).unwrap();
+        set_queue_metadata(&conn, delegated.id, Some(3), true).unwrap();
+        record_merge_error(
+            &conn,
+            delegated.id,
+            "github_permanent",
+            "cleanup failed",
+            false,
+        )
+        .unwrap();
+
+        for id in [no_error.id, no_cleanup.id, delegated.id] {
+            assert_eq!(
+                forget_stuck_merge_operation(&conn, id).unwrap(),
+                ForgetStuckOperationOutcome::NotEligible
+            );
+            assert!(get_operation(&conn, id).unwrap().is_some());
+        }
+        assert_eq!(
+            forget_stuck_merge_operation(&conn, i64::MAX).unwrap(),
+            ForgetStuckOperationOutcome::NotFound
+        );
+
+        assert_eq!(
+            forget_stuck_merge_operation(&conn, eligible.id).unwrap(),
+            ForgetStuckOperationOutcome::Deleted
+        );
+        assert!(get_operation(&conn, eligible.id).unwrap().is_none());
+        let remaining_events: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dependabot_merge_operation_events WHERE operation_id = ?1",
+                [eligible.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let remaining_retries: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dependabot_merge_check_retries WHERE operation_id = ?1",
+                [eligible.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining_events, 0);
+        assert_eq!(remaining_retries, 0);
     }
 
     #[test]
