@@ -680,10 +680,12 @@ struct PullListItem {
     updated_at: String,
 }
 
-/// Whether `login` is a Dependabot bot author (`dependabot[bot]`, or the legacy
-/// `dependabot-preview[bot]`).
-pub fn is_dependabot_author(login: &str) -> bool {
-    matches!(login, "dependabot[bot]" | "dependabot-preview[bot]")
+/// Whether `login` is a bot author trusted for Dependabot module automation.
+pub fn is_trusted_automation_author(login: &str) -> bool {
+    matches!(
+        login,
+        "dependabot[bot]" | "dependabot-preview[bot]" | "github-actions[bot]"
+    )
 }
 
 /// Soft reserve for the admin enumeration: stop before the `core` bucket dips below this
@@ -741,7 +743,7 @@ async fn get_page<T: for<'de> serde::Deserialize<'de>>(
     Ok((body, next))
 }
 
-/// List the open, Dependabot-authored pull requests in one repository (paginated + paced).
+/// List open pull requests from supported automation bots in one repository (paginated + paced).
 async fn list_open_dependabot_prs(
     client: &reqwest::Client,
     token: &str,
@@ -757,7 +759,7 @@ async fn list_open_dependabot_prs(
             get_page(client, &url, token, "pull requests", rate).await?;
         for p in page {
             let author = p.user.map(|u| u.login).unwrap_or_default();
-            if !is_dependabot_author(&author) {
+            if !is_trusted_automation_author(&author) {
                 continue;
             }
             prs.push(DependabotPr {
@@ -787,8 +789,8 @@ async fn list_open_dependabot_prs(
 }
 
 /// Fetch open Dependabot PRs across the given `repos` (the persistent, notification-sourced
-/// repo list). For each repo, lists its open PRs and keeps the Dependabot-authored ones. Uses
-/// only the core REST API, serial + paced (see `DEPENDABOT_REQUEST_DELAY`), so it avoids
+/// repo list). For each repo, lists its open PRs and keeps those from supported automation bots.
+/// Uses only the core REST API, serial + paced (see `DEPENDABOT_REQUEST_DELAY`), so it avoids
 /// tripping GitHub's secondary rate limit. `on_progress(scanned, found)` reports live progress.
 ///
 /// Per-repo results are reported in `ok_repos` (fetched successfully) and `failed_repos` (a
@@ -960,7 +962,7 @@ struct MergeBase {
 fn merge_pull_has_trusted_author(pull: &MergePull) -> bool {
     pull.user
         .as_ref()
-        .is_some_and(|user| is_dependabot_author(&user.login))
+        .is_some_and(|user| is_trusted_automation_author(&user.login))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1245,7 +1247,8 @@ pub async fn fetch_pull_head(
 /// The caller owns durable state and must not hold SQLite while this function runs.
 ///
 /// Shared entry point for both merge strategies (requirement 3): it verifies that the live pull
-/// request is Dependabot-authored and secures the PAT's approval at the exact current head. Only
+/// request has a trusted automation author and secures the PAT's approval at the exact current
+/// head. Only
 /// when `strategy` is [`MergeQueueStrategy::Direct`] does it then issue the direct
 /// `PUT /merge` / `PUT /update-branch` mutations; for `MergeQueue`/`Unknown` it stops after
 /// author verification and approval and returns [`MergeRemoteOutcome::Prepared`] so the
@@ -1293,8 +1296,8 @@ where
     if !merge_pull_has_trusted_author(&pull) {
         return Ok(MergeRemoteResult {
             outcome: MergeRemoteOutcome::PermanentFailure {
-                code: "not_dependabot",
-                reason: "The live PR author is not Dependabot.".to_string(),
+                code: "untrusted_author",
+                reason: "The live PR author is not a supported automation bot.".to_string(),
             },
             rates,
         });
@@ -2991,13 +2994,14 @@ mod tests {
     }
 
     #[test]
-    fn is_dependabot_author_matches_bot_logins() {
-        assert!(is_dependabot_author("dependabot[bot]"));
-        assert!(is_dependabot_author("dependabot-preview[bot]"));
-        // A human or another bot is not Dependabot.
-        assert!(!is_dependabot_author("octocat"));
-        assert!(!is_dependabot_author("renovate[bot]"));
-        assert!(!is_dependabot_author("dependabot")); // not a bot login
+    fn trusted_automation_author_matches_supported_bot_logins() {
+        assert!(is_trusted_automation_author("dependabot[bot]"));
+        assert!(is_trusted_automation_author("dependabot-preview[bot]"));
+        assert!(is_trusted_automation_author("github-actions[bot]"));
+        assert!(!is_trusted_automation_author("octocat"));
+        assert!(!is_trusted_automation_author("renovate[bot]"));
+        assert!(!is_trusted_automation_author("github-actions"));
+        assert!(!is_trusted_automation_author("dependabot"));
     }
 
     #[test]
@@ -3140,6 +3144,10 @@ mod tests {
         assert!(merge_pull_has_trusted_author(&pull(
             "dependabot[bot]",
             "head-pushed-by-another-workflow"
+        )));
+        assert!(merge_pull_has_trusted_author(&pull(
+            "github-actions[bot]",
+            "head-pushed-by-a-human"
         )));
         assert!(!merge_pull_has_trusted_author(&pull(
             "octocat",

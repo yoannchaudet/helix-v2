@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { openApp, defaultFixtures } from "./tauri-mock.js";
 
-/* The read-only Dependabot module: it lists open Dependabot PRs grouped by repository with a
+/* The Dependabot module lists supported automation PRs grouped by repository with a
  * repo-only sidebar and a merge-readiness pill, opens a PR in the browser, and has NO
  * bookmark / mark-done affordances. Backed by the mocked `list_dependabot` / `sync_dependabot`. */
 
@@ -12,7 +12,7 @@ async function openDependabot(page, fixtures = defaultFixtures()) {
   await page.waitForSelector("#dependabot .repo-section, #dependabot .inbox-empty");
 }
 
-test("lists open Dependabot PRs grouped by repository", async ({ page }) => {
+test("lists open automation PRs grouped by repository", async ({ page }) => {
   await openDependabot(page);
 
   // Two repos from the fixture, most-recent-first (acme/widgets has the newest PR).
@@ -25,6 +25,9 @@ test("lists open Dependabot PRs grouped by repository", async ({ page }) => {
   await expect(page.locator('#dependabot .n-row[data-pr-id="101"]')).toContainText("Target: main");
   await expect(page.locator('#dependabot .n-row[data-pr-id="102"]')).toContainText(
     "Target: release/v2",
+  );
+  await expect(page.locator('#dependabot .n-row[data-pr-id="101"]')).toContainText(
+    "github-actions",
   );
 });
 
@@ -437,11 +440,13 @@ test("auto-syncs on first open (calls sync_dependabot)", async ({ page }) => {
   expect(calls.some((c) => c.cmd === "sync_dependabot")).toBe(true);
 });
 
-test("empty state when there are no Dependabot PRs", async ({ page }) => {
+test("empty state when there are no automation PRs", async ({ page }) => {
   await openDependabot(page, { ...defaultFixtures(), dependabot: [] });
 
   await expect(page.locator("#dependabot .inbox-empty")).toBeVisible();
-  await expect(page.locator("#dependabot")).toContainText("No open Dependabot pull requests");
+  await expect(page.locator("#dependabot")).toContainText(
+    "No open Dependabot or GitHub Actions pull requests",
+  );
   await expect(page.locator("#dependabot-repo-list .source-empty")).toBeVisible();
 });
 

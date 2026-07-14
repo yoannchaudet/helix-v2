@@ -1,7 +1,7 @@
 /* Pure HTML templating for the Dependabot module: given a PR (or repo group), return the
  * markup string. No DOM access, no module state — so these are unit-testable and the
  * stateful controller (`dependabot.js`) owns all wiring/rendering. Reuses the shared row
- * building blocks (`authorTag`, `mergeStateBadge`, `pill`) so a Dependabot PR row reads like
+ * building blocks (`authorTag`, `mergeStateBadge`, `pill`) so an automation PR row reads like
  * a notification row, minus the bookmark/done affordances. */
 
 import { html, rawHtml } from "./dom.js";
@@ -58,7 +58,7 @@ function operationBadge(operation) {
   );
 }
 
-/** One Dependabot PR as an openable row. Activating it opens `html_url` in the browser
+/** One supported automation PR as an openable row. Activating it opens `html_url` in the browser
  *  (wired by the controller). The merge-readiness pill reuses `mergeStateBadge` with a fixed
  *  PullRequest/open context (the module only ever lists open PRs). */
 export function prRow(pr) {
@@ -106,7 +106,7 @@ export function prRow(pr) {
 }
 
 /** Repo section header: the repository name (an `<h2>` so screen-reader users can navigate
- *  by heading) plus a count of its open Dependabot PRs. No mark-done affordance (read-only). */
+ *  by heading) plus a count of its open automation PRs. No mark-done affordance. */
 export function repoHeader(group) {
   const counts = `<span class="repo-counts">${group.prs.length}</span>`;
   return html`
@@ -325,7 +325,7 @@ export function operationsList(operations, options = {}) {
   if (!operations.length) {
     return html`<div class="inbox-empty">
       <p class="inbox-empty-title">No merge operations yet.</p>
-      <p class="inbox-empty-sub">Queue a merge from a Dependabot pull request.</p>
+      <p class="inbox-empty-sub">Queue a merge from a supported automation pull request.</p>
     </div>`;
   }
   const active = operations.filter(isActiveMergeOperation);

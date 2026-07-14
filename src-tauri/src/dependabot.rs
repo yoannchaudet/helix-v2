@@ -3,9 +3,10 @@
 //!
 //! Mirrors `sync.rs` for its own domain (see `docs/design.md` — SQLite is the source of
 //! truth). The repo list (`dependabot_repos`) is fed from the notifications Helix fetches
-//! (`sync::store_resolved_subject` records a repo once it has a Dependabot-authored
-//! notification); `github::fetch_dependabot_prs_for_repos` then lists each repo's open
-//! Dependabot PRs — no search API. `store_prs` upserts the current results and, when the fetch
+//! (`sync::store_resolved_subject` records a repo once it has a notification from a supported
+//! automation bot); `github::fetch_dependabot_prs_for_repos` then lists each repo's open
+//! Dependabot and GitHub Actions bot PRs — no search API. `store_prs` upserts the current results
+//! and, when the fetch
 //! was complete, reconciles away rows that disappeared upstream (a PR that merged/closed no
 //! longer appears, so it's deleted). The module reads offline-first via `list_by_repo`; GitHub
 //! is only contacted on a sync. Merge-readiness (`mergeable_state`) is resolved lazily per PR —

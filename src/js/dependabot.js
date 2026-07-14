@@ -26,7 +26,8 @@ import {
   createListFocusRetainer,
 } from "./list-kit.js";
 
-/* The Dependabot module: a read-only list of open Dependabot PRs grouped by repository, its
+/* The Dependabot module: a list of open Dependabot and GitHub Actions bot PRs grouped by
+ * repository, its
  * repo-only sidebar refinement, keyboard navigation, and its own sync flow. Pure row/section
  * HTML lives in `dependabot-view.js`; the pure repo pipeline in `dependabot-model.js`; this
  * module owns all state and DOM wiring. Deliberately trimmed vs. the inbox: no smart filters,
@@ -164,16 +165,16 @@ function visibleGroups() {
 function emptyDependabot() {
   if (!isAuthenticated()) {
     return html`<div class="inbox-empty">
-      <p>Connect your GitHub account to see your Dependabot pull requests.</p>
+      <p>Connect your GitHub account to see Dependabot and GitHub Actions pull requests.</p>
     </div>`;
   }
   return html`<div class="inbox-empty">
     <img class="inbox-empty-art" src="/assets/helix-muted.svg" alt="" width="116" height="116" />
-    <p class="inbox-empty-title">No open Dependabot pull requests.</p>
+    <p class="inbox-empty-title">No open Dependabot or GitHub Actions pull requests.</p>
     <p class="inbox-empty-sub">
       Repositories appear here as they show up in your notifications, so sync
       <span class="inbox-empty-hint">Notifications</span> to populate the list — then their open
-      Dependabot PRs are collected here.
+      Dependabot and GitHub Actions bot PRs are collected here.
     </p>
   </div>`;
 }
@@ -506,7 +507,7 @@ function selectOperations() {
 
 /* --------------------------------- Loading -------------------------------- */
 
-/** Load the cached Dependabot PRs from SQLite and render (offline-first; no network). */
+/** Load cached supported automation PRs from SQLite and render (offline-first; no network). */
 export async function loadDependabot() {
   const generation = ++loadGeneration;
   try {
@@ -851,7 +852,7 @@ function renderIdleStatus() {
  *  until the `finally` block so re-entrancy is reliably gated across the whole flow. */
 export async function syncDependabot() {
   if (!isAuthenticated()) {
-    setDepProgress("Connect a GitHub token to sync Dependabot.", "error");
+    setDepProgress("Connect a GitHub token to sync automation pull requests.", "error");
     return;
   }
   if (syncing) {
@@ -954,7 +955,7 @@ export function initDependabot() {
     })
     .catch(() => renderIdleStatus());
 
-  // Live progress during a sync (repos scanned / Dependabot PRs found).
+  // Live progress during a sync (repos scanned / supported automation PRs found).
   listen("dependabot:progress", (event) => {
     if (!syncing) return;
     const { found } = event.payload ?? {};

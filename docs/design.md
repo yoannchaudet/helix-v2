@@ -333,7 +333,7 @@ the named segments when the active module changes; `⌘1` / `⌘2` jump straight
 position.
 - **Notifications** module — the inbox described below (the original v1 feature). It owns the
   smart-filter + repository **sidebar**.
-- **Dependabot** module — lists cached open Dependabot PRs by repository and owns a
+- **Dependabot** module — lists cached open Dependabot and GitHub Actions bot PRs by repository and owns a
   repository/Operations sidebar. Row-level merge actions create durable operations;
   Operations shows active FIFO work plus the latest 100 terminal results, grouped by repository
   within the Active and Recent sections. Expanding an
@@ -423,10 +423,11 @@ module's **sidebar + content** split:
     manages. A user PAT cannot rerequest third-party check suites, so failed external CI is
     surfaced as needing attention instead of silently retried.
 - The Dependabot module does **not** use the search API and has no account/repo picker. Its
-  repo list is built lazily "for free" from your notifications: when a **Dependabot-authored**
-  PR notification is resolved, that repo is remembered in `dependabot_repos` (which — unlike
-  `repos` — is not pruned when notifications clear). Each sync lists those repos' open
-  Dependabot PRs via the core REST API, paced serially. A repo that consistently 404s/403s
+  repo list is built lazily "for free" from your notifications: when a PR notification authored
+  by **Dependabot or GitHub Actions** is resolved, that repo is remembered in `dependabot_repos`
+  (which — unlike `repos` — is not pruned when notifications clear). Each sync lists those repos'
+  open PRs from either supported bot via the core REST API, paced serially. A repo that
+  consistently 404s/403s
   (renamed/deleted/access revoked) is dropped after a few tries.
 - The Dependabot module's **last successful sync time** is persisted (settings key
   `dependabot_last_sync_at`) so the "Synced …" label and the auto-sync staleness gate survive
@@ -437,9 +438,10 @@ module's **sidebar + content** split:
   row, and snapshots it onto the durable operation so Operations retains the same context.
   Target branches are informational and do not partition or otherwise change the repo FIFO.
   At the head, Helix verifies that the open/non-draft/non-conflicting PR is still authored by
-  Dependabot, approves the current head SHA, and auto-detects the base branch's merge strategy.
+  Dependabot or GitHub Actions, approves the current head SHA, and auto-detects the base branch's
+  merge strategy.
   Helix trusts the current head of that PR regardless of whether later commits were pushed by
-  Dependabot, another workflow, or a human; it does not validate per-commit provenance. Direct
+  the original bot, another workflow, or a human; it does not validate per-commit provenance. Direct
   merges update a behind branch, then approve its new head. A ready direct PR is merged with the
   exact accepted SHA using the first repository-enabled method in preference order: squash,
   rebase, then merge commit. If
@@ -453,7 +455,7 @@ module's **sidebar + content** split:
   90-minute deadline; pending checks keep waiting, while failed external CI needs human attention.
   GitHub Actions runs held with `action_required` are not failures: Helix verifies that the live
   PR still has the exact accepted head, then automatically approves each run under the same
-  Dependabot-author trust boundary used by the merge operation. Approval uses Actions write
+  supported-automation-author trust boundary used by the merge operation. Approval uses Actions write
   permission and is cancellation-guarded; GitHub's already-approved/no-longer-waiting responses
   are reconciled by polling rather than treated as operation failures.
   Before dispatching a durable retry, Helix verifies that its recorded head SHA still matches the
@@ -476,7 +478,7 @@ module's **sidebar + content** split:
   Helix deletes only its local operation, event, and retry records; it does not call GitHub, close
   the PR, or prove that remote queue cleanup succeeded. This unblocks Helix's repository FIFO and
   intentionally stops further cancellation attempts for that operation.
-- An open Dependabot PR can also be **discarded** from its PR row or an active operation row after
+- An open supported automation PR can also be **discarded** from its PR row or an active operation row after
   an explicit in-app confirmation. Discard is not a durable operation: Helix keeps only an
   in-memory intent while the app is running, reuses the normal cancellation path (including remote
   auto-merge/queue cleanup), then closes the PR with GitHub's pull-request update API. A restart
