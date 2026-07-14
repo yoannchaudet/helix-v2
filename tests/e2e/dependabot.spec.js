@@ -176,6 +176,44 @@ test("cancels an active merge from Operations", async ({ page }) => {
   expect(calls.some((call) => call.cmd === "cancel_dependabot_merge")).toBe(true);
 });
 
+test("forgets only a stuck local operation after warning that GitHub may still merge", async ({
+  page,
+}) => {
+  const operation = mergeOperation({
+    id: 17,
+    state: "cancel_requested",
+    phase: "waiting_merge_queue",
+    strategy: "merge_queue",
+    last_error: "GraphQL dequeue failed",
+    merge_queue_position: 1,
+    auto_merge_enabled: true,
+  });
+  await openDependabot(page, { ...defaultFixtures(), mergeOperations: [operation] });
+  await page.locator('#dependabot-filter-list [data-filter="operations"]').click();
+  const row = page.locator('#dependabot .operation-row[data-operation-id="17"]');
+  await expect(row.locator(".dep-operation-cancel")).toHaveCount(0);
+  await expect(row.locator(".dep-operation-forget")).toHaveCount(1);
+  await expect(row.locator(".dep-discard-action")).toHaveCount(1);
+
+  await row.locator(".dep-operation-forget").click();
+  await expect(
+    page.getByRole("menuitem", { name: /Helix will stop retrying.*GitHub may still merge/ }),
+  ).toBeVisible();
+  await page.getByRole("menuitem", { name: "Cancel" }).click();
+  await expect(row).toHaveCount(1);
+  let calls = await page.evaluate(() => window.__TAURI_CALLS__);
+  expect(calls.some((call) => call.cmd === "forget_stuck_dependabot_merge")).toBe(false);
+
+  await row.locator(".dep-operation-forget").click();
+  await page.getByRole("menuitem", { name: /Confirm: forget.*GitHub may still merge/ }).click();
+  await expect(row).toHaveCount(0);
+  await page.locator('#dependabot-filter-list [data-filter="all"]').click();
+  await expect(page.locator('#dependabot .n-row[data-pr-id="101"]')).toHaveCount(1);
+  calls = await page.evaluate(() => window.__TAURI_CALLS__);
+  expect(calls.some((call) => call.cmd === "forget_stuck_dependabot_merge")).toBe(true);
+  expect(calls.some((call) => call.cmd === "discard_dependabot_pr")).toBe(false);
+});
+
 test("discards from an active operation after cancelling it safely", async ({ page }) => {
   const operation = mergeOperation({
     id: 17,

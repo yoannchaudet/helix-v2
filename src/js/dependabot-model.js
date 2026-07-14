@@ -93,6 +93,14 @@ export function isActiveMergeOperation(operation) {
   return ACTIVE_MERGE_STATES.has(operation.state);
 }
 
+export function isStuckCancellationCleanup(operation) {
+  return (
+    operation.state === "cancel_requested" &&
+    Boolean(operation.last_error?.trim()) &&
+    (operation.auto_merge_enabled === true || operation.merge_queue_position != null)
+  );
+}
+
 /** Active work stays first in FIFO order; terminal history is newest first. */
 export function sortMergeOperations(operations) {
   return [...operations].sort((a, b) => {

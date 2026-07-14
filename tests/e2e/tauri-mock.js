@@ -339,6 +339,21 @@ export function installTauriMock(fixtures) {
       emit("dependabot:operations-changed", null);
       return { ...operation };
     },
+    forget_stuck_dependabot_merge: ({ operationId }) => {
+      const index = state.mergeOperations.findIndex((operation) => operation.id === operationId);
+      if (index < 0) throw new Error("Merge operation not found");
+      const operation = state.mergeOperations[index];
+      const eligible =
+        operation.state === "cancel_requested" &&
+        Boolean(operation.last_error?.trim()) &&
+        (operation.auto_merge_enabled === true || operation.merge_queue_position != null);
+      if (!eligible) throw new Error("Operation is not a stuck cancellation");
+      state.mergeOperations.splice(index, 1);
+      delete state.mergeOperationDetails[String(operationId)];
+      recomputeMergeQueuePositions();
+      emit("dependabot:operations-changed", null);
+      return null;
+    },
     discard_dependabot_pr: ({ prId }) => {
       const operation = state.mergeOperations.find(
         (candidate) => candidate.pr_id === prId && activeMergeStates.has(candidate.state),
@@ -387,8 +402,13 @@ export function installTauriMock(fixtures) {
           operation.delegated_at = new Date().toISOString();
           delegatedRepos.add(operation.repo_full_name);
         } else if (operation.state === "cancel_requested") {
-          operation.state = "cancelled";
-          operation.terminal_at = new Date().toISOString();
+          const cleanupStuck =
+            Boolean(operation.last_error?.trim()) &&
+            (operation.auto_merge_enabled === true || operation.merge_queue_position != null);
+          if (!cleanupStuck) {
+            operation.state = "cancelled";
+            operation.terminal_at = new Date().toISOString();
+          }
         }
       }
       recomputeMergeQueuePositions();

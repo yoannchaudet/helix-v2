@@ -471,7 +471,11 @@ module's **sidebar + content** split:
   dequeues when necessary; a merge request already dispatched to GitHub still wins the race. If a
   cancellation's remote cleanup fails, the operation stays `cancel_requested` and retries on later
   passes — it only terminalizes as cancelled once cleanup succeeds, keeping the repo's next PR
-  blocked meanwhile.
+  blocked meanwhile. An operation in that state with an explicit cleanup error exposes a
+  destructive **forget locally** escape hatch. After warning that GitHub may still merge the PR,
+  Helix deletes only its local operation, event, and retry records; it does not call GitHub, close
+  the PR, or prove that remote queue cleanup succeeded. This unblocks Helix's repository FIFO and
+  intentionally stops further cancellation attempts for that operation.
 - An open Dependabot PR can also be **discarded** from its PR row or an active operation row after
   an explicit in-app confirmation. Discard is not a durable operation: Helix keeps only an
   in-memory intent while the app is running, reuses the normal cancellation path (including remote

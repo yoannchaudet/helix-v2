@@ -11,6 +11,7 @@ import { authorTag, mergeStateBadge } from "./inbox-view.js";
 import {
   buildOperationDetailModel,
   isActiveMergeOperation,
+  isStuckCancellationCleanup,
   repoDomId,
   STRATEGIES,
 } from "./dependabot-model.js";
@@ -20,6 +21,7 @@ const PR_BADGE = pill("PR", "badge badge--pr");
 const MERGE_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 3v6a3 3 0 003 3h2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="4" cy="3" r="1.5" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="11" cy="12" r="1.5" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M9 3h3v3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 const CANCEL_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4.5 4.5l7 7m0-7l-7 7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`;
 const DISCARD_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3.5 5h9M6 5V3.5h4V5m1.5 0-.5 8H5L4.5 5M6.5 7.5v3M9.5 7.5v3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+const FORGET_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3 4.5h6.5a3.5 3.5 0 110 7H7M5 2.5L3 4.5l2 2M10.5 8.5l3 3m0-3l-3 3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 const CHEVRON_ICON = `<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
 const OP_LABELS = {
@@ -260,12 +262,23 @@ export function operationRow(operation, options = {}) {
       : "";
   const time = operation.terminal_at || operation.delegated_at || operation.enqueued_at;
   const target = operation.base_ref ? ` · Target: ${operation.base_ref}` : "";
-  const cancel = isActiveMergeOperation(operation)
+  const stuckCancellation = isStuckCancellationCleanup(operation);
+  const cancel =
+    isActiveMergeOperation(operation) && operation.state !== "cancel_requested"
+      ? iconButton({
+          icon: CANCEL_ICON,
+          className: "dep-operation-cancel",
+          label: `Cancel merge for "${operation.title}"`,
+          attrs: html`data-operation-id="${operation.id}"`,
+        })
+      : "";
+  const forget = stuckCancellation
     ? iconButton({
-        icon: CANCEL_ICON,
-        className: "dep-operation-cancel",
-        label: `Cancel merge for "${operation.title}"`,
-        attrs: html`data-operation-id="${operation.id}"`,
+        icon: FORGET_ICON,
+        className: "dep-operation-forget",
+        title: "Forget stuck operation locally",
+        label: `Forget stuck merge operation for "${operation.title}"`,
+        attrs: html`data-operation-id="${operation.id}" data-operation-title="${operation.title}"`,
       })
     : "";
   const discard = isActiveMergeOperation(operation)
@@ -289,6 +302,7 @@ export function operationRow(operation, options = {}) {
       </div>
       ${rawHtml(disclosure)}
       ${rawHtml(cancel)}
+      ${rawHtml(forget)}
       ${rawHtml(discard)}
     </li>`;
   if (!expanded) return row;
