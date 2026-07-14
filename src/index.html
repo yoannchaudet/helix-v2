@@ -140,9 +140,9 @@
       </section>
 
       <!-- ============================== Dependabot ============================= -->
-      <!-- Read-only module: lists open Dependabot PRs across accessible repos, grouped by
-           repository, with a merge-readiness pill. Same sync button as Notifications, but no
-           filters, bookmarks, or mark-done. Wired by dependabot.js. -->
+      <!-- Lists open Dependabot and GitHub Actions bot PRs across accessible repos, grouped by
+           repository, with a merge-readiness pill and durable merge actions. Same sync button as
+           Notifications, but no filters, bookmarks, or mark-done. Wired by dependabot.js. -->
       <section id="view-dependabot" class="pane" hidden aria-labelledby="dependabot-view-title">
         <header class="toolbar" data-tauri-drag-region>
           <h1 class="toolbar-title" id="dependabot-view-title">Dependabot</h1>
@@ -161,7 +161,7 @@
         <div class="inbox" id="dependabot">
           <div class="loader">
             <span class="spinner" aria-hidden="true"></span>
-            <span>Loading Dependabot pull requests…</span>
+            <span>Loading automation pull requests…</span>
           </div>
         </div>
       </section>

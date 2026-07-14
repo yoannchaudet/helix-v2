@@ -508,7 +508,7 @@ export function defaultFixtures() {
             number: 40,
             title: "Bump lodash from 4.17.20 to 4.17.21",
             html_url: "https://github.com/octo/hello/pull/40",
-            author: "dependabot[bot]",
+            author: "github-actions[bot]",
             base_ref: "main",
             updated_at: "2026-06-27T10:30:00Z",
             mergeable_state: "clean",

@@ -516,14 +516,13 @@ pub fn store_resolved_subject(
     )?;
 
     // Feed the Dependabot module's persistent repo list. A repo is tracked only once we've
-    // resolved a **Dependabot-authored** notification in it (not just any notification) — the
-    // author is only known here, after resolution. The repo persists even after its
-    // notifications clear (dependabot_repos isn't pruned), so the Dependabot module can keep
-    // scanning it for open Dependabot PRs.
+    // resolved a notification from a supported automation bot in it (not just any notification)
+    // because the author is only known here, after resolution. The repo persists even after its
+    // notifications clear (dependabot_repos isn't pruned), so the module can keep scanning it.
     if subject
         .author
         .as_deref()
-        .is_some_and(crate::github::is_dependabot_author)
+        .is_some_and(crate::github::is_trusted_automation_author)
     {
         let repo: Option<(String, String, String)> = tx
             .query_row(
@@ -910,25 +909,30 @@ mod tests {
         assert_eq!(repos, 2);
 
         // A plain notification does NOT add its repo to the Dependabot list — only a resolved
-        // Dependabot-authored notification does (see `dependabot_repos_track_only_dependabot`).
+        // notification from a trusted automation bot does.
         assert!(crate::dependabot::list_repos(&conn).unwrap().is_empty());
     }
 
     #[test]
-    fn dependabot_repos_track_only_dependabot_and_persist() {
+    fn dependabot_repos_track_supported_automation_bots_and_persist() {
         let mut conn = mem_conn();
         store_notifications(
             &mut conn,
             &[
                 thread("1", 100, "octo/repo-a", "Bump lodash"),
-                thread("2", 200, "octo/repo-b", "A human PR"),
+                thread("2", 200, "octo/repo-b", "Automated release"),
+                thread("3", 300, "octo/repo-c", "A human PR"),
             ],
         )
         .unwrap();
 
-        // Resolve #1 as a Dependabot PR and #2 as a human PR.
+        // Resolve #1 as Dependabot, #2 as GitHub Actions, and #3 as a human.
         let dependabot = ResolvedSubject {
             author: Some("dependabot[bot]".to_string()),
+            ..Default::default()
+        };
+        let github_actions = ResolvedSubject {
+            author: Some("github-actions[bot]".to_string()),
             ..Default::default()
         };
         let human = ResolvedSubject {
@@ -936,25 +940,26 @@ mod tests {
             ..Default::default()
         };
         store_resolved_subject(&conn, "1", &dependabot).unwrap();
-        store_resolved_subject(&conn, "2", &human).unwrap();
+        store_resolved_subject(&conn, "2", &github_actions).unwrap();
+        store_resolved_subject(&conn, "3", &human).unwrap();
 
-        // Only the repo with a Dependabot-authored notification is tracked.
+        // Both supported bot authors are tracked; the human-authored repo is excluded.
         let dep_repos: Vec<String> = crate::dependabot::list_repos(&conn)
             .unwrap()
             .into_iter()
             .map(|r| r.full_name)
             .collect();
-        assert_eq!(dep_repos, vec!["octo/repo-a"]);
+        assert_eq!(dep_repos, vec!["octo/repo-a", "octo/repo-b"]);
 
         // A later sync drops both threads → the notifications `repos` table is pruned, but the
-        // Dependabot list keeps repo-a (it accumulates and isn't pruned).
-        store_notifications(&mut conn, &[thread("9", 300, "octo/repo-c", "x")]).unwrap();
+        // Dependabot list keeps both bot-discovered repos (it accumulates and isn't pruned).
+        store_notifications(&mut conn, &[thread("9", 400, "octo/repo-d", "x")]).unwrap();
         let dep_repos: Vec<String> = crate::dependabot::list_repos(&conn)
             .unwrap()
             .into_iter()
             .map(|r| r.full_name)
             .collect();
-        assert_eq!(dep_repos, vec!["octo/repo-a"]);
+        assert_eq!(dep_repos, vec!["octo/repo-a", "octo/repo-b"]);
     }
 
     #[test]
