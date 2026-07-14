@@ -395,7 +395,7 @@ pub async fn enqueue_dependabot_merge(
     let conn = state.db.0.lock().map_err(|e| e.to_string())?;
     dependabot::enqueue_merge_operation(&conn, pr_id).map_err(|e| {
         if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
-            "This automation PR is not in the local cache. Sync Dependabot and try again."
+            "This automation PR is not in the local cache. Sync the Dependabot module and try again."
                 .to_string()
         } else {
             e.to_string()
@@ -491,7 +491,7 @@ where
         let target = dependabot::get_cached_pr(&conn, pr_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| {
-                "This automation PR is not in the local cache. Sync Dependabot and try again."
+                "This automation PR is not in the local cache. Sync the Dependabot module and try again."
                     .to_string()
             })?;
         let cancelled_operation = match dependabot::get_active_operation_for_pr(&conn, pr_id)
