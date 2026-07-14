@@ -651,7 +651,7 @@ fn phase_explanation(operation: &dependabot::DependabotMergeOperation) -> (Strin
         ),
         dependabot::MergePhase::ApprovingWorkflows => (
             "Approving GitHub Actions workflow runs for the accepted pull request head.".to_string(),
-            "Wait for GitHub to start the approved workflows and publish their checks.".to_string(),
+            "Wait for GitHub to start the released workflows and publish their checks.".to_string(),
         ),
         dependabot::MergePhase::WaitingChecks => (
             "Waiting for required status checks to finish on the pull request.".to_string(),
@@ -2061,8 +2061,8 @@ async fn approve_required_workflows<B: MergeBackend>(
                 op_id,
                 "approving_workflows",
                 "workflow_approval",
-                "approved",
-                &format!("Approved workflow run `{name}`."),
+                "reconciled",
+                &format!("Reconciled workflow approval for `{name}`."),
                 None,
                 Some(head_sha),
                 Some(&approval.run_id.to_string()),
@@ -2086,7 +2086,7 @@ async fn approve_required_workflows<B: MergeBackend>(
             "waiting_checks",
             "workflow_approval",
             "waiting",
-            "Approved the workflow runs; waiting for GitHub to start their checks.",
+            "Reconciled the workflow approvals; waiting for GitHub to start the checks.",
             None,
             Some(head_sha),
             None,
@@ -2096,7 +2096,7 @@ async fn approve_required_workflows<B: MergeBackend>(
         head_sha: head_sha.to_string(),
         approved: true,
         branch_update_requested: false,
-        reason: Some("Approved workflows; waiting for their checks to run.".to_string()),
+        reason: Some("Workflow approvals reconciled; waiting for checks to run.".to_string()),
     }))
 }
 
@@ -4204,7 +4204,7 @@ mod tests {
         assert_eq!(after.phase, "waiting_checks");
         assert_eq!(
             after.failure_reason.as_deref(),
-            Some("Approved workflows; waiting for their checks to run.")
+            Some("Workflow approvals reconciled; waiting for checks to run.")
         );
         let calls = fake.calls();
         assert_eq!(calls.current_head, 1);
@@ -4218,7 +4218,7 @@ mod tests {
             operation_events
                 .iter()
                 .filter(|event| {
-                    event.phase == "approving_workflows" && event.status == "approved"
+                    event.phase == "approving_workflows" && event.status == "reconciled"
                 })
                 .count(),
             2
