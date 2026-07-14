@@ -598,14 +598,15 @@ pub fn forget_stuck_merge_operation(
     if !is_stuck_cancellation_cleanup(&operation) {
         return Ok(ForgetStuckOperationOutcome::NotEligible);
     }
+    let last_error = operation.last_error.as_deref().unwrap_or_default();
 
     let deleted = conn.execute(
         "DELETE FROM dependabot_merge_operations
          WHERE id = ?1
            AND state = 'cancel_requested'
-           AND length(trim(COALESCE(last_error, ''))) > 0
+           AND last_error = ?2
            AND (auto_merge_enabled = 1 OR merge_queue_position IS NOT NULL)",
-        [id],
+        params![id, last_error],
     )?;
     if deleted == 0 {
         return Ok(ForgetStuckOperationOutcome::NotEligible);
@@ -2110,6 +2111,7 @@ mod tests {
         mark_merge_progress(&conn, no_error.id, "sha", true, false, None).unwrap();
         set_queue_metadata(&conn, no_error.id, Some(2), true).unwrap();
         request_cancel(&conn, no_error.id).unwrap();
+        record_merge_error(&conn, no_error.id, "github_permanent", "\t\n", false).unwrap();
 
         let no_cleanup = enqueue_merge_operation(&conn, 3).unwrap();
         mark_merge_progress(&conn, no_cleanup.id, "sha", true, false, None).unwrap();
