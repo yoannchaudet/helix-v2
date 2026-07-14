@@ -451,6 +451,11 @@ module's **sidebar + content** split:
 - Failed GitHub Actions jobs are rerun after a five-minute backoff, once per workflow run attempt,
   with no numeric retry cap. New failed attempts continue until success or the operation's
   90-minute deadline; pending checks keep waiting, while failed external CI needs human attention.
+  GitHub Actions runs held with `action_required` are not failures: Helix verifies that the live
+  PR still has the exact accepted head, then automatically approves each run under the same
+  Dependabot-author trust boundary used by the merge operation. Approval uses Actions write
+  permission and is cancellation-guarded; GitHub's already-approved/no-longer-waiting responses
+  are reconciled by polling rather than treated as operation failures.
   Before dispatching a durable retry, Helix verifies that its recorded head SHA still matches the
   live PR head and retires stale retries without calling GitHub. A run that GitHub says cannot be
   rerun fails only its operation; unrelated repositories continue processing in the same tick.

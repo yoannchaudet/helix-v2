@@ -847,6 +847,7 @@ pub enum MergePhase {
     Validating,
     UpdatingBranch,
     WaitingRequirements,
+    ApprovingWorkflows,
     WaitingChecks,
     RetryScheduled,
     RetryingChecks,
@@ -858,11 +859,12 @@ pub enum MergePhase {
 
 impl MergePhase {
     #[cfg(test)]
-    pub const KNOWN_PHASES: [&'static str; 10] = [
+    pub const KNOWN_PHASES: [&'static str; 11] = [
         "queued",
         "validating",
         "updating_branch",
         "waiting_requirements",
+        "approving_workflows",
         "waiting_checks",
         "retry_scheduled",
         "retrying_checks",
@@ -877,6 +879,7 @@ impl MergePhase {
             "validating" => Self::Validating,
             "updating_branch" => Self::UpdatingBranch,
             "waiting_requirements" => Self::WaitingRequirements,
+            "approving_workflows" => Self::ApprovingWorkflows,
             "waiting_checks" => Self::WaitingChecks,
             "retry_scheduled" => Self::RetryScheduled,
             "retrying_checks" => Self::RetryingChecks,
@@ -893,6 +896,7 @@ impl MergePhase {
             Self::Validating => "validating",
             Self::UpdatingBranch => "updating_branch",
             Self::WaitingRequirements => "waiting_requirements",
+            Self::ApprovingWorkflows => "approving_workflows",
             Self::WaitingChecks => "waiting_checks",
             Self::RetryScheduled => "retry_scheduled",
             Self::RetryingChecks => "retrying_checks",
