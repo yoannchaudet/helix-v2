@@ -57,6 +57,7 @@ let statusLoaded = Promise.resolve();
 let operationPollTimer = null;
 let operationPollElapsed = 0;
 let operationTicking = false;
+let pendingNotificationCleanupCount = 0;
 let loadGeneration = 0;
 let pollStartGeneration = 0;
 let expandedOperationId = null;
@@ -165,16 +166,16 @@ function visibleGroups() {
 function emptyDependabot() {
   if (!isAuthenticated()) {
     return html`<div class="inbox-empty">
-      <p>Connect your GitHub account to see Dependabot and GitHub Actions pull requests.</p>
+      <p>Connect your GitHub account to see automation pull requests.</p>
     </div>`;
   }
   return html`<div class="inbox-empty">
     <img class="inbox-empty-art" src="/assets/helix-muted.svg" alt="" width="116" height="116" />
-    <p class="inbox-empty-title">No open Dependabot or GitHub Actions pull requests.</p>
+    <p class="inbox-empty-title">No open automation pull requests.</p>
     <p class="inbox-empty-sub">
       Repositories appear here as they show up in your notifications, so sync
       <span class="inbox-empty-hint">Notifications</span> to populate the list — then their open
-      Dependabot and GitHub Actions bot PRs are collected here.
+      Pull requests from supported automation bots are collected here.
     </p>
   </div>`;
 }
@@ -447,13 +448,13 @@ function renderTitle() {
   const title = $("#dependabot-view-title");
   if (!title) return;
   if (activeView === "operations") {
-    title.innerHTML = html`Dependabot<span class="crumb-sep" aria-hidden="true">›</span><span class="crumb-repo">Operations</span>`;
-    title.setAttribute("aria-label", "Dependabot, merge operations");
+    title.innerHTML = html`Automation PRs<span class="crumb-sep" aria-hidden="true">›</span><span class="crumb-repo">Operations</span>`;
+    title.setAttribute("aria-label", "Automation PRs, merge operations");
   } else if (activeRepo != null) {
-    title.innerHTML = html`Dependabot<span class="crumb-sep" aria-hidden="true">›</span><span class="crumb-repo">${activeRepo}</span>`;
-    title.setAttribute("aria-label", `Dependabot, repository ${activeRepo}`);
+    title.innerHTML = html`Automation PRs<span class="crumb-sep" aria-hidden="true">›</span><span class="crumb-repo">${activeRepo}</span>`;
+    title.setAttribute("aria-label", `Automation PRs, repository ${activeRepo}`);
   } else {
-    title.textContent = "Dependabot";
+    title.textContent = "Automation PRs";
     title.removeAttribute("aria-label");
   }
 }
@@ -463,13 +464,13 @@ function announceView() {
   if (activeView === "operations") {
     const count = mergeOperations.length;
     enqueueAnnounce(
-      `Dependabot merge operations, ${count} ${count === 1 ? "operation" : "operations"}.`,
+      `Automation PR merge operations, ${count} ${count === 1 ? "operation" : "operations"}.`,
     );
     return;
   }
   const count = totalPrs(visibleGroups());
   const noun = count === 1 ? "pull request" : "pull requests";
-  const where = activeRepo != null ? `Dependabot, repository ${activeRepo}` : "Dependabot";
+  const where = activeRepo != null ? `Automation PRs, repository ${activeRepo}` : "Automation PRs";
   enqueueAnnounce(`${where}, ${count} ${noun}.`);
 }
 
@@ -700,7 +701,7 @@ const nav = createRowNavigator({
 });
 
 async function processMergeOperations() {
-  if (!isAuthenticated() || operationTicking || !activeMergeCount(mergeOperations)) return;
+  if (!isAuthenticated() || operationTicking || !hasPendingAutomationWork()) return;
   if (Date.now() < dependabotMergePoll.backoffUntilMs) return;
   operationTicking = true;
   operationPollElapsed = 0;
@@ -717,6 +718,7 @@ async function processMergeOperations() {
 }
 
 function applyMergeStatus(status) {
+  pendingNotificationCleanupCount = Number(status.pending_notification_cleanup_count) || 0;
   dependabotMergePoll.intervalSeconds =
     Number(status.poll_interval_s) || dependabotMergePoll.intervalSeconds;
   dependabotMergePoll.minIntervalS =
@@ -725,8 +727,12 @@ function applyMergeStatus(status) {
   dependabotMergePoll.backoffUntilMs = Date.parse(status.backoff_until) || 0;
 }
 
+function hasPendingAutomationWork() {
+  return activeMergeCount(mergeOperations) > 0 || pendingNotificationCleanupCount > 0;
+}
+
 async function operationPollTick() {
-  if (!isAuthenticated() || operationTicking || !activeMergeCount(mergeOperations)) return;
+  if (!isAuthenticated() || operationTicking || !hasPendingAutomationWork()) return;
   if (Date.now() < dependabotMergePoll.backoffUntilMs) return;
   operationPollElapsed += 1;
   const interval = Math.max(
@@ -763,7 +769,7 @@ export async function startDependabotMergePolling() {
     }
   }
   operationPollTimer = setInterval(operationPollTick, POLL_TICK_MS);
-  if (activeMergeCount(mergeOperations)) processMergeOperations();
+  if (hasPendingAutomationWork()) processMergeOperations();
 }
 
 export function stopDependabotMergePolling(clearPendingDiscards = true) {
@@ -863,7 +869,7 @@ export async function syncDependabot() {
   syncing = true;
   setDepStatus("pending", "Syncing…");
   setDepProgress("Starting…");
-  enqueueAnnounce("Dependabot sync started.");
+  enqueueAnnounce("Automation PR sync started.");
   try {
     const result = await invoke("sync_dependabot");
     lastSyncAt = Date.now();
@@ -889,7 +895,7 @@ export async function syncDependabot() {
       ? "GitHub is rate-limiting requests right now. Wait a few minutes, then sync again."
       : raw;
     setDepProgress(friendly, "error");
-    enqueueAnnounce("Dependabot sync failed.");
+    enqueueAnnounce("Automation PR sync failed.");
   } finally {
     // Only now clear the in-flight flag — kept true through the UI updates + loadDependabot
     // above so a quick `r`/re-trigger can't start a concurrent sync.
@@ -983,12 +989,12 @@ registerModule("dependabot", {
   deactivate: onDependabotClosed,
   shortcuts: [
     {
-      group: "Dependabot",
+      group: "Automation PRs",
       items: [
         { keys: ["j", "↓"], desc: "Next pull request" },
         { keys: ["k", "↑"], desc: "Previous pull request" },
         { keys: ["Enter"], desc: "Open in browser" },
-        { keys: ["r"], desc: "Sync Dependabot" },
+        { keys: ["r"], desc: "Sync Automation PRs" },
       ],
     },
   ],

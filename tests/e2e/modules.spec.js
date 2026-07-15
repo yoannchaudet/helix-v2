@@ -17,6 +17,7 @@ test("the left-side module bar shows both modules and the active indicator", asy
   expect(chromeOrder).toEqual(["picker", "brand", "actions"]);
 
   await expect(page.locator(".module-tab")).toHaveCount(2);
+  await expect(page.locator('.module-tab[data-module="dependabot"]')).toHaveText("Automation PRs");
   await expect(page.locator(".module-picker-indicator")).toHaveCount(1);
   await expect(page.locator(".module-picker-indicator")).toHaveAttribute("aria-hidden", "true");
   await expect(page.locator(".module-picker-indicator")).toHaveCSS("pointer-events", "none");

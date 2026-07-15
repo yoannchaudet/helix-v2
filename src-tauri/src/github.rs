@@ -680,12 +680,16 @@ struct PullListItem {
     updated_at: String,
 }
 
-/// Whether `login` is a bot author trusted for Dependabot module automation.
+/// Canonical GitHub logins trusted by the Automation PRs module.
+pub const TRUSTED_AUTOMATION_AUTHORS: &[&str] = &[
+    "dependabot[bot]",
+    "dependabot-preview[bot]",
+    "github-actions[bot]",
+];
+
+/// Whether `login` is a bot author trusted for Automation PR processing.
 pub fn is_trusted_automation_author(login: &str) -> bool {
-    matches!(
-        login,
-        "dependabot[bot]" | "dependabot-preview[bot]" | "github-actions[bot]"
-    )
+    TRUSTED_AUTOMATION_AUTHORS.contains(&login)
 }
 
 /// Soft reserve for the admin enumeration: stop before the `core` bucket dips below this

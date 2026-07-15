@@ -162,6 +162,7 @@ pub fn store_notifications(
          WHERE id NOT IN (SELECT DISTINCT repo_id FROM notifications)",
         [],
     )?;
+    crate::dependabot::reconcile_notification_cleanups(&tx)?;
 
     let visible = visible_count(&tx)? as usize;
     tx.commit()?;
@@ -369,13 +370,23 @@ pub fn read_status(conn: &Connection) -> rusqlite::Result<SyncStatus> {
     })
 }
 
-/// Count non-dismissed notifications shown in the inbox.
+/// Count notifications shown in the ordinary inbox after dismissals and automation filtering.
 pub fn visible_count(conn: &Connection) -> rusqlite::Result<i64> {
-    conn.query_row(
+    let placeholders = std::iter::repeat_n("?", crate::github::TRUSTED_AUTOMATION_AUTHORS.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
         "SELECT COUNT(*) FROM notifications n
          LEFT JOIN notification_dismissals d ON d.thread_id = n.thread_id
-         WHERE d.thread_id IS NULL",
-        [],
+         WHERE d.thread_id IS NULL
+           AND NOT (
+               n.subject_type = 'PullRequest'
+               AND COALESCE(n.subject_author, '') IN ({placeholders})
+           )"
+    );
+    conn.query_row(
+        &sql,
+        rusqlite::params_from_iter(crate::github::TRUSTED_AUTOMATION_AUTHORS.iter()),
         |r| r.get(0),
     )
 }
@@ -586,6 +597,10 @@ pub fn mark_done_local(conn: &mut Connection, thread_ids: &[String]) -> rusqlite
                 None => (None, None),
             };
             dismissal_stmt.execute(params![id, notification_updated_at, subject_updated_at])?;
+            tx.execute(
+                "DELETE FROM dependabot_notification_cleanups WHERE thread_id = ?1",
+                params![id],
+            )?;
             dismissed += 1;
         }
     }
@@ -813,6 +828,14 @@ pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
     let mut groups: Vec<RepoGroup> = Vec::new();
     for row in rows {
         let (repo_id, full_name, private, view) = row?;
+        if view.subject_type == "PullRequest"
+            && view
+                .subject_author
+                .as_deref()
+                .is_some_and(crate::github::is_trusted_automation_author)
+        {
+            continue;
+        }
         // Rows are ordered by repo, so we only ever append to the last group.
         if groups.last().map(|g| g.repo_id) != Some(repo_id) {
             groups.push(RepoGroup {
@@ -884,6 +907,13 @@ mod tests {
             updated_at: "2026-01-02T00:00:00Z".to_string(),
             url: format!("https://api.github.com/notifications/threads/{id}"),
         }
+    }
+
+    fn pr_thread(id: &str, repo_id: i64, repo: &str, title: &str) -> NotificationThread {
+        let mut thread = thread(id, repo_id, repo, title);
+        thread.subject.subject_type = "PullRequest".to_string();
+        thread.subject.url = Some(format!("https://api.github.com/repos/{repo}/pulls/1"));
+        thread
     }
 
     #[test]
@@ -963,6 +993,56 @@ mod tests {
     }
 
     #[test]
+    fn inbox_hides_resolved_automation_prs_but_bookmarks_keep_them() {
+        let mut conn = mem_conn();
+        store_notifications(
+            &mut conn,
+            &[
+                pr_thread("1", 100, "octo/repo", "Dependabot PR"),
+                pr_thread("2", 100, "octo/repo", "Actions PR"),
+                pr_thread("3", 100, "octo/repo", "Human PR"),
+                pr_thread("4", 100, "octo/repo", "Unresolved PR"),
+                thread("5", 100, "octo/repo", "Bot-authored issue"),
+            ],
+        )
+        .unwrap();
+        for (id, number, author) in [
+            ("1", 1, "dependabot[bot]"),
+            ("2", 2, "github-actions[bot]"),
+            ("3", 3, "octocat"),
+            ("5", 5, "github-actions[bot]"),
+        ] {
+            store_resolved_subject(
+                &conn,
+                id,
+                &ResolvedSubject {
+                    number: Some(number),
+                    author: Some(author.to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        add_bookmark(&conn, "1").unwrap();
+
+        let visible: Vec<String> = list_by_repo(&conn)
+            .unwrap()
+            .into_iter()
+            .flat_map(|group| group.notifications)
+            .map(|notification| notification.thread_id)
+            .collect();
+        assert_eq!(visible, vec!["3", "4", "5"]);
+        assert_eq!(visible_count(&conn).unwrap(), 3);
+
+        let bookmarked = list_bookmarks(&conn).unwrap();
+        assert_eq!(bookmarked[0].notifications[0].thread_id, "1");
+        assert_eq!(
+            bookmarked[0].notifications[0].subject_author.as_deref(),
+            Some("dependabot[bot]")
+        );
+    }
+
+    #[test]
     fn flags_new_and_changed_notifications() {
         let mut conn = mem_conn();
         // First sync: every thread is new.
@@ -998,6 +1078,15 @@ mod tests {
         assert_eq!(bm.len(), 1);
         assert_eq!(bm[0].notifications[0].subject_title, "One");
         assert!(!bm[0].notifications[0].is_done);
+        conn.execute(
+            "INSERT INTO dependabot_notification_cleanups
+                 (thread_id, repo_full_name, pr_number, created_at, updated_at)
+             VALUES ('1', 'octo/a', 1,
+                     strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+                     strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
+            [],
+        )
+        .unwrap();
 
         // Mark done hides it from the inbox but keeps the mirrored row and bookmark snapshot.
         mark_done_local(&mut conn, &["1".to_string()]).unwrap();
@@ -1009,10 +1098,36 @@ mod tests {
             bm[0].notifications[0].is_done,
             "done bookmark should be flagged done"
         );
+        assert_eq!(
+            crate::dependabot::pending_notification_cleanup_count(&conn).unwrap(),
+            0,
+            "manual completion must clear an automatic cleanup retry"
+        );
 
         // Removing the bookmark clears the snapshot.
         remove_bookmark(&conn, "1").unwrap();
         assert!(list_bookmarks(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn notification_sync_reconciles_cleanup_jobs_for_absent_threads() {
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/a", "One")]).unwrap();
+        conn.execute(
+            "INSERT INTO dependabot_notification_cleanups
+                 (thread_id, repo_full_name, pr_number, created_at, updated_at)
+             VALUES ('1', 'octo/a', 1,
+                     strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+                     strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
+            [],
+        )
+        .unwrap();
+
+        store_notifications(&mut conn, &[thread("2", 200, "octo/b", "Two")]).unwrap();
+        assert_eq!(
+            crate::dependabot::pending_notification_cleanup_count(&conn).unwrap(),
+            0
+        );
     }
 
     #[test]

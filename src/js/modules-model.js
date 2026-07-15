@@ -14,7 +14,7 @@ export const MODULES = [
   },
   {
     id: "dependabot",
-    label: "Dependabot",
+    label: "Automation PRs",
     paneId: "view-dependabot",
   },
 ];

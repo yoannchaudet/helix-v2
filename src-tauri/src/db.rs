@@ -350,6 +350,23 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE dependabot_merge_operations DROP COLUMN cancel_command_at;
     ALTER TABLE dependabot_merge_operations DROP COLUMN last_action_at;
     "#,
+    // v18 — durable post-merge notification cleanup. Merge success is terminal immediately;
+    // marking the associated notification done is an independently retried side effect.
+    r#"
+    CREATE TABLE dependabot_notification_cleanups (
+        thread_id       TEXT PRIMARY KEY,
+        operation_id    INTEGER REFERENCES dependabot_merge_operations(id) ON DELETE SET NULL,
+        repo_full_name  TEXT NOT NULL,
+        pr_number       INTEGER NOT NULL,
+        attempt_count   INTEGER NOT NULL DEFAULT 0,
+        last_error      TEXT,
+        next_attempt_at TEXT,
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT NOT NULL
+    );
+    CREATE INDEX idx_dependabot_notification_cleanups_due
+        ON dependabot_notification_cleanups(next_attempt_at, created_at);
+    "#,
 ];
 
 /// Open the database at `db_path`, apply any pending migrations, and return the

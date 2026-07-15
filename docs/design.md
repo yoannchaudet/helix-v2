@@ -333,12 +333,16 @@ the named segments when the active module changes; `⌘1` / `⌘2` jump straight
 position.
 - **Notifications** module — the inbox described below (the original v1 feature). It owns the
   smart-filter + repository **sidebar**.
-- **Dependabot** module — lists cached open Dependabot and GitHub Actions bot PRs by repository and owns a
+- **Automation PRs** module — lists cached open Dependabot and GitHub Actions bot PRs by repository and owns a
   repository/Operations sidebar. Row-level merge actions create durable operations;
   Operations shows active FIFO work plus the latest 100 terminal results, grouped by repository
   within the Active and Recent sections. Expanding an
   operation reveals its strategy-specific flow, highlighted current step, next action, retry or
   GitHub queue position, and timestamped durable action log.
+- Resolved notifications for pull requests owned by the supported automation bots are excluded
+  from the ordinary Notifications module so the same work is not duplicated across modules.
+  Unresolved PR notifications remain visible until their author is known, and bookmarked
+  automation notifications remain available in Bookmarks as durable snapshots.
 - **Settings is *not* a module** — it's a focused, full-width **overlay** that temporarily
   covers the active module (hiding the sidebar) and returns to it on close. The top chrome
   (and picker) stays visible, so switching modules dismisses the overlay. `modules.js` owns
@@ -360,7 +364,7 @@ module's **sidebar + content** split:
   **module-scoped**: for Notifications it shows the cross-cutting smart filters (**All**,
   **Mentions**, **Team mentions**, **Review requests**, **Assigned**, **Cleanup**) with live
   counts and a **Repositories** list of selectable sources. Selection is single-active (a
-  smart filter *or* a repository), Mail-style. Dependabot uses the same shell for **All**,
+  smart filter *or* a repository), Mail-style. Automation PRs uses the same shell for **All**,
   **Operations**, and repository refinement.
 - **Content pane:** an opaque pane with a **toolbar** below the chrome showing the active
   source title (left) and sync status + refresh (right), pinned while the list scrolls.
@@ -414,7 +418,7 @@ module's **sidebar + content** split:
   by `get_settings`.
 - **Recommended token scopes** (document for the user):
   - Classic PAT: `notifications` (read/modify the inbox). Add `repo` to resolve subjects
-    in **private** repositories; the **Dependabot** module also needs it to read PRs in
+    in **private** repositories; the **Automation PRs** module also needs it to read PRs in
     private repos.
   - Fine-grained PAT alternative: read access to **Notifications**; **Pull requests:
     read/write** for listing commits, approvals, and queue enrollment; **Contents: read/write**
@@ -422,17 +426,17 @@ module's **sidebar + content** split:
     jobs; and **Metadata: read** for repository policy. Scope the token to the repositories Helix
     manages. A user PAT cannot rerequest third-party check suites, so failed external CI is
     surfaced as needing attention instead of silently retried.
-- The Dependabot module does **not** use the search API and has no account/repo picker. Its
+- The Automation PRs module does **not** use the search API and has no account/repo picker. Its
   repo list is built lazily "for free" from your notifications: when a PR notification authored
   by **Dependabot or GitHub Actions** is resolved, that repo is remembered in `dependabot_repos`
   (which — unlike `repos` — is not pruned when notifications clear). Each sync lists those repos'
   open PRs from either supported bot via the core REST API, paced serially. A repo that
   consistently 404s/403s
   (renamed/deleted/access revoked) is dropped after a few tries.
-- The Dependabot module's **last successful sync time** is persisted (settings key
+- The Automation PRs module's **last successful sync time** is persisted (settings key
   `dependabot_last_sync_at`) so the "Synced …" label and the auto-sync staleness gate survive
   restarts — distinct from the notifications sync time in `sync_state`.
-- Dependabot **merge operations** are durable SQLite state. Repositories progress
+- Automation PR **merge operations** are durable SQLite state. Repositories progress
   independently, but each repository has a strict FIFO queue with one active merge at a time.
   The PR list persists each PR's target branch from GitHub's `base.ref`, displays it on the PR
   row, and snapshots it onto the durable operation so Operations retains the same context.
@@ -486,10 +490,15 @@ module's **sidebar + content** split:
   removes the cached `dependabot_prs` row; failures remain visible and retryable. Discard does not
   delete the PR's head branch or mark its notification as done, and an already-completed merge still
   wins the race.
+- A successful Automation PR merge schedules its associated notification thread to be marked done.
+  This post-merge cleanup is durable and retried with backoff; cleanup failures are recorded in the
+  operation log but never change the already-authoritative merged result. Successful cleanup uses
+  the normal local dismissal path, so bookmarks survive and transition to their done presentation.
 - Every operation phase and action is recorded locally. The expandable Operations visualization
   reads that durable history rather than inferring progress in the frontend.
-- Active merge operations use a dedicated frontend-driven poll loop (60 seconds by default,
-  configurable with a 30-second minimum). Each tick advances one FIFO head per repo and
+- Active merge operations and pending notification cleanups use a dedicated frontend-driven poll
+  loop (60 seconds by default, configurable with a 30-second minimum). Each tick advances one FIFO
+  head per repo and
   reloads all operations in a single batched read; GitHub poll/backoff headers can raise the
   interval or pause it outright. The FIFO processor itself stops resolving new work once either
   the shared **core** or **graphql** rate bucket drops below the ~25% reserve, while every

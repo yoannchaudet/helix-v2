@@ -45,7 +45,7 @@
       <div class="app-body">
       <!-- =============================== Sidebar =============================== -->
       <!-- Module-scoped: each module shows its own sidebar sources (Notifications: smart
-           filters + repositories; Dependabot: repositories only), toggled by modules.js.
+           filters + repositories; Automation PRs: repositories only), toggled by modules.js.
            The whole sidebar is hidden while the Settings overlay is open. -->
       <aside class="sidebar">
         <!-- Notifications module sources: smart filters + repositories. -->
@@ -63,12 +63,12 @@
           </ul>
         </nav>
 
-        <!-- Dependabot module sources: repositories only (no smart filters). Rendered by
+        <!-- Automation PRs module sources: repositories only (no smart filters). Rendered by
              dependabot.js (renderSidebar). -->
         <nav
           class="sources sidebar-module sidebar-module--dependabot"
           id="sidebar-dependabot"
-          aria-label="Dependabot views"
+          aria-label="Automation PR views"
           hidden
         >
           <!-- The "All" entry (total open PRs) is rendered by dependabot.js (renderSidebar). -->
@@ -139,13 +139,13 @@
         </div>
       </section>
 
-      <!-- ============================== Dependabot ============================= -->
+      <!-- ============================ Automation PRs =========================== -->
       <!-- Lists open Dependabot and GitHub Actions bot PRs across accessible repos, grouped by
            repository, with a merge-readiness pill and durable merge actions. Same sync button as
            Notifications, but no filters, bookmarks, or mark-done. Wired by dependabot.js. -->
       <section id="view-dependabot" class="pane" hidden aria-labelledby="dependabot-view-title">
         <header class="toolbar" data-tauri-drag-region>
-          <h1 class="toolbar-title" id="dependabot-view-title">Dependabot</h1>
+          <h1 class="toolbar-title" id="dependabot-view-title">Automation PRs</h1>
           <div class="toolbar-actions">
             <span class="sync-status">
               <span class="status-dot status-dot--pending js-dep-sync-dot"></span>
@@ -306,7 +306,7 @@
               </span>
             </div>
             <div class="srow">
-              <span class="srow-label">Dependabot merge polling</span>
+              <span class="srow-label">Automation PR merge polling</span>
               <span class="srow-value">
                 <span class="stepper">
                   <input
@@ -315,7 +315,7 @@
                     type="number"
                     step="5"
                     inputmode="numeric"
-                    aria-label="Dependabot merge polling interval in seconds"
+                    aria-label="Automation PR merge polling interval in seconds"
                   />
                   <span class="stepper-unit" aria-hidden="true">s</span>
                 </span>
@@ -326,7 +326,7 @@
             Helix syncs in the background at this interval. Minimum
             <span id="poll-min-label">10</span> seconds. Changes apply immediately.<span
               id="poll-github-note" hidden></span>
-            Dependabot merge operations have a separate minimum of
+            Automation PR merge operations have a separate minimum of
             <span id="dependabot-merge-poll-min-label">30</span> seconds.
           </p>
         </section>

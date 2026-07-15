@@ -351,6 +351,7 @@ where
 #[derive(Debug, Clone, Serialize)]
 pub struct DependabotMergeStatus {
     pub active_count: i64,
+    pub pending_notification_cleanup_count: i64,
     pub poll_interval_s: i64,
     pub min_poll_interval_s: i64,
     pub github_poll_floor_s: Option<i64>,
@@ -377,6 +378,8 @@ fn merge_status(conn: &rusqlite::Connection) -> Result<DependabotMergeStatus, St
     let runtime = dependabot::merge_runtime(conn).map_err(|e| e.to_string())?;
     Ok(DependabotMergeStatus {
         active_count,
+        pending_notification_cleanup_count: dependabot::pending_notification_cleanup_count(conn)
+            .map_err(|e| e.to_string())?,
         poll_interval_s: settings::get_dependabot_merge_poll_interval(conn)
             .map_err(|e| e.to_string())?,
         min_poll_interval_s: settings::MIN_DEPENDABOT_MERGE_POLL_INTERVAL_S,
@@ -395,7 +398,7 @@ pub async fn enqueue_dependabot_merge(
     let conn = state.db.0.lock().map_err(|e| e.to_string())?;
     dependabot::enqueue_merge_operation(&conn, pr_id).map_err(|e| {
         if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
-            "This automation PR is not in the local cache. Sync the Dependabot module and try again."
+            "This automation PR is not in the local cache. Sync the Automation PRs module and try again."
                 .to_string()
         } else {
             e.to_string()
@@ -414,7 +417,7 @@ pub async fn cancel_dependabot_merge(
         let conn = state.db.0.lock().map_err(|e| e.to_string())?;
         dependabot::request_cancel(&conn, operation_id)
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| "Dependabot merge operation was not found.".to_string())?
+            .ok_or_else(|| "Automation PR merge operation was not found.".to_string())?
     };
     EventSink::emit(
         &app,
@@ -442,7 +445,7 @@ fn forget_stuck_dependabot_merge_core<S: EventSink>(
             Ok(())
         }
         dependabot::ForgetStuckOperationOutcome::NotFound => {
-            Err("Dependabot merge operation was not found.".to_string())
+            Err("Automation PR merge operation was not found.".to_string())
         }
         dependabot::ForgetStuckOperationOutcome::NotEligible => Err(
             "This operation is no longer a stuck cancellation and cannot be forgotten.".to_string(),
@@ -491,7 +494,7 @@ where
         let target = dependabot::get_cached_pr(&conn, pr_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| {
-                "This automation PR is not in the local cache. Sync the Dependabot module and try again."
+                "This automation PR is not in the local cache. Sync the Automation PRs module and try again."
                     .to_string()
             })?;
         let cancelled_operation = match dependabot::get_active_operation_for_pr(&conn, pr_id)
@@ -730,7 +733,7 @@ pub fn get_dependabot_merge_operation_detail(
     let conn = state.db.0.lock().map_err(|e| e.to_string())?;
     operation_detail_core(&conn, operation_id)
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Dependabot merge operation was not found.".to_string())
+        .ok_or_else(|| "Automation PR merge operation was not found.".to_string())
 }
 
 fn persist_merge_rates(conn: &rusqlite::Connection, rates: Vec<github::RateLimit>) {
@@ -836,10 +839,12 @@ where
             false
         };
         let id = work.operation.id;
+        let repo_full_name = work.operation.repo_full_name.clone();
+        let pr_number = work.operation.number;
         match process(work, timed_out).await {
             Ok(result) => {
                 let (floor, _) = rate_floor_and_backoff(&result.rates);
-                let conn = db.0.lock().map_err(|e| e.to_string())?;
+                let mut conn = db.0.lock().map_err(|e| e.to_string())?;
                 persist_merge_rates(&conn, result.rates);
                 dependabot::clear_merge_runtime_error(&conn, floor).map_err(|e| e.to_string())?;
                 let cancel_arrived_during_request = !was_cancel_requested
@@ -879,15 +884,28 @@ where
                 }
                 match result.outcome {
                     github::MergeRemoteOutcome::Merged { head_sha } => {
-                        dependabot::terminalize(
-                            &conn,
-                            id,
-                            "merged",
-                            None,
-                            Some("Merged on GitHub."),
-                            None,
-                        )
-                        .map_err(|e| e.to_string())?;
+                        let cleanup_count =
+                            dependabot::terminalize_merged_with_notification_cleanup(
+                                &mut conn,
+                                id,
+                                &repo_full_name,
+                                pr_number,
+                            )
+                            .map_err(|e| e.to_string())?;
+                        if cleanup_count > 0 {
+                            dependabot::append_operation_event(
+                                &conn,
+                                id,
+                                "merged",
+                                "notification",
+                                "scheduled",
+                                "Scheduled the associated notification to be marked done.",
+                                None,
+                                head_sha.as_deref(),
+                                None,
+                            )
+                            .map_err(|e| e.to_string())?;
+                        }
                         if let Some(head_sha) = head_sha {
                             dependabot::record_observation(
                                 &conn,
@@ -999,6 +1017,126 @@ where
     })
 }
 
+#[derive(Default)]
+struct NotificationCleanupProcessResult {
+    processed: usize,
+    changed: bool,
+}
+
+async fn process_notification_cleanups_core<S, Call, Fut>(
+    db: &Db,
+    sink: S,
+    call: Call,
+) -> Result<NotificationCleanupProcessResult, String>
+where
+    S: EventSink,
+    Call: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<github::RateLimit, github::MutationError>>,
+{
+    let jobs = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        dependabot::due_notification_cleanups(&conn).map_err(|e| e.to_string())?
+    };
+    let mut result = NotificationCleanupProcessResult::default();
+    let mut notifications_changed = false;
+    for job in jobs {
+        let (rate, already_done) = match call(job.thread_id.clone()).await {
+            Ok(rate) => (rate, false),
+            Err(error)
+                if matches!(
+                    &error.error,
+                    github::GitHubError::Status {
+                        status,
+                        ..
+                    } if *status == reqwest::StatusCode::NOT_FOUND
+                ) =>
+            {
+                (error.rate, true)
+            }
+            Err(error) => {
+                let should_stop = matches!(
+                    &error.error,
+                    github::GitHubError::Unauthorized | github::GitHubError::Forbidden(_)
+                );
+                let message = error.error.to_string();
+                let retry_after = error.rate.retry_after;
+                let conn = db.0.lock().map_err(|e| e.to_string())?;
+                persist_merge_rates(&conn, vec![error.rate]);
+                dependabot::record_notification_cleanup_failure(
+                    &conn,
+                    &job.thread_id,
+                    job.attempt_count,
+                    &message,
+                    retry_after,
+                )
+                .map_err(|e| e.to_string())?;
+                if let Some(operation_id) = job.operation_id {
+                    if dependabot::get_operation(&conn, operation_id)
+                        .map_err(|e| e.to_string())?
+                        .is_some()
+                    {
+                        dependabot::append_operation_event(
+                            &conn,
+                            operation_id,
+                            "merged",
+                            "notification",
+                            "error",
+                            "Could not mark the associated notification as done; retry scheduled.",
+                            Some(&message),
+                            None,
+                            Some(&job.thread_id),
+                        )
+                        .map_err(|e| e.to_string())?;
+                    }
+                }
+                result.processed += 1;
+                result.changed = true;
+                if should_stop {
+                    break;
+                }
+                continue;
+            }
+        };
+        let mut conn = db.0.lock().map_err(|e| e.to_string())?;
+        persist_merge_rates(&conn, vec![rate]);
+        sync::mark_done_local(&mut conn, std::slice::from_ref(&job.thread_id))
+            .map_err(|e| e.to_string())?;
+        if let Some(operation_id) = job.operation_id {
+            if dependabot::get_operation(&conn, operation_id)
+                .map_err(|e| e.to_string())?
+                .is_some()
+            {
+                dependabot::append_operation_event(
+                    &conn,
+                    operation_id,
+                    "merged",
+                    "notification",
+                    "ok",
+                    if already_done {
+                        "The associated notification was already done on GitHub."
+                    } else {
+                        "Marked the associated notification as done."
+                    },
+                    None,
+                    None,
+                    Some(&job.thread_id),
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+        result.processed += 1;
+        result.changed = true;
+        notifications_changed = true;
+    }
+    if notifications_changed {
+        sink.emit(
+            "notifications:changed",
+            serde_json::json!({ "source": "automation_pr_merge" }),
+        );
+    }
+    Ok(result)
+}
+
 struct MergeTickGuard<'a>(&'a std::sync::atomic::AtomicBool);
 
 impl Drop for MergeTickGuard<'_> {
@@ -1047,17 +1185,41 @@ pub async fn process_dependabot_merges(
     let client = reqwest::Client::new();
     let db = &state.db;
     let mutation_guard = &state.dependabot_merge_mutation_guard;
-    process_dependabot_merges_core(&state.db, app, move |work, timed_out| {
-        let backend = RealMergeBackend {
-            client: client.clone(),
-            token: token.clone(),
-            mutation_guard,
-            db,
-            operation_id: work.operation.id,
-        };
-        async move { orchestrate_operation(db, &backend, work, timed_out).await }
+    let merge_client = client.clone();
+    let merge_token = token.clone();
+    let mut result =
+        process_dependabot_merges_core(&state.db, app.clone(), move |work, timed_out| {
+            let backend = RealMergeBackend {
+                client: merge_client.clone(),
+                token: merge_token.clone(),
+                mutation_guard,
+                db,
+                operation_id: work.operation.id,
+            };
+            async move { orchestrate_operation(db, &backend, work, timed_out).await }
+        })
+        .await?;
+    let merge_changed = result.changed;
+    let cleanup = process_notification_cleanups_core(&state.db, app.clone(), move |thread_id| {
+        let client = client.clone();
+        let token = token.clone();
+        async move { github::mark_thread_done(&client, &token, &thread_id).await }
     })
-    .await
+    .await?;
+    result.processed += cleanup.processed;
+    result.changed |= cleanup.changed;
+    if cleanup.changed && !merge_changed {
+        EventSink::emit(
+            &app,
+            "dependabot:operations-changed",
+            serde_json::json!({ "notification_cleanups_processed": cleanup.processed }),
+        );
+    }
+    result.status = {
+        let conn = state.db.0.lock().map_err(|e| e.to_string())?;
+        merge_status(&conn)?
+    };
+    Ok(result)
 }
 
 /* --------------------------- Durable phase orchestrator --------------------- */
@@ -2837,6 +2999,181 @@ mod tests {
         }
     }
 
+    fn seed_notification(db: &Db, repo_id: i64, repo: &str, number: i64, thread_id: &str) {
+        let (owner, name) = repo.split_once('/').unwrap();
+        let conn = db.0.lock().unwrap();
+        conn.execute(
+            "INSERT INTO repos (id, full_name, owner, name, private)
+             VALUES (?1, ?2, ?3, ?4, 0)",
+            rusqlite::params![repo_id, repo, owner, name],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO notifications
+                 (thread_id, repo_id, subject_type, subject_title, subject_url, reason,
+                  updated_at, thread_url, subject_number, subject_author, fetched_at)
+             VALUES (?1, ?2, 'PullRequest', 'Automated update',
+                     ?3, 'author',
+                     '2026-01-02T00:00:00Z',
+                     ?4, ?5, 'github-actions[bot]', '2026-01-02T00:00:00Z')",
+            rusqlite::params![
+                thread_id,
+                repo_id,
+                format!("https://api.github.com/repos/{repo}/pulls/{number}"),
+                format!("https://api.github.com/notifications/threads/{thread_id}"),
+                number
+            ],
+        )
+        .unwrap();
+    }
+
+    fn seed_notification_cleanup(db: &Db) -> (i64, String) {
+        store(db, &[pr(1, "octo/repo", 7, "Automated update")]);
+        let thread_id = "thread-7".to_string();
+        seed_notification(db, 1, "octo/repo", 7, &thread_id);
+        let conn = db.0.lock().unwrap();
+        let operation = dependabot::enqueue_merge_operation(&conn, 1).unwrap();
+        dependabot::terminalize(
+            &conn,
+            operation.id,
+            "merged",
+            None,
+            Some("Merged on GitHub."),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            dependabot::enqueue_notification_cleanups(&conn, operation.id, "octo/repo", 7).unwrap(),
+            1
+        );
+        (operation.id, thread_id)
+    }
+
+    #[test]
+    fn notification_cleanup_success_marks_done_and_emits_refresh() {
+        let db = mem_db();
+        let (operation_id, thread_id) = seed_notification_cleanup(&db);
+        let sink = RecordingSink::default();
+
+        let result = tauri::async_runtime::block_on(process_notification_cleanups_core(
+            &db,
+            sink.clone(),
+            |_| async { Ok::<_, github::MutationError>(RateLimit::default()) },
+        ))
+        .unwrap();
+
+        assert_eq!(result.processed, 1);
+        assert!(result.changed);
+        let conn = db.0.lock().unwrap();
+        assert_eq!(
+            dependabot::pending_notification_cleanup_count(&conn).unwrap(),
+            0
+        );
+        let dismissed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM notification_dismissals WHERE thread_id = ?1",
+                [&thread_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(dismissed, 1);
+        let events = dependabot::list_operation_events(&conn, operation_id).unwrap();
+        assert!(events.iter().any(|event| {
+            event.kind == "notification"
+                && event.status == "ok"
+                && event.external_id.as_deref() == Some(thread_id.as_str())
+        }));
+        assert_eq!(sink.count("notifications:changed"), 1);
+        assert_eq!(sink.count("dependabot:operations-changed"), 0);
+    }
+
+    #[test]
+    fn notification_cleanup_treats_missing_remote_thread_as_done() {
+        let db = mem_db();
+        let (operation_id, _) = seed_notification_cleanup(&db);
+
+        tauri::async_runtime::block_on(process_notification_cleanups_core(
+            &db,
+            RecordingSink::default(),
+            |_| async {
+                Err(github::MutationError {
+                    rate: RateLimit::default(),
+                    error: GitHubError::Status {
+                        status: reqwest::StatusCode::NOT_FOUND,
+                        body: "Not Found".to_string(),
+                    },
+                })
+            },
+        ))
+        .unwrap();
+
+        let conn = db.0.lock().unwrap();
+        assert_eq!(
+            dependabot::pending_notification_cleanup_count(&conn).unwrap(),
+            0
+        );
+        let events = dependabot::list_operation_events(&conn, operation_id).unwrap();
+        assert!(events.iter().any(|event| {
+            event.kind == "notification"
+                && event.status == "ok"
+                && event.summary.contains("already done")
+        }));
+    }
+
+    #[test]
+    fn notification_cleanup_failure_keeps_merge_terminal_and_retries() {
+        let db = mem_db();
+        let (operation_id, thread_id) = seed_notification_cleanup(&db);
+        let sink = RecordingSink::default();
+
+        tauri::async_runtime::block_on(process_notification_cleanups_core(&db, sink, |_| async {
+            Err(github::MutationError {
+                rate: RateLimit::default(),
+                error: GitHubError::Network("offline".to_string()),
+            })
+        }))
+        .unwrap();
+
+        {
+            let conn = db.0.lock().unwrap();
+            assert_eq!(
+                dependabot::get_operation(&conn, operation_id)
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                "merged"
+            );
+            let (attempts, error): (i64, Option<String>) = conn
+                .query_row(
+                    "SELECT attempt_count, last_error
+                     FROM dependabot_notification_cleanups WHERE thread_id = ?1",
+                    [&thread_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(attempts, 1);
+            assert!(error.unwrap().contains("offline"));
+            conn.execute(
+                "UPDATE dependabot_notification_cleanups SET next_attempt_at = NULL
+                 WHERE thread_id = ?1",
+                [&thread_id],
+            )
+            .unwrap();
+        }
+
+        tauri::async_runtime::block_on(process_notification_cleanups_core(
+            &db,
+            RecordingSink::default(),
+            |_| async { Ok::<_, github::MutationError>(RateLimit::default()) },
+        ))
+        .unwrap();
+        let conn = db.0.lock().unwrap();
+        assert_eq!(
+            dependabot::pending_notification_cleanup_count(&conn).unwrap(),
+            0
+        );
+    }
+
     fn rate(resource: &str, remaining: i64, limit: i64) -> RateLimit {
         RateLimit {
             resource: Some(resource.to_string()),
@@ -2920,7 +3257,7 @@ mod tests {
         assert_eq!(remaining, 0);
         assert_eq!(
             forget_stuck_dependabot_merge_core(&db, sink.clone(), operation_id).unwrap_err(),
-            "Dependabot merge operation was not found."
+            "Automation PR merge operation was not found."
         );
         assert_eq!(sink.count("dependabot:operations-changed"), 1);
     }
@@ -3418,6 +3755,15 @@ mod tests {
     fn completed_native_merge_wins_a_concurrent_local_cancel() {
         let db = db_with_token();
         store(&db, &[pr(1, "octo/repo-a", 10, "first")]);
+        seed_notification(&db, 1, "octo/repo-a", 10, "thread-10");
+        db.0.lock()
+            .unwrap()
+            .execute(
+                "UPDATE notifications SET subject_number = NULL, subject_author = NULL
+                 WHERE thread_id = 'thread-10'",
+                [],
+            )
+            .unwrap();
         let operation_id = {
             let conn = db.0.lock().unwrap();
             dependabot::enqueue_merge_operation(&conn, 1).unwrap().id
@@ -3446,6 +3792,10 @@ mod tests {
                 .unwrap()
                 .state,
             "merged"
+        );
+        assert_eq!(
+            dependabot::pending_notification_cleanup_count(&conn).unwrap(),
+            1
         );
     }
 

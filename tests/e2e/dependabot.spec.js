@@ -31,14 +31,14 @@ test("lists open automation PRs grouped by repository", async ({ page }) => {
   );
 });
 
-test("Dependabot view is exposed as a named region", async ({ page }) => {
+test("Automation PRs view is exposed as a named region", async ({ page }) => {
   await openDependabot(page);
 
   await expect(page.locator("#view-dependabot")).toHaveAttribute(
     "aria-labelledby",
     "dependabot-view-title",
   );
-  await expect(page.getByRole("region", { name: "Dependabot" })).toHaveAttribute(
+  await expect(page.getByRole("region", { name: "Automation PRs" })).toHaveAttribute(
     "id",
     "view-dependabot",
   );
@@ -440,13 +440,28 @@ test("auto-syncs on first open (calls sync_dependabot)", async ({ page }) => {
   expect(calls.some((c) => c.cmd === "sync_dependabot")).toBe(true);
 });
 
+test("processes pending notification cleanup without an active merge", async ({ page }) => {
+  await openDependabot(page, {
+    ...defaultFixtures(),
+    mergeOperations: [],
+    pendingNotificationCleanupCount: 1,
+  });
+
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          window.__TAURI_CALLS__.filter((call) => call.cmd === "process_dependabot_merges").length,
+      ),
+    )
+    .toBeGreaterThan(0);
+});
+
 test("empty state when there are no automation PRs", async ({ page }) => {
   await openDependabot(page, { ...defaultFixtures(), dependabot: [] });
 
   await expect(page.locator("#dependabot .inbox-empty")).toBeVisible();
-  await expect(page.locator("#dependabot")).toContainText(
-    "No open Dependabot or GitHub Actions pull requests",
-  );
+  await expect(page.locator("#dependabot")).toContainText("No open automation pull requests");
   await expect(page.locator("#dependabot-repo-list .source-empty")).toBeVisible();
 });
 
@@ -952,7 +967,7 @@ test("every snapshot path clears a vanished repository refinement", async ({ pag
   });
 
   // The refinement should be cleared — show acme/widgets.
-  await expect(page.locator("#dependabot-view-title")).toContainText("Dependabot");
+  await expect(page.locator("#dependabot-view-title")).toContainText("Automation PRs");
   await expect(page.locator("#dependabot-view-title")).not.toContainText("octo/hello");
 });
 

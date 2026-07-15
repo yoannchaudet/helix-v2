@@ -348,6 +348,9 @@ export function registerSyncEvents() {
     notifySyncStaleListeners();
     loadSyncStatus();
   });
+  listen("notifications:changed", () => {
+    notifySyncStaleListeners();
+  });
   // The resolution pass finished (drained, hit the rate reserve, or backed off) — this is the
   // true end of the sync. Leave the resolving phase: flip the pill to "Synced", re-enable the
   // controls, and restart the poll countdown from here. Any still-pending subjects (deferred

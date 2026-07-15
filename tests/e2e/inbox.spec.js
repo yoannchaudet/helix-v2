@@ -4,6 +4,13 @@ import { openApp, emptyFixtures, defaultFixtures } from "./tauri-mock.js";
 /* Inbox flows against mocked data: rendering, the smart filters + repo refinement, and the
  * three mark-done paths (per-row, bulk-confirm, context menu). */
 
+test("automation PR notifications are excluded from Notifications", async ({ page }) => {
+  await openApp(page);
+
+  await expect(page.locator("#inbox")).not.toContainText("Automated dependency update");
+  await expect(page.locator("#inbox")).toContainText("Add dark mode");
+});
+
 test("a manual sync stays busy through resolution, then re-enables the controls", async ({
   page,
 }) => {

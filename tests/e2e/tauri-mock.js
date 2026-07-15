@@ -20,6 +20,7 @@ export function installTauriMock(fixtures) {
     mergeOperations: JSON.parse(JSON.stringify(fixtures.mergeOperations ?? [])),
     mergeOperationDetails: JSON.parse(JSON.stringify(fixtures.mergeOperationDetails ?? {})),
     dependabotLastSync: fixtures.dependabotLastSync ?? null,
+    pendingNotificationCleanupCount: fixtures.pendingNotificationCleanupCount ?? 0,
     lastModule: fixtures.lastModule ?? null,
     // When true, `get_dependabot_merge_operation_detail` calls don't resolve on their own —
     // they queue in `pendingDetailCalls` for a spec to resolve explicitly (in any order) via
@@ -65,6 +66,22 @@ export function installTauriMock(fixtures) {
   window.__mockEmit = emit;
 
   const activeMergeStates = new Set(["queued", "validating", "delegated", "cancel_requested"]);
+  const automationAuthors = new Set([
+    "dependabot[bot]",
+    "dependabot-preview[bot]",
+    "github-actions[bot]",
+  ]);
+  const visibleInbox = () =>
+    state.inbox
+      .map((group) => {
+        const notifications = group.notifications.filter(
+          (notification) =>
+            notification.subject_type !== "PullRequest" ||
+            !automationAuthors.has(notification.subject_author),
+        );
+        return { ...group, total: notifications.length, notifications };
+      })
+      .filter((group) => group.notifications.length);
   const recomputeMergeQueuePositions = () => {
     const byRepo = new Map();
     for (const operation of state.mergeOperations) {
@@ -154,7 +171,7 @@ export function installTauriMock(fixtures) {
       return null;
     },
 
-    list_inbox: () => JSON.parse(JSON.stringify(state.inbox)),
+    list_inbox: () => JSON.parse(JSON.stringify(visibleInbox())),
     list_bookmarks: () => {
       // is_done is derived: a bookmark not present in the live inbox is done/removed.
       const inboxIds = new Set(state.inbox.flatMap((g) => g.notifications.map((n) => n.thread_id)));
@@ -267,6 +284,7 @@ export function installTauriMock(fixtures) {
     },
     dependabot_merge_status: () => ({
       active_count: state.mergeOperations.filter((o) => activeMergeStates.has(o.state)).length,
+      pending_notification_cleanup_count: state.pendingNotificationCleanupCount,
       poll_interval_s: state.settings.dependabot_merge_poll_interval_s,
       min_poll_interval_s: state.settings.min_dependabot_merge_poll_interval_s,
       github_poll_floor_s: 0,
@@ -413,6 +431,7 @@ export function installTauriMock(fixtures) {
       }
       recomputeMergeQueuePositions();
       emit("dependabot:operations-changed", null);
+      state.pendingNotificationCleanupCount = 0;
       return handlers.dependabot_merge_status();
     },
     dependabot_status: () => ({ last_sync_at: state.dependabotLastSync ?? null }),
@@ -567,6 +586,17 @@ export function defaultFixtures() {
             subject_html_url: "https://github.com/octo/hello/issues/7",
             reason: "mention",
             updated_at: "2026-06-27T09:00:00Z",
+          },
+          {
+            thread_id: "t-auto",
+            subject_type: "PullRequest",
+            subject_title: "Automated dependency update",
+            subject_number: 40,
+            subject_state: "open",
+            subject_author: "github-actions[bot]",
+            subject_html_url: "https://github.com/octo/hello/pull/40",
+            reason: "author",
+            updated_at: "2026-06-27T08:00:00Z",
           },
         ],
       },

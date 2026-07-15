@@ -18,6 +18,10 @@ test("each module declares a label and pane id", () => {
   }
 });
 
+test("the stable dependabot module id is labeled Automation PRs", () => {
+  assert.equal(MODULES.find((module) => module.id === "dependabot")?.label, "Automation PRs");
+});
+
 test("Settings is not a module (it's an overlay)", () => {
   assert.equal(isModuleId("settings"), false);
 });

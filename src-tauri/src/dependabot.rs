@@ -35,6 +35,129 @@ pub struct CachedDependabotPr {
     pub title: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationCleanupJob {
+    pub thread_id: String,
+    pub operation_id: Option<i64>,
+    pub repo_full_name: String,
+    pub pr_number: i64,
+    pub attempt_count: i64,
+}
+
+pub fn enqueue_notification_cleanups(
+    conn: &Connection,
+    operation_id: i64,
+    repo_full_name: &str,
+    pr_number: i64,
+) -> rusqlite::Result<usize> {
+    let pull_url = format!("https://api.github.com/repos/{repo_full_name}/pulls/{pr_number}");
+    let mut stmt = conn.prepare(
+        "SELECT n.thread_id
+         FROM notifications n
+         JOIN repos r ON r.id = n.repo_id
+         WHERE r.full_name = ?1
+           AND n.subject_type = 'PullRequest'
+           AND (n.subject_number = ?2 OR n.subject_url = ?3)",
+    )?;
+    let rows = stmt.query_map(params![repo_full_name, pr_number, pull_url], |r| {
+        r.get::<_, String>(0)
+    })?;
+    let mut inserted = 0;
+    for row in rows {
+        let thread_id = row?;
+        inserted += conn.execute(
+            "INSERT OR IGNORE INTO dependabot_notification_cleanups
+                 (thread_id, operation_id, repo_full_name, pr_number, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4,
+                     strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+                     strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
+            params![thread_id, operation_id, repo_full_name, pr_number],
+        )?;
+    }
+    Ok(inserted)
+}
+
+pub fn terminalize_merged_with_notification_cleanup(
+    conn: &mut Connection,
+    operation_id: i64,
+    repo_full_name: &str,
+    pr_number: i64,
+) -> rusqlite::Result<usize> {
+    let tx = conn.transaction()?;
+    terminalize(
+        &tx,
+        operation_id,
+        "merged",
+        None,
+        Some("Merged on GitHub."),
+        None,
+    )?;
+    let cleanup_count =
+        enqueue_notification_cleanups(&tx, operation_id, repo_full_name, pr_number)?;
+    tx.commit()?;
+    Ok(cleanup_count)
+}
+
+pub fn due_notification_cleanups(
+    conn: &Connection,
+) -> rusqlite::Result<Vec<NotificationCleanupJob>> {
+    let mut stmt = conn.prepare(
+        "SELECT thread_id, operation_id, repo_full_name, pr_number, attempt_count
+         FROM dependabot_notification_cleanups
+         WHERE next_attempt_at IS NULL
+            OR next_attempt_at <= strftime('%Y-%m-%dT%H:%M:%SZ','now')
+         ORDER BY COALESCE(next_attempt_at, created_at), thread_id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(NotificationCleanupJob {
+            thread_id: r.get(0)?,
+            operation_id: r.get(1)?,
+            repo_full_name: r.get(2)?,
+            pr_number: r.get(3)?,
+            attempt_count: r.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn record_notification_cleanup_failure(
+    conn: &Connection,
+    thread_id: &str,
+    attempt_count: i64,
+    error: &str,
+    retry_after: Option<i64>,
+) -> rusqlite::Result<()> {
+    let exponent = attempt_count.clamp(0, 4) as u32;
+    let delay_seconds = (60_i64 * 2_i64.pow(exponent)).max(retry_after.unwrap_or(0));
+    let modifier = format!("+{delay_seconds} seconds");
+    conn.execute(
+        "UPDATE dependabot_notification_cleanups
+         SET attempt_count = attempt_count + 1,
+             last_error = ?2,
+             next_attempt_at = strftime('%Y-%m-%dT%H:%M:%SZ','now', ?3),
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+         WHERE thread_id = ?1",
+        params![thread_id, error, modifier],
+    )?;
+    Ok(())
+}
+
+pub fn pending_notification_cleanup_count(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM dependabot_notification_cleanups",
+        [],
+        |r| r.get(0),
+    )
+}
+
+pub fn reconcile_notification_cleanups(conn: &Connection) -> rusqlite::Result<usize> {
+    conn.execute(
+        "DELETE FROM dependabot_notification_cleanups
+         WHERE thread_id NOT IN (SELECT thread_id FROM notifications)",
+        [],
+    )
+}
+
 pub fn get_cached_pr(
     conn: &Connection,
     pr_id: i64,
