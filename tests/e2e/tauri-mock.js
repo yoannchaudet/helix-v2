@@ -66,6 +66,7 @@ export function installTauriMock(fixtures) {
   window.__mockEmit = emit;
 
   const activeMergeStates = new Set(["queued", "validating", "delegated", "cancel_requested"]);
+  // Keep aligned with src-tauri/src/github.rs TRUSTED_AUTOMATION_AUTHORS.
   const automationAuthors = new Set([
     "dependabot[bot]",
     "dependabot-preview[bot]",

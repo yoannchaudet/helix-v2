@@ -1062,7 +1062,7 @@ where
                 let retry_after = error.rate.retry_after;
                 let conn = db.0.lock().map_err(|e| e.to_string())?;
                 persist_merge_rates(&conn, vec![error.rate]);
-                dependabot::record_notification_cleanup_failure(
+                let retry_scheduled = dependabot::record_notification_cleanup_failure(
                     &conn,
                     &job.thread_id,
                     job.attempt_count,
@@ -1070,27 +1070,31 @@ where
                     retry_after,
                 )
                 .map_err(|e| e.to_string())?;
-                if let Some(operation_id) = job.operation_id {
-                    if dependabot::get_operation(&conn, operation_id)
-                        .map_err(|e| e.to_string())?
-                        .is_some()
-                    {
-                        dependabot::append_operation_event(
-                            &conn,
-                            operation_id,
-                            "merged",
-                            "notification",
-                            "error",
-                            "Could not mark the associated notification as done; retry scheduled.",
-                            Some(&message),
-                            None,
-                            Some(&job.thread_id),
-                        )
-                        .map_err(|e| e.to_string())?;
+                if retry_scheduled {
+                    result.changed = true;
+                }
+                if retry_scheduled {
+                    if let Some(operation_id) = job.operation_id {
+                        if dependabot::get_operation(&conn, operation_id)
+                            .map_err(|e| e.to_string())?
+                            .is_some()
+                        {
+                            dependabot::append_operation_event(
+                                &conn,
+                                operation_id,
+                                "merged",
+                                "notification",
+                                "error",
+                                "Could not mark the associated notification as done; retry scheduled.",
+                                Some(&message),
+                                None,
+                                Some(&job.thread_id),
+                            )
+                            .map_err(|e| e.to_string())?;
+                        }
                     }
                 }
                 result.processed += 1;
-                result.changed = true;
                 if should_stop {
                     break;
                 }
@@ -3172,6 +3176,36 @@ mod tests {
             dependabot::pending_notification_cleanup_count(&conn).unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn notification_cleanup_does_not_log_retry_after_concurrent_manual_completion() {
+        let db = mem_db();
+        let (operation_id, thread_id) = seed_notification_cleanup(&db);
+
+        let result = tauri::async_runtime::block_on(process_notification_cleanups_core(
+            &db,
+            RecordingSink::default(),
+            |_| async {
+                let mut conn = db.0.lock().unwrap();
+                sync::mark_done_local(&mut conn, std::slice::from_ref(&thread_id)).unwrap();
+                Err(github::MutationError {
+                    rate: RateLimit::default(),
+                    error: GitHubError::Network("late failure".to_string()),
+                })
+            },
+        ))
+        .unwrap();
+
+        assert_eq!(result.processed, 1);
+        assert!(!result.changed);
+        let conn = db.0.lock().unwrap();
+        let events = dependabot::list_operation_events(&conn, operation_id).unwrap();
+        assert!(!events.iter().any(|event| {
+            event.kind == "notification"
+                && event.status == "error"
+                && event.summary.contains("retry scheduled")
+        }));
     }
 
     fn rate(resource: &str, remaining: i64, limit: i64) -> RateLimit {

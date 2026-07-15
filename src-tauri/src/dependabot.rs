@@ -126,11 +126,11 @@ pub fn record_notification_cleanup_failure(
     attempt_count: i64,
     error: &str,
     retry_after: Option<i64>,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<bool> {
     let exponent = attempt_count.clamp(0, 4) as u32;
     let delay_seconds = (60_i64 * 2_i64.pow(exponent)).max(retry_after.unwrap_or(0));
     let modifier = format!("+{delay_seconds} seconds");
-    conn.execute(
+    let updated = conn.execute(
         "UPDATE dependabot_notification_cleanups
          SET attempt_count = attempt_count + 1,
              last_error = ?2,
@@ -139,7 +139,7 @@ pub fn record_notification_cleanup_failure(
          WHERE thread_id = ?1",
         params![thread_id, error, modifier],
     )?;
-    Ok(())
+    Ok(updated > 0)
 }
 
 pub fn pending_notification_cleanup_count(conn: &Connection) -> rusqlite::Result<i64> {
