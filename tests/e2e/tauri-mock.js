@@ -174,7 +174,7 @@ export function installTauriMock(fixtures) {
 
     list_inbox: () => JSON.parse(JSON.stringify(visibleInbox())),
     list_bookmarks: () => {
-      // is_done is derived: a bookmark not present in the live inbox is done/removed.
+      // is_done tracks absence from the stored notification mirror, before visibility filtering.
       const inboxIds = new Set(state.inbox.flatMap((g) => g.notifications.map((n) => n.thread_id)));
       const groups = (state.bookmarks ?? []).map((g) => ({
         ...g,
