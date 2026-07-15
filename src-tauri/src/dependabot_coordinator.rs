@@ -1203,7 +1203,6 @@ pub async fn process_dependabot_merges(
             async move { orchestrate_operation(db, &backend, work, timed_out).await }
         })
         .await?;
-    let merge_changed = result.changed;
     let cleanup = process_notification_cleanups_core(&state.db, app.clone(), move |thread_id| {
         let client = client.clone();
         let token = token.clone();
@@ -1212,7 +1211,7 @@ pub async fn process_dependabot_merges(
     .await?;
     result.processed += cleanup.processed;
     result.changed |= cleanup.changed;
-    if cleanup.changed && !merge_changed {
+    if cleanup.changed {
         EventSink::emit(
             &app,
             "dependabot:operations-changed",
