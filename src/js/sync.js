@@ -350,6 +350,7 @@ export function registerSyncEvents() {
   });
   listen("notifications:changed", () => {
     notifySyncStaleListeners();
+    loadSyncStatus();
   });
   // The resolution pass finished (drained, hit the rate reserve, or backed off) — this is the
   // true end of the sync. Leave the resolving phase: flip the pill to "Synced", re-enable the
