@@ -24,11 +24,9 @@ import {
 import { initShortcuts } from "./js/shortcuts.js";
 import { initBrandFlip } from "./js/brand-flip.js";
 
-// Note: inbox.js, dependabot.js, and slo-dips.js self-register with the module system
-// (registerModule)
-// at import time, including their lifecycle, sidebar selector, and shortcut groups. The
-// named imports above trigger those registrations, so initModules() can wire them without
-// separate side-effect imports.
+// inbox.js and slo-dips.js are imported for their registration side effects; importing named
+// Dependabot exports also executes that module's registration. All three run before initModules()
+// wires their lifecycle, sidebar selectors, and shortcut groups.
 
 /* main.js is the thin orchestrator: it wires each domain module's init on DOMContentLoaded
  * and connects the cross-domain lifecycle hooks. Modules self-register lifecycle +

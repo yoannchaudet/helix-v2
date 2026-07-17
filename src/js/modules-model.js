@@ -24,7 +24,7 @@ export const MODULES = [
   },
 ];
 
-/** The module shown on launch (state is not persisted across launches). */
+/** The initial module shown before persisted last-module state is restored. */
 export const DEFAULT_MODULE_ID = "notifications";
 
 /** Whether `id` names a real module. */
