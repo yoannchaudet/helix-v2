@@ -1,10 +1,10 @@
 import { test, expect } from "@playwright/test";
 import { openApp, defaultFixtures, installTauriMock } from "./tauri-mock.js";
 
-/* The module system: the segmented title-bar picker, ⌘1/⌘2 jumps, and the
+/* The module system: the segmented title-bar picker, ⌘1/⌘2/⌘3 jumps, and the
  * Settings-overlay interplay. */
 
-test("the left-side module bar shows both modules and the active indicator", async ({ page }) => {
+test("the left-side module bar shows all modules and the active indicator", async ({ page }) => {
   await openApp(page);
 
   const chromeOrder = await page.locator(".topchrome").evaluate((chrome) =>
@@ -16,8 +16,9 @@ test("the left-side module bar shows both modules and the active indicator", asy
   );
   expect(chromeOrder).toEqual(["picker", "brand", "actions"]);
 
-  await expect(page.locator(".module-tab")).toHaveCount(2);
+  await expect(page.locator(".module-tab")).toHaveCount(3);
   await expect(page.locator('.module-tab[data-module="dependabot"]')).toHaveText("Bot PRs");
+  await expect(page.locator('.module-tab[data-module="slo-dips"]')).toHaveText("SLO Dips");
   await expect(page.locator(".module-picker-indicator")).toHaveCount(1);
   await expect(page.locator(".module-picker-indicator")).toHaveAttribute("aria-hidden", "true");
   await expect(page.locator(".module-picker-indicator")).toHaveCSS("pointer-events", "none");
@@ -47,6 +48,7 @@ test("the left-side module bar shows both modules and the active indicator", asy
   );
   await expect(page.locator("#view-notifications")).toBeVisible();
   await expect(page.locator("#view-dependabot")).toBeHidden();
+  await expect(page.locator("#view-slo-dips")).toBeHidden();
 });
 
 test("clicking a module swaps the visible pane and active tab", async ({ page }) => {
@@ -76,9 +78,18 @@ test("clicking a module swaps the visible pane and active tab", async ({ page })
     "aria-current",
     "true",
   );
+
+  await page.locator('.module-tab[data-module="slo-dips"]').click();
+  await expect(page.locator(".module-picker")).toHaveAttribute("data-active-index", "2");
+  await expect(page.locator("#view-slo-dips")).toBeVisible();
+  await expect(page.locator("#view-dependabot")).toBeHidden();
+  await expect(page.locator('.module-tab[data-module="slo-dips"]')).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
 });
 
-test("⌘1 / ⌘2 jump straight to a module", async ({ page }) => {
+test("⌘1 / ⌘2 / ⌘3 jump straight to a module", async ({ page }) => {
   await openApp(page);
 
   await page.keyboard.press("j");
@@ -94,6 +105,11 @@ test("⌘1 / ⌘2 jump straight to a module", async ({ page }) => {
   await expect(page.locator('#dependabot .n-row[data-pr-id="103"] .n-open')).toHaveClass(
     /kbd-focus/,
   );
+
+  await page.keyboard.press("Meta+3");
+  await expect(page.locator(".module-picker")).toHaveAttribute("data-active-index", "2");
+  await expect(page.locator("#view-slo-dips")).toBeVisible();
+  await expect(page.locator("#view-dependabot")).toBeHidden();
 
   await page.keyboard.press("Meta+1");
   await expect(page.locator(".module-picker")).toHaveAttribute("data-active-index", "0");
@@ -135,7 +151,16 @@ test("each module shows its own sidebar sources; Settings hides the sidebar", as
   await expect(page.locator(".sidebar")).toBeVisible();
   await expect(page.locator(".sidebar-module--dependabot")).toBeVisible();
   await expect(page.locator(".sidebar-module--notifications")).toBeHidden();
+  await expect(page.locator(".sidebar-module--slo-dips")).toBeHidden();
   await expect(page.locator("#filter-list")).toBeHidden();
+
+  // SLO Dips: its reserved sidebar is visible but intentionally empty.
+  await page.locator('.module-tab[data-module="slo-dips"]').click();
+  await expect(page.locator(".sidebar")).toBeVisible();
+  await expect(page.locator(".sidebar-module--slo-dips")).toBeVisible();
+  await expect(page.locator(".sidebar-module--slo-dips")).toBeEmpty();
+  await expect(page.locator(".sidebar-module--notifications")).toBeHidden();
+  await expect(page.locator(".sidebar-module--dependabot")).toBeHidden();
 
   await page.locator('.module-tab[data-module="notifications"]').click();
   await expect(page.locator(".sidebar-module--notifications")).toBeVisible();
@@ -153,10 +178,10 @@ test("the picker stays in the chrome during Settings; switching modules leaves S
   // The sidebar is hidden under the full-width Settings overlay.
   await expect(page.locator(".sidebar")).toBeHidden();
 
-  // ⌘2 from Settings dismisses the overlay and lands on the Bot PRs module.
-  await page.keyboard.press("Meta+2");
+  // ⌘3 from Settings dismisses the overlay and lands on the SLO Dips module.
+  await page.keyboard.press("Meta+3");
   await expect(page.locator("#view-settings")).toBeHidden();
-  await expect(page.locator("#view-dependabot")).toBeVisible();
+  await expect(page.locator("#view-slo-dips")).toBeVisible();
 });
 
 test("the module bar fits the minimum window width and honors reduced motion", async ({ page }) => {
@@ -205,17 +230,35 @@ test("closing Settings returns to the active (non-default) module", async ({ pag
 });
 
 test("the last opened module is restored on launch", async ({ page }) => {
-  // Seed persisted state as if Bot PRs was open when the app last closed. We can't use
+  // Seed persisted state as if SLO Dips was open when the app last closed. We can't use
   // openApp's helper here because it waits on the (now hidden) notifications inbox pane.
-  await page.addInitScript(installTauriMock, { ...defaultFixtures(), lastModule: "dependabot" });
+  await page.addInitScript(installTauriMock, { ...defaultFixtures(), lastModule: "slo-dips" });
   await page.goto("/");
 
-  await expect(page.locator("#view-dependabot")).toBeVisible();
+  await expect(page.locator("#view-slo-dips")).toBeVisible();
   await expect(page.locator("#view-notifications")).toBeHidden();
-  await expect(page.locator(".module-picker")).toHaveAttribute("data-active-index", "1");
-  await expect(page.locator('.module-tab[data-module="dependabot"]')).toHaveAttribute(
+  await expect(page.locator("#view-dependabot")).toBeHidden();
+  await expect(page.locator(".module-picker")).toHaveAttribute("data-active-index", "2");
+  await expect(page.locator('.module-tab[data-module="slo-dips"]')).toHaveAttribute(
     "aria-current",
     "true",
+  );
+});
+
+test("SLO Dips exposes an accessible placeholder page", async ({ page }) => {
+  await openApp(page);
+  await page.locator('.module-tab[data-module="slo-dips"]').click();
+
+  await expect(page.locator("#view-slo-dips")).toHaveAttribute(
+    "aria-labelledby",
+    "slo-dips-view-title",
+  );
+  await expect(page.getByRole("region", { name: "SLO Dips" })).toHaveAttribute(
+    "id",
+    "view-slo-dips",
+  );
+  await expect(page.locator("#view-slo-dips .module-placeholder-title")).toHaveText(
+    "SLO Dips is coming soon.",
   );
 });
 

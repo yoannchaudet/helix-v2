@@ -45,7 +45,8 @@
       <div class="app-body">
       <!-- =============================== Sidebar =============================== -->
       <!-- Module-scoped: each module shows its own sidebar sources (Notifications: smart
-           filters + repositories; Bot PRs: repositories only), toggled by modules.js.
+           filters + repositories; Bot PRs: repositories only; SLO Dips: reserved and empty),
+           toggled by modules.js.
            The whole sidebar is hidden while the Settings overlay is open. -->
       <aside class="sidebar">
         <!-- Notifications module sources: smart filters + repositories. -->
@@ -79,6 +80,13 @@
             <li class="source-empty">No repositories yet.</li>
           </ul>
         </nav>
+
+        <!-- SLO Dips reserves its module sidebar for future navigation. -->
+        <div
+          class="sources sidebar-module sidebar-module--slo-dips"
+          id="sidebar-slo-dips"
+          hidden
+        ></div>
       </aside>
 
       <!-- Drag handle to resize the sidebar width (min = default width). -->
@@ -163,6 +171,19 @@
             <span class="spinner" aria-hidden="true"></span>
             <span>Loading bot pull requests…</span>
           </div>
+        </div>
+      </section>
+
+      <!-- =============================== SLO Dips ============================== -->
+      <section id="view-slo-dips" class="pane" hidden aria-labelledby="slo-dips-view-title">
+        <header class="toolbar" data-tauri-drag-region>
+          <h1 class="toolbar-title" id="slo-dips-view-title">SLO Dips</h1>
+        </header>
+
+        <div class="module-placeholder">
+          <img class="module-placeholder-art" src="/assets/helix-muted.svg" alt="" width="116" height="116" />
+          <p class="module-placeholder-title">SLO Dips is coming soon.</p>
+          <p class="module-placeholder-sub">This module is ready for its first SLO workflow.</p>
         </div>
       </section>
 

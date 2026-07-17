@@ -595,7 +595,7 @@ code,
   box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
-/* Centered "coming soon" empty-state for placeholder modules (e.g. Dependabot). Mirrors the
+/* Centered "coming soon" empty-state for placeholder modules (e.g. SLO Dips). Mirrors the
    inbox empty-state layout but kept on its own class so module placeholders and the inbox
    empty-state evolve independently. */
 .module-placeholder {

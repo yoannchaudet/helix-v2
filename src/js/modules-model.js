@@ -17,9 +17,14 @@ export const MODULES = [
     label: "Bot PRs",
     paneId: "view-dependabot",
   },
+  {
+    id: "slo-dips",
+    label: "SLO Dips",
+    paneId: "view-slo-dips",
+  },
 ];
 
-/** The module shown on launch (state is not persisted across launches). */
+/** The initial module shown before persisted last-module state is restored. */
 export const DEFAULT_MODULE_ID = "notifications";
 
 /** Whether `id` names a real module. */

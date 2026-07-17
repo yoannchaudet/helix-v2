@@ -203,7 +203,7 @@ export function initModules() {
     });
   }
 
-  // ⌘1 / ⌘2 jump straight to a module by position (matching the ⌘, Settings convention).
+  // ⌘N jumps straight to a module by registry position (matching the ⌘, Settings convention).
   // Guard like the other global shortcuts: ignore while the shortcuts overlay is modal.
   document.addEventListener("keydown", (e) => {
     if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;

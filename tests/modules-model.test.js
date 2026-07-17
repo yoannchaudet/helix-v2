@@ -7,7 +7,7 @@ import { MODULES, DEFAULT_MODULE_ID, isModuleId, moduleAt } from "../src/js/modu
 test("MODULES lists the expected top-level modules in picker order", () => {
   assert.deepEqual(
     MODULES.map((m) => m.id),
-    ["notifications", "dependabot"],
+    ["notifications", "dependabot", "slo-dips"],
   );
 });
 
@@ -34,6 +34,7 @@ test("the default module exists in the registry", () => {
 test("isModuleId recognizes real modules and rejects unknown ids", () => {
   assert.equal(isModuleId("notifications"), true);
   assert.equal(isModuleId("dependabot"), true);
+  assert.equal(isModuleId("slo-dips"), true);
   assert.equal(isModuleId("nope"), false);
   assert.equal(isModuleId(undefined), false);
 });
@@ -42,6 +43,7 @@ test("isModuleId recognizes real modules and rejects unknown ids", () => {
 test("moduleAt maps ⌘N positions to modules (0-based)", () => {
   assert.equal(moduleAt(0).id, "notifications"); // ⌘1
   assert.equal(moduleAt(1).id, "dependabot"); // ⌘2
+  assert.equal(moduleAt(2).id, "slo-dips"); // ⌘3
 });
 
 test("moduleAt returns null for out-of-range or non-integer positions", () => {

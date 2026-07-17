@@ -329,7 +329,7 @@ the **app-level top chrome** (`#module-picker` in the `.topchrome` header, rende
 `MODULES` registry in `src/js/modules-model.js`). The chrome spans the full title-bar strip
 and sits *above* the sidebar+content split, so modules are a genuinely top-level concept and
 each module owns — or omits — its own sidebar. A rounded accent indicator animates between
-the named segments when the active module changes; `⌘1` / `⌘2` jump straight to a module by
+the named segments when the active module changes; `⌘1` / `⌘2` / `⌘3` jump straight to a module by
 position.
 - **Notifications** module — the inbox described below (the original v1 feature). It owns the
   smart-filter + repository **sidebar**.
@@ -340,6 +340,9 @@ position.
   Notifications and applies to both open PR and Operations groups. Expanding an
   operation reveals its strategy-specific flow, highlighted current step, next action, retry or
   GitHub queue position, and timestamped durable action log.
+- **SLO Dips** module — initialized as the third top-level destination with an empty dedicated
+  sidebar and a static placeholder pane. It intentionally has no data model, SQLite state, network
+  behavior, settings, or module-specific shortcuts yet.
 - **Settings is *not* a module** — it's a focused, full-width **overlay** that temporarily
   covers the active module (hiding the sidebar) and returns to it on close. The top chrome
   (and picker) stays visible, so switching modules dismisses the overlay. `modules.js` owns
