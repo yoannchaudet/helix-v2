@@ -336,7 +336,8 @@ position.
 - **Bot PRs** module — lists cached open PRs from supported automation bots by repository and owns a
   repository/Operations sidebar. Row-level merge actions create durable operations;
   Operations shows active FIFO work plus the latest 100 terminal results, grouped by repository
-  within the Active and Recent sections. Expanding an
+  within the Active and Recent sections. Repository collapse uses the same persistent state as
+  Notifications and applies to both open PR and Operations groups. Expanding an
   operation reveals its strategy-specific flow, highlighted current step, next action, retry or
   GitHub queue position, and timestamped durable action log.
 - **Settings is *not* a module** — it's a focused, full-width **overlay** that temporarily
@@ -373,6 +374,12 @@ module's **sidebar + content** split:
   subject type (PR/Issue), number, title, reason, and state label. Hairline row separators.
   Once a row's subject is resolved, clicking (or pressing Enter on) it opens the subject in
   the browser; a right-click context menu offers **Copy URL** and **Mark as done**.
+  Each repository header has an accessible collapse toggle. Collapse is presentation-only:
+  the filtered count and bulk mark-done behavior still include hidden rows. The preference is
+  persisted locally in `collapsed_notification_repos`, keyed by repository full name without a
+  `repos` foreign key so it survives app restarts and repositories temporarily leaving the inbox;
+  the same state applies in smart filters, repository refinement, Bookmarks, Bot PRs, and Bot PR
+  merge Operations.
 - **Cleanup:** the **Cleanup** sidebar filter (§6) reuses the same by-repo list, narrowed to
   candidates; clearing them is the toolbar ••• "Mark all as done" flow with live progress.
 - **Settings:** an in-app pane (reached from the sidebar or `⌘,`) for PAT entry, the poll

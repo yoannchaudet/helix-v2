@@ -23,6 +23,7 @@ const CANCEL_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden
 const DISCARD_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3.5 5h9M6 5V3.5h4V5m1.5 0-.5 8H5L4.5 5M6.5 7.5v3M9.5 7.5v3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 const FORGET_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3 4.5h6.5a3.5 3.5 0 110 7H7M5 2.5L3 4.5l2 2M10.5 8.5l3 3m0-3l-3 3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 const CHEVRON_ICON = `<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+const COLLAPSE_ICON = `<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
 const OP_LABELS = {
   queued: "Queued",
@@ -108,9 +109,19 @@ export function prRow(pr) {
 /** Repo section header: the repository name (an `<h2>` so screen-reader users can navigate
  *  by heading) plus a count of its open automation PRs. No mark-done affordance. */
 export function repoHeader(group) {
+  const collapsed = Boolean(group.collapsed);
+  const listId = `${repoDomId(group.full_name)}-list`;
+  const collapse = repoCollapseButton({
+    fullName: group.full_name,
+    collapsed,
+    listId,
+    buttonId: `${repoDomId(group.full_name)}-collapse`,
+    itemLabel: "bot pull requests",
+  });
   const counts = `<span class="repo-counts">${group.prs.length}</span>`;
   return html`
     <div class="repo-header">
+      ${rawHtml(collapse)}
       <h2 class="repo-name" id="${repoDomId(group.full_name)}">${group.full_name}</h2>
       ${rawHtml(counts)}
     </div>`;
@@ -118,10 +129,24 @@ export function repoHeader(group) {
 
 /** A repository's PRs as a labeled group region (mirrors the inbox `repoSection`). */
 export function repoSection(group) {
-  const rows = group.prs.map(prRow).join("");
-  return html`<section class="repo-section" role="group" aria-labelledby="${repoDomId(
-    group.full_name,
-  )}">${rawHtml(repoHeader(group))}<ul class="n-list">${rawHtml(rows)}</ul></section>`;
+  const collapsed = Boolean(group.collapsed);
+  const rows = collapsed ? "" : group.prs.map(prRow).join("");
+  const hidden = collapsed ? rawHtml(" hidden") : "";
+  const collapsedClass = collapsed ? " repo-section--collapsed" : "";
+  const headingId = repoDomId(group.full_name);
+  return html`<section class="repo-section${collapsedClass}" role="group" aria-labelledby="${headingId}">${rawHtml(
+    repoHeader(group),
+  )}<ul class="n-list" id="${headingId}-list"${hidden}>${rawHtml(rows)}</ul></section>`;
+}
+
+function repoCollapseButton({ fullName, collapsed, listId, buttonId, itemLabel }) {
+  return iconButton({
+    icon: COLLAPSE_ICON,
+    className: "repo-collapse",
+    title: `${collapsed ? "Expand" : "Collapse"} repository ${itemLabel}`,
+    label: `${collapsed ? "Expand" : "Collapse"} ${fullName} ${itemLabel}`,
+    attrs: html`id="${buttonId}" data-repo-full-name="${fullName}" aria-expanded="${!collapsed}" aria-controls="${listId}"`,
+  });
 }
 
 /** Stable id for an operation's expanded detail panel, so its disclosure button can point
@@ -321,7 +346,7 @@ export function operationRow(operation, options = {}) {
  *    current_explanation, next_action }` payload for the expanded operation (or omitted/
  *    `null` while it's still loading). */
 export function operationsList(operations, options = {}) {
-  const { expandedId = null, details = {} } = options;
+  const { expandedId = null, details = {}, collapsedRepos = new Set() } = options;
   if (!operations.length) {
     return html`<div class="inbox-empty">
       <p class="inbox-empty-title">No merge operations yet.</p>
@@ -347,12 +372,25 @@ export function operationsList(operations, options = {}) {
     const repoGroups = [...byRepo.entries()]
       .map(([repo, repoOperations], index) => {
         const headingId = `operation-repo-${key}-${index}`;
-        return html`<section class="operation-repo-group" data-repo="${repo}" role="group" aria-labelledby="${headingId}">
+        const listId = `${headingId}-list`;
+        const collapsed = collapsedRepos.has(repo);
+        const rows = collapsed ? "" : repoOperations.map(renderRow).join("");
+        const hidden = collapsed ? rawHtml(" hidden") : "";
+        const collapsedClass = collapsed ? " repo-section--collapsed" : "";
+        const collapse = repoCollapseButton({
+          fullName: repo,
+          collapsed,
+          listId,
+          buttonId: `${headingId}-collapse`,
+          itemLabel: "merge operations",
+        });
+        return html`<section class="operation-repo-group${collapsedClass}" data-repo="${repo}" role="group" aria-labelledby="${headingId}">
           <div class="operation-repo-header">
+            ${rawHtml(collapse)}
             <h3 class="repo-name" id="${headingId}">${repo}</h3>
             <span class="repo-counts">${repoOperations.length}</span>
           </div>
-          <ul class="n-list">${rawHtml(repoOperations.map(renderRow).join(""))}</ul>
+          <ul class="n-list" id="${listId}"${hidden}>${rawHtml(rows)}</ul>
         </section>`;
       })
       .join("");

@@ -350,6 +350,19 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE dependabot_merge_operations DROP COLUMN cancel_command_at;
     ALTER TABLE dependabot_merge_operations DROP COLUMN last_action_at;
     "#,
+    // v18 — reserved. An earlier development build used this version for a different additive
+    // migration, and local builds share one database across branches.
+    r#"
+    SELECT 1;
+    "#,
+    // v19 — persistent presentation state for collapsed Notifications repository sections.
+    // Key by full name without a repos foreign key so the preference survives repo pruning.
+    r#"
+    CREATE TABLE IF NOT EXISTS collapsed_notification_repos (
+        repo_full_name TEXT PRIMARY KEY,
+        collapsed_at   TEXT NOT NULL
+    );
+    "#,
 ];
 
 /// Open the database at `db_path`, apply any pending migrations, and return the
@@ -462,6 +475,7 @@ mod tests {
 
         let tables = table_names(&conn).unwrap();
         for expected in [
+            "collapsed_notification_repos",
             "dependabot_prs",
             "dependabot_repos",
             "dependabot_merge_operations",
@@ -701,6 +715,56 @@ mod tests {
         );
 
         std::fs::remove_file(&db_path).ok();
+    }
+
+    #[test]
+    fn upgrade_from_reserved_v18_creates_collapsed_notification_repos() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        for migration in &MIGRATIONS[..17] {
+            conn.execute_batch(migration).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 18).unwrap();
+
+        run_migrations(&conn).unwrap();
+
+        assert_eq!(schema_version(&conn).unwrap(), MIGRATIONS.len() as i64);
+        assert!(table_names(&conn)
+            .unwrap()
+            .contains(&"collapsed_notification_repos".to_string()));
+    }
+
+    #[test]
+    fn upgrade_from_early_collapse_v18_preserves_preferences() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        for migration in &MIGRATIONS[..17] {
+            conn.execute_batch(migration).unwrap();
+        }
+        conn.execute_batch(
+            "CREATE TABLE collapsed_notification_repos (
+                repo_full_name TEXT PRIMARY KEY,
+                collapsed_at   TEXT NOT NULL
+            );
+            INSERT INTO collapsed_notification_repos (repo_full_name, collapsed_at)
+            VALUES ('octo/repo', '2026-07-17T00:00:00Z');",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 18).unwrap();
+
+        run_migrations(&conn).unwrap();
+
+        assert_eq!(schema_version(&conn).unwrap(), MIGRATIONS.len() as i64);
+        assert_eq!(
+            conn.query_row(
+                "SELECT collapsed_at FROM collapsed_notification_repos
+                 WHERE repo_full_name = 'octo/repo'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "2026-07-17T00:00:00Z"
+        );
     }
 
     #[test]

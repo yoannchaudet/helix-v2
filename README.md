@@ -43,8 +43,11 @@ mirror GitHub's model:
 - **Open in the browser** — once a notification's subject is resolved, click (or press
   Enter on) the row to open it; right-click to copy the URL.
 - **Mark as done** — clear a single notification from its context menu, or bulk-clear the
-  visible/filtered set from the toolbar, with optimistic local updates and per-thread
+  filtered set from the toolbar, with optimistic local updates and per-thread
   failure reporting.
+- **Collapsible repositories** — hide a repository's rows in Notifications, Bot PRs, and merge
+  Operations while keeping counts and bulk actions available; the shared state persists across
+  launches.
 - **API rate-limit visibility** — per-bucket usage bars in Settings.
 - **Bot PR merge operations** — manage PRs from supported automation bots with queue-safe,
   PAT-approved merges per repository, follow each operation in an interactive timeline, retry

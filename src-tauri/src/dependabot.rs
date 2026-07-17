@@ -172,6 +172,7 @@ pub struct ActiveMergeOperationSummary {
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct DependabotRepoGroup {
     pub full_name: String,
+    pub collapsed: bool,
     pub total: i64,
     pub prs: Vec<DependabotPrView>,
 }
@@ -182,7 +183,11 @@ pub struct DependabotRepoGroup {
 pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<DependabotRepoGroup>> {
     let sql = format!(
         "SELECT p.repo_full_name, p.id, p.number, p.title, p.html_url, p.author, p.base_ref,
-                p.updated_at, p.mergeable_state, o.id, o.state
+                p.updated_at, p.mergeable_state, o.id, o.state,
+                EXISTS(
+                    SELECT 1 FROM collapsed_notification_repos c
+                    WHERE c.repo_full_name = p.repo_full_name
+                ) AS collapsed
          FROM dependabot_prs p
          LEFT JOIN dependabot_merge_operations o ON o.pr_id = p.id
              AND o.state IN ({ACTIVE_STATES})
@@ -193,6 +198,7 @@ pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<DependabotRepoGro
     let rows = stmt.query_map([], |r| {
         Ok((
             r.get::<_, String>(0)?, // repo_full_name
+            r.get::<_, i64>(11)? != 0,
             DependabotPrView {
                 id: r.get(1)?,
                 number: r.get(2)?,
@@ -219,11 +225,12 @@ pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<DependabotRepoGro
 
     let mut groups: Vec<DependabotRepoGroup> = Vec::new();
     for row in rows {
-        let (full_name, view) = row?;
+        let (full_name, collapsed, view) = row?;
         // Rows are ordered by repo, so we only ever append to the last group.
         if groups.last().map(|g| g.full_name.as_str()) != Some(full_name.as_str()) {
             groups.push(DependabotRepoGroup {
                 full_name,
+                collapsed,
                 total: 0,
                 prs: Vec::new(),
             });
@@ -1541,12 +1548,18 @@ mod tests {
         let groups = list_by_repo(&conn).unwrap();
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].full_name, "octo/repo-a");
+        assert!(!groups[0].collapsed);
         assert_eq!(groups[0].total, 2);
         assert_eq!(groups[1].full_name, "octo/repo-b");
         assert_eq!(groups[1].total, 1);
         // No merge state resolved yet.
         assert_eq!(groups[0].prs[0].mergeable_state, None);
         assert_eq!(groups[0].prs[0].base_ref.as_deref(), Some("main"));
+
+        crate::sync::set_repo_collapsed(&conn, "octo/repo-a", true).unwrap();
+        let groups = list_by_repo(&conn).unwrap();
+        assert!(groups[0].collapsed);
+        assert!(!groups[1].collapsed);
     }
 
     #[test]

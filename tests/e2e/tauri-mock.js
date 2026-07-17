@@ -16,6 +16,11 @@ export function installTauriMock(fixtures) {
     settings: { ...fixtures.settings },
     theme: fixtures.settings.theme,
     inbox: JSON.parse(JSON.stringify(fixtures.inbox)),
+    collapsedNotificationRepos: new Set(
+      fixtures.collapsedNotificationRepos ??
+        fixtures.inbox.filter((group) => group.collapsed).map((group) => group.full_name),
+    ),
+    collapseError: fixtures.collapseError ?? null,
     dependabot: JSON.parse(JSON.stringify(fixtures.dependabot ?? [])),
     mergeOperations: JSON.parse(JSON.stringify(fixtures.mergeOperations ?? [])),
     mergeOperationDetails: JSON.parse(JSON.stringify(fixtures.mergeOperationDetails ?? {})),
@@ -116,6 +121,11 @@ export function installTauriMock(fixtures) {
   };
 
   const countAll = () => state.inbox.reduce((sum, g) => sum + g.notifications.length, 0);
+  const withCollapsedState = (groups) =>
+    groups.map((group) => ({
+      ...group,
+      collapsed: state.collapsedNotificationRepos.has(group.full_name),
+    }));
 
   const handlers = {
     show_main_window: () => null,
@@ -154,7 +164,7 @@ export function installTauriMock(fixtures) {
       return null;
     },
 
-    list_inbox: () => JSON.parse(JSON.stringify(state.inbox)),
+    list_inbox: () => JSON.parse(JSON.stringify(withCollapsedState(state.inbox))),
     list_bookmarks: () => {
       // is_done is derived: a bookmark not present in the live inbox is done/removed.
       const inboxIds = new Set(state.inbox.flatMap((g) => g.notifications.map((n) => n.thread_id)));
@@ -165,8 +175,15 @@ export function installTauriMock(fixtures) {
           is_done: !inboxIds.has(n.thread_id),
         })),
       }));
-      return JSON.parse(JSON.stringify(groups));
+      return JSON.parse(JSON.stringify(withCollapsedState(groups)));
     },
+    set_notification_repo_collapsed: ({ repoFullName, collapsed }) => {
+      if (state.collapseError) return Promise.reject(new Error(state.collapseError));
+      if (collapsed) state.collapsedNotificationRepos.add(repoFullName);
+      else state.collapsedNotificationRepos.delete(repoFullName);
+      return null;
+    },
+    list_collapsed_repos: () => [...state.collapsedNotificationRepos].sort(),
     set_bookmark: ({ threadId, bookmarked }) => {
       state.bookmarks = state.bookmarks ?? [];
       let snapshot = null;
@@ -226,6 +243,7 @@ export function installTauriMock(fixtures) {
         JSON.stringify(
           state.dependabot.map((group) => ({
             ...group,
+            collapsed: state.collapsedNotificationRepos.has(group.full_name),
             prs: group.prs.map((pr) => ({
               ...pr,
               active_merge_operation: activeByPr.get(pr.id) ?? null,
@@ -471,9 +489,10 @@ export function defaultFixtures() {
     },
     db: {
       path: "/Users/test/Library/Application Support/helix/helix.db",
-      schema_version: 15,
+      schema_version: 19,
       tables: [
         "bookmarks",
+        "collapsed_notification_repos",
         "dependabot_merge_check_retries",
         "dependabot_merge_operation_events",
         "dependabot_merge_operations",

@@ -31,6 +31,11 @@ import {
   createListFocusRetainer,
 } from "./list-kit.js";
 import { focusNeighborAfterRemoval } from "./list-kit-model.js";
+import {
+  applyRepoCollapseState,
+  setRepoCollapsed,
+  subscribeRepoCollapse,
+} from "./repo-collapse.js";
 
 /* The inbox: the notification list + its sidebar (type filters + repo refinement), keyboard
  * focus preservation across re-renders, the mark-done flows, and row interactions. Pure
@@ -164,6 +169,15 @@ const inboxFocusRetainer = createListFocusRetainer({
 
 /** Snapshot the inbox's current row focus so a re-render can restore it. */
 function captureInboxFocus() {
+  const active = document.activeElement;
+  if (active instanceof HTMLElement && active.classList.contains("repo-collapse")) {
+    const repoId = Number(active.dataset.collapseRepo);
+    if (Number.isFinite(repoId)) {
+      return {
+        selector: `.repo-collapse[data-collapse-repo="${repoId}"]`,
+      };
+    }
+  }
   return inboxFocusRetainer.capture();
 }
 
@@ -475,8 +489,8 @@ function onNotificationsClosed() {
 export async function loadInbox() {
   try {
     const [inbox, bookmarks] = await Promise.all([invoke("list_inbox"), invoke("list_bookmarks")]);
-    inboxGroups = inbox;
-    bookmarkGroups = bookmarks;
+    inboxGroups = applyRepoCollapseState(inbox);
+    bookmarkGroups = applyRepoCollapseState(bookmarks);
     // Drop a repo refinement whose repository is no longer present in the active dataset.
     if (activeRepo != null && !currentGroups().some((g) => g.repo_id === activeRepo)) {
       activeRepo = null;
@@ -502,6 +516,44 @@ async function toggleBookmark(threadId, bookmark) {
     setSyncProgress(String(err), "error");
   }
   await loadInbox();
+}
+
+/** Update one repository's collapse state across the live inbox and bookmark snapshots. */
+function setRepoCollapsedInGroups(repoFullName, collapsed) {
+  const update = (groups) =>
+    groups.map((group) => (group.full_name === repoFullName ? { ...group, collapsed } : group));
+  inboxGroups = update(inboxGroups);
+  bookmarkGroups = update(bookmarkGroups);
+  typeFilterMemo.base = null;
+}
+
+/** Optimistically toggle one repository section and persist the presentation preference. */
+async function toggleRepoCollapsed(btn) {
+  const repoId = Number(btn.dataset.collapseRepo);
+  const repoFullName = btn.dataset.repoFullName;
+  if (!repoFullName || !Number.isFinite(repoId)) return;
+
+  const group = [...inboxGroups, ...bookmarkGroups].find((g) => g.full_name === repoFullName);
+  if (!group) return;
+
+  const collapsed = !Boolean(group.collapsed);
+  pendingInboxFocus = {
+    selector: `.repo-collapse[data-collapse-repo="${repoId}"]`,
+  };
+
+  try {
+    const result = await setRepoCollapsed(repoFullName, collapsed);
+    if (result.latest) {
+      announce(`${repoFullName} notifications ${collapsed ? "collapsed" : "expanded"}.`);
+    }
+  } catch ({ error, latest }) {
+    if (latest) {
+      pendingInboxFocus = {
+        selector: `.repo-collapse[data-collapse-repo="${repoId}"]`,
+      };
+      setSyncProgress(String(error), "error");
+    }
+  }
 }
 
 /* -------------------------------- Mark done ------------------------------- */
@@ -624,6 +676,12 @@ function onInboxClick(e) {
     if (row?.dataset.threadId) markDone([row.dataset.threadId]);
     return;
   }
+  // Persistent per-repository presentation toggle.
+  const collapseBtn = e.target.closest?.(".repo-collapse");
+  if (collapseBtn) {
+    toggleRepoCollapsed(collapseBtn);
+    return;
+  }
   // Per-repo "mark all as done" for this repo (confirmed first).
   const repoBtn = e.target.closest?.(".repo-done");
   if (repoBtn) {
@@ -642,7 +700,7 @@ function onInboxKeydown(e) {
   if (e.key !== "Enter") return;
   // Let the per-row / per-repo action buttons handle their own activation; don't also
   // open the row underneath them.
-  if (e.target.closest?.(".n-done, .repo-done, .n-bookmark")) return;
+  if (e.target.closest?.(".n-done, .repo-done, .repo-collapse, .n-bookmark")) return;
   const open = e.target.closest?.(".n-open");
   if (!open?.dataset.url) return;
   e.preventDefault();
@@ -834,6 +892,10 @@ function confirmDone(ids, anchorEl) {
  *  its dismissal). Call once on DOMContentLoaded. `loadInbox()` then fetches + renders. */
 export function initInbox() {
   registerSyncStaleListener("notifications", markInboxStale);
+  subscribeRepoCollapse((repoFullName, collapsed) => {
+    setRepoCollapsedInGroups(repoFullName, collapsed);
+    renderInbox();
+  });
   // Render the smart-filter buttons (data-driven from FILTERS) before wiring their clicks.
   renderFilterList();
   // Sidebar smart filters.

@@ -34,6 +34,41 @@ test("lists open automation PRs grouped by repository", async ({ page }) => {
   );
 });
 
+test("repository collapse is shared with Notifications and preserves Bot PR counts", async ({
+  page,
+}) => {
+  await openDependabot(page);
+
+  const botSection = page
+    .locator("#dependabot .repo-section")
+    .filter({ has: page.getByRole("heading", { name: "octo/hello" }) });
+  const botToggle = botSection.locator(".repo-collapse");
+  await expect(botSection.locator(".n-row")).toHaveCount(2);
+  await expect(botSection.locator(".repo-counts")).toHaveText("2");
+
+  await botToggle.click();
+  await expect(botToggle).toHaveAttribute("aria-expanded", "false");
+  await expect(botSection.locator(".n-row")).toHaveCount(0);
+  await expect(botSection.locator(".repo-counts")).toHaveText("2");
+  await expect(botToggle).toBeFocused();
+
+  await page.evaluate(() => window.__mockEmit("dependabot:resolved", null));
+  await expect(botToggle).toHaveAttribute("aria-expanded", "false");
+  await expect(botSection.locator(".n-row")).toHaveCount(0);
+
+  await page.locator('.module-tab[data-module="notifications"]').click();
+  const inboxSection = page
+    .locator("#inbox .repo-section")
+    .filter({ has: page.getByRole("heading", { name: "octo/hello" }) });
+  await expect(inboxSection.locator(".repo-collapse")).toHaveAttribute("aria-expanded", "false");
+  await expect(inboxSection.locator(".n-row")).toHaveCount(0);
+
+  await inboxSection.locator(".repo-collapse").click();
+  await page.locator('.module-tab[data-module="dependabot"]').click();
+  await expect(botSection.locator(".repo-collapse")).toHaveAttribute("aria-expanded", "true");
+  await expect(botSection.locator(".n-row")).toHaveCount(2);
+});
+
 test("Bot PRs view is exposed as a named region", async ({ page }) => {
   await openDependabot(page);
 
@@ -77,6 +112,35 @@ test("queues a merge and shows it in Operations", async ({ page }) => {
 
   const calls = await page.evaluate(() => window.__TAURI_CALLS__);
   expect(calls.some((call) => call.cmd === "enqueue_dependabot_merge")).toBe(true);
+});
+
+test("persisted repository collapse applies to operation-only repositories", async ({ page }) => {
+  await openDependabot(page, {
+    ...defaultFixtures(),
+    collapsedNotificationRepos: ["archived/ops"],
+    mergeOperations: [
+      mergeOperation({
+        id: 71,
+        pr_id: 999,
+        repo_full_name: "archived/ops",
+        title: "Historical operation",
+      }),
+    ],
+  });
+  await page.locator('#dependabot-filter-list [data-filter="operations"]').click();
+
+  const group = page
+    .locator("#dependabot .operation-repo-group")
+    .filter({ has: page.getByRole("heading", { name: "archived/ops" }) });
+  const toggle = group.locator(".repo-collapse");
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(group.locator(".repo-counts")).toHaveText("1");
+  await expect(group.locator(".operation-row")).toHaveCount(0);
+
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  await expect(group.locator(".operation-row")).toHaveCount(1);
+  await expect(toggle).toBeFocused();
 });
 
 test("confirms a direct discard, closes the PR, and leaves notifications unchanged", async ({
