@@ -1,11 +1,11 @@
-//! Dependabot module data layer: persist the open Dependabot PRs and read them back grouped
+//! Bot PRs module data layer: persist open PRs from supported automation bots and read them grouped
 //! by repository.
 //!
 //! Mirrors `sync.rs` for its own domain (see `docs/design.md` — SQLite is the source of
 //! truth). The repo list (`dependabot_repos`) is fed from the notifications Helix fetches
 //! (`sync::store_resolved_subject` records a repo once it has a notification from a supported
 //! automation bot); `github::fetch_dependabot_prs_for_repos` then lists each repo's open
-//! Dependabot and GitHub Actions bot PRs — no search API. `store_prs` upserts the current results
+//! supported bot PRs — no search API. `store_prs` upserts the current results
 //! and, when the fetch
 //! was complete, reconciles away rows that disappeared upstream (a PR that merged/closed no
 //! longer appears, so it's deleted). The module reads offline-first via `list_by_repo`; GitHub

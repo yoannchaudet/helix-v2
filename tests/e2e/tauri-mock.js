@@ -283,7 +283,7 @@ export function installTauriMock(fixtures) {
         const pr = group.prs.find((candidate) => candidate.id === prId);
         if (pr) found = { group, pr };
       }
-      if (!found) throw new Error("Dependabot PR not found");
+      if (!found) throw new Error("Bot PR not found");
       const operation = {
         id: Math.max(0, ...state.mergeOperations.map((o) => o.id)) + 1,
         pr_id: prId,
@@ -383,7 +383,7 @@ export function installTauriMock(fixtures) {
           return { ...group, total: prs.length, prs };
         })
         .filter((group) => group.prs.length);
-      if (!removed) throw new Error("Dependabot PR not found");
+      if (!removed) throw new Error("Bot PR not found");
       emit("dependabot:changed", { pr_id: prId });
       return {
         status: "closed",
@@ -518,7 +518,7 @@ export function defaultFixtures() {
             number: 41,
             title: "Bump actions/checkout from 4 to 5",
             html_url: "https://github.com/octo/hello/pull/41",
-            author: "dependabot[bot]",
+            author: "release-controller[bot]",
             base_ref: "release/v2",
             updated_at: "2026-06-27T09:30:00Z",
             mergeable_state: "blocked",

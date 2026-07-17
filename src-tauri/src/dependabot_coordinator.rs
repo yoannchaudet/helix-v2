@@ -395,8 +395,7 @@ pub async fn enqueue_dependabot_merge(
     let conn = state.db.0.lock().map_err(|e| e.to_string())?;
     dependabot::enqueue_merge_operation(&conn, pr_id).map_err(|e| {
         if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
-            "This automation PR is not in the local cache. Sync the Dependabot module and try again."
-                .to_string()
+            "This bot PR is not in the local cache. Sync Bot PRs and try again.".to_string()
         } else {
             e.to_string()
         }
@@ -414,7 +413,7 @@ pub async fn cancel_dependabot_merge(
         let conn = state.db.0.lock().map_err(|e| e.to_string())?;
         dependabot::request_cancel(&conn, operation_id)
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| "Dependabot merge operation was not found.".to_string())?
+            .ok_or_else(|| "Bot PR merge operation was not found.".to_string())?
     };
     EventSink::emit(
         &app,
@@ -442,7 +441,7 @@ fn forget_stuck_dependabot_merge_core<S: EventSink>(
             Ok(())
         }
         dependabot::ForgetStuckOperationOutcome::NotFound => {
-            Err("Dependabot merge operation was not found.".to_string())
+            Err("Bot PR merge operation was not found.".to_string())
         }
         dependabot::ForgetStuckOperationOutcome::NotEligible => Err(
             "This operation is no longer a stuck cancellation and cannot be forgotten.".to_string(),
@@ -491,8 +490,7 @@ where
         let target = dependabot::get_cached_pr(&conn, pr_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| {
-                "This automation PR is not in the local cache. Sync the Dependabot module and try again."
-                    .to_string()
+                "This bot PR is not in the local cache. Sync Bot PRs and try again.".to_string()
             })?;
         let cancelled_operation = match dependabot::get_active_operation_for_pr(&conn, pr_id)
             .map_err(|e| e.to_string())?
@@ -730,7 +728,7 @@ pub fn get_dependabot_merge_operation_detail(
     let conn = state.db.0.lock().map_err(|e| e.to_string())?;
     operation_detail_core(&conn, operation_id)
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Dependabot merge operation was not found.".to_string())
+        .ok_or_else(|| "Bot PR merge operation was not found.".to_string())
 }
 
 fn persist_merge_rates(conn: &rusqlite::Connection, rates: Vec<github::RateLimit>) {
@@ -2920,7 +2918,7 @@ mod tests {
         assert_eq!(remaining, 0);
         assert_eq!(
             forget_stuck_dependabot_merge_core(&db, sink.clone(), operation_id).unwrap_err(),
-            "Dependabot merge operation was not found."
+            "Bot PR merge operation was not found."
         );
         assert_eq!(sink.count("dependabot:operations-changed"), 1);
     }

@@ -17,6 +17,7 @@ test("the left-side module bar shows both modules and the active indicator", asy
   expect(chromeOrder).toEqual(["picker", "brand", "actions"]);
 
   await expect(page.locator(".module-tab")).toHaveCount(2);
+  await expect(page.locator('.module-tab[data-module="dependabot"]')).toHaveText("Bot PRs");
   await expect(page.locator(".module-picker-indicator")).toHaveCount(1);
   await expect(page.locator(".module-picker-indicator")).toHaveAttribute("aria-hidden", "true");
   await expect(page.locator(".module-picker-indicator")).toHaveCSS("pointer-events", "none");
@@ -129,7 +130,7 @@ test("each module shows its own sidebar sources; Settings hides the sidebar", as
   await expect(page.locator(".sidebar-module--notifications")).toBeVisible();
   await expect(page.locator(".sidebar-module--dependabot")).toBeHidden();
 
-  // Dependabot: sidebar still visible, but showing only its repo list.
+  // Bot PRs: sidebar still visible, but showing only its repo list.
   await page.locator('.module-tab[data-module="dependabot"]').click();
   await expect(page.locator(".sidebar")).toBeVisible();
   await expect(page.locator(".sidebar-module--dependabot")).toBeVisible();
@@ -152,7 +153,7 @@ test("the picker stays in the chrome during Settings; switching modules leaves S
   // The sidebar is hidden under the full-width Settings overlay.
   await expect(page.locator(".sidebar")).toBeHidden();
 
-  // ⌘2 from Settings dismisses the overlay and lands on the Dependabot module.
+  // ⌘2 from Settings dismisses the overlay and lands on the Bot PRs module.
   await page.keyboard.press("Meta+2");
   await expect(page.locator("#view-settings")).toBeHidden();
   await expect(page.locator("#view-dependabot")).toBeVisible();
@@ -192,7 +193,7 @@ test("the module bar fits the minimum window width and honors reduced motion", a
 test("closing Settings returns to the active (non-default) module", async ({ page }) => {
   await openApp(page);
 
-  // Switch to Dependabot, open Settings, then close it — we should land back on Dependabot.
+  // Switch to Bot PRs, open Settings, then close it — we should land back on Bot PRs.
   await page.locator('.module-tab[data-module="dependabot"]').click();
   await page.locator("#open-settings").click();
   await expect(page.locator("#view-settings")).toBeVisible();
@@ -204,7 +205,7 @@ test("closing Settings returns to the active (non-default) module", async ({ pag
 });
 
 test("the last opened module is restored on launch", async ({ page }) => {
-  // Seed persisted state as if Dependabot was open when the app last closed. We can't use
+  // Seed persisted state as if Bot PRs was open when the app last closed. We can't use
   // openApp's helper here because it waits on the (now hidden) notifications inbox pane.
   await page.addInitScript(installTauriMock, { ...defaultFixtures(), lastModule: "dependabot" });
   await page.goto("/");

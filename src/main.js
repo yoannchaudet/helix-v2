@@ -81,7 +81,7 @@ window.addEventListener("DOMContentLoaded", () => {
         loadSettings();
         loadSyncStatus();
       }
-      // If auth resolved while a module was already active (e.g. restored into Dependabot
+      // If auth resolved while a module was already active (e.g. restored into Bot PRs
       // before auth completed), re-activate so its auth-gated logic (staleness-gated sync,
       // etc.) can run now.
       activateCurrentModule();

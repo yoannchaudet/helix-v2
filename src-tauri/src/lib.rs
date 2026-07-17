@@ -201,7 +201,7 @@ fn save_settings(
     }
     if dependabot_merge_poll_interval_s < settings::MIN_DEPENDABOT_MERGE_POLL_INTERVAL_S {
         return Err(CommandError::Message(format!(
-            "Dependabot merge polling interval must be at least {} seconds.",
+            "Bot PR merge polling interval must be at least {} seconds.",
             settings::MIN_DEPENDABOT_MERGE_POLL_INTERVAL_S
         )));
     }

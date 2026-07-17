@@ -1,4 +1,4 @@
-/* Pure HTML templating for the Dependabot module: given a PR (or repo group), return the
+/* Pure HTML templating for the Bot PRs module: given a PR (or repo group), return the
  * markup string. No DOM access, no module state — so these are unit-testable and the
  * stateful controller (`dependabot.js`) owns all wiring/rendering. Reuses the shared row
  * building blocks (`authorTag`, `mergeStateBadge`, `pill`) so an automation PR row reads like

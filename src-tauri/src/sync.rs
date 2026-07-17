@@ -515,7 +515,7 @@ pub fn store_resolved_subject(
         ],
     )?;
 
-    // Feed the Dependabot module's persistent repo list. A repo is tracked only once we've
+    // Feed the Bot PRs module's persistent repo list. A repo is tracked only once we've
     // resolved a notification from a supported automation bot in it (not just any notification)
     // because the author is only known here, after resolution. The repo persists even after its
     // notifications clear (dependabot_repos isn't pruned), so the module can keep scanning it.
@@ -908,7 +908,7 @@ mod tests {
             .unwrap();
         assert_eq!(repos, 2);
 
-        // A plain notification does NOT add its repo to the Dependabot list — only a resolved
+        // A plain notification does NOT add its repo to the Bot PRs list — only a resolved
         // notification from a trusted automation bot does.
         assert!(crate::dependabot::list_repos(&conn).unwrap().is_empty());
     }
@@ -921,12 +921,14 @@ mod tests {
             &[
                 thread("1", 100, "octo/repo-a", "Bump lodash"),
                 thread("2", 200, "octo/repo-b", "Automated release"),
-                thread("3", 300, "octo/repo-c", "A human PR"),
+                thread("3", 300, "octo/repo-c", "Release controller update"),
+                thread("4", 400, "octo/repo-d", "A human PR"),
             ],
         )
         .unwrap();
 
-        // Resolve #1 as Dependabot, #2 as GitHub Actions, and #3 as a human.
+        // Resolve #1 as Dependabot, #2 as GitHub Actions, #3 as Release Controller,
+        // and #4 as a human.
         let dependabot = ResolvedSubject {
             author: Some("dependabot[bot]".to_string()),
             ..Default::default()
@@ -935,31 +937,36 @@ mod tests {
             author: Some("github-actions[bot]".to_string()),
             ..Default::default()
         };
+        let release_controller = ResolvedSubject {
+            author: Some("release-controller[bot]".to_string()),
+            ..Default::default()
+        };
         let human = ResolvedSubject {
             author: Some("octocat".to_string()),
             ..Default::default()
         };
         store_resolved_subject(&conn, "1", &dependabot).unwrap();
         store_resolved_subject(&conn, "2", &github_actions).unwrap();
-        store_resolved_subject(&conn, "3", &human).unwrap();
+        store_resolved_subject(&conn, "3", &release_controller).unwrap();
+        store_resolved_subject(&conn, "4", &human).unwrap();
 
-        // Both supported bot authors are tracked; the human-authored repo is excluded.
+        // All supported bot authors are tracked; the human-authored repo is excluded.
         let dep_repos: Vec<String> = crate::dependabot::list_repos(&conn)
             .unwrap()
             .into_iter()
             .map(|r| r.full_name)
             .collect();
-        assert_eq!(dep_repos, vec!["octo/repo-a", "octo/repo-b"]);
+        assert_eq!(dep_repos, vec!["octo/repo-a", "octo/repo-b", "octo/repo-c"]);
 
-        // A later sync drops both threads → the notifications `repos` table is pruned, but the
-        // Dependabot list keeps both bot-discovered repos (it accumulates and isn't pruned).
-        store_notifications(&mut conn, &[thread("9", 400, "octo/repo-d", "x")]).unwrap();
+        // A later sync drops the original threads → the notifications `repos` table is pruned,
+        // but the Bot PRs list keeps all bot-discovered repos (it accumulates and isn't pruned).
+        store_notifications(&mut conn, &[thread("9", 500, "octo/repo-e", "x")]).unwrap();
         let dep_repos: Vec<String> = crate::dependabot::list_repos(&conn)
             .unwrap()
             .into_iter()
             .map(|r| r.full_name)
             .collect();
-        assert_eq!(dep_repos, vec!["octo/repo-a", "octo/repo-b"]);
+        assert_eq!(dep_repos, vec!["octo/repo-a", "octo/repo-b", "octo/repo-c"]);
     }
 
     #[test]

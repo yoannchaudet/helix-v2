@@ -333,7 +333,7 @@ the named segments when the active module changes; `⌘1` / `⌘2` jump straight
 position.
 - **Notifications** module — the inbox described below (the original v1 feature). It owns the
   smart-filter + repository **sidebar**.
-- **Dependabot** module — lists cached open Dependabot and GitHub Actions bot PRs by repository and owns a
+- **Bot PRs** module — lists cached open PRs from supported automation bots by repository and owns a
   repository/Operations sidebar. Row-level merge actions create durable operations;
   Operations shows active FIFO work plus the latest 100 terminal results, grouped by repository
   within the Active and Recent sections. Expanding an
@@ -360,7 +360,7 @@ module's **sidebar + content** split:
   **module-scoped**: for Notifications it shows the cross-cutting smart filters (**All**,
   **Mentions**, **Team mentions**, **Review requests**, **Assigned**, **Cleanup**) with live
   counts and a **Repositories** list of selectable sources. Selection is single-active (a
-  smart filter *or* a repository), Mail-style. Dependabot uses the same shell for **All**,
+  smart filter *or* a repository), Mail-style. Bot PRs uses the same shell for **All**,
   **Operations**, and repository refinement.
 - **Content pane:** an opaque pane with a **toolbar** below the chrome showing the active
   source title (left) and sync status + refresh (right), pinned while the list scrolls.
@@ -414,7 +414,7 @@ module's **sidebar + content** split:
   by `get_settings`.
 - **Recommended token scopes** (document for the user):
   - Classic PAT: `notifications` (read/modify the inbox). Add `repo` to resolve subjects
-    in **private** repositories; the **Dependabot** module also needs it to read PRs in
+    in **private** repositories; the **Bot PRs** module also needs it to read PRs in
     private repos.
   - Fine-grained PAT alternative: read access to **Notifications**; **Pull requests:
     read/write** for listing commits, approvals, and queue enrollment; **Contents: read/write**
@@ -422,24 +422,26 @@ module's **sidebar + content** split:
     jobs; and **Metadata: read** for repository policy. Scope the token to the repositories Helix
     manages. A user PAT cannot rerequest third-party check suites, so failed external CI is
     surfaced as needing attention instead of silently retried.
-- The Dependabot module does **not** use the search API and has no account/repo picker. Its
+- The Bot PRs module (stable internal ID: `dependabot`) does **not** use the search API and has
+  no account/repo picker. Its
   repo list is built lazily "for free" from your notifications: when a PR notification authored
-  by **Dependabot or GitHub Actions** is resolved, that repo is remembered in `dependabot_repos`
+  by `dependabot[bot]`, `dependabot-preview[bot]`, `github-actions[bot]`, or
+  `release-controller[bot]` is resolved, that repo is remembered in `dependabot_repos`
   (which — unlike `repos` — is not pruned when notifications clear). Each sync lists those repos'
-  open PRs from either supported bot via the core REST API, paced serially. A repo that
+  open PRs from supported bots via the core REST API, paced serially. A repo that
   consistently 404s/403s
   (renamed/deleted/access revoked) is dropped after a few tries.
-- The Dependabot module's **last successful sync time** is persisted (settings key
+- The Bot PRs module's **last successful sync time** is persisted (settings key
   `dependabot_last_sync_at`) so the "Synced …" label and the auto-sync staleness gate survive
   restarts — distinct from the notifications sync time in `sync_state`.
-- Dependabot **merge operations** are durable SQLite state. Repositories progress
+- Bot PR **merge operations** are durable SQLite state. Repositories progress
   independently, but each repository has a strict FIFO queue with one active merge at a time.
   The PR list persists each PR's target branch from GitHub's `base.ref`, displays it on the PR
   row, and snapshots it onto the durable operation so Operations retains the same context.
   Target branches are informational and do not partition or otherwise change the repo FIFO.
   At the head, Helix verifies that the open/non-draft/non-conflicting PR is still authored by
-  Dependabot or GitHub Actions, approves the current head SHA, and auto-detects the base branch's
-  merge strategy.
+  one of the explicit supported bot logins above, approves the current head SHA, and
+  auto-detects the base branch's merge strategy.
   Helix trusts the current head of that PR regardless of whether later commits were pushed by
   the original bot, another workflow, or a human; it does not validate per-commit provenance. Direct
   merges update a behind branch, then approve its new head. A ready direct PR is merged with the

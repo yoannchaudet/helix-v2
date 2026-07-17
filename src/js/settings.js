@@ -236,7 +236,7 @@ async function applySettings() {
     !Number.isInteger(dependabotMergePollIntervalS) ||
     dependabotMergePollIntervalS < dependabotMergePoll.minIntervalS
   ) {
-    setSettingsError(`Dependabot merge minimum ${dependabotMergePoll.minIntervalS}s`);
+    setSettingsError(`Bot PR merge minimum ${dependabotMergePoll.minIntervalS}s`);
     return;
   }
   clearSettingsError();

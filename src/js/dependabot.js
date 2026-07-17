@@ -26,7 +26,7 @@ import {
   createListFocusRetainer,
 } from "./list-kit.js";
 
-/* The Dependabot module: a list of open Dependabot and GitHub Actions bot PRs grouped by
+/* The Bot PRs module: a list of open PRs from supported automation bots grouped by
  * repository, its
  * repo-only sidebar refinement, keyboard navigation, and its own sync flow. Pure row/section
  * HTML lives in `dependabot-view.js`; the pure repo pipeline in `dependabot-model.js`; this
@@ -78,7 +78,7 @@ let hasOperationBaseline = false;
  *  this long since the last sync — so repeated opens don't re-scan the repo list every time. */
 const AUTO_SYNC_STALE_MS = 5 * 60 * 1000;
 
-/** Whether the Dependabot module is the currently visible module. */
+/** Whether the Bot PRs module is the currently visible module. */
 function isDependabotActive() {
   return getActiveModule() === "dependabot";
 }
@@ -165,16 +165,16 @@ function visibleGroups() {
 function emptyDependabot() {
   if (!isAuthenticated()) {
     return html`<div class="inbox-empty">
-      <p>Connect your GitHub account to see Dependabot and GitHub Actions pull requests.</p>
+      <p>Connect your GitHub account to see bot pull requests.</p>
     </div>`;
   }
   return html`<div class="inbox-empty">
     <img class="inbox-empty-art" src="/assets/helix-muted.svg" alt="" width="116" height="116" />
-    <p class="inbox-empty-title">No open Dependabot or GitHub Actions pull requests.</p>
+    <p class="inbox-empty-title">No open bot pull requests.</p>
     <p class="inbox-empty-sub">
       Repositories appear here as they show up in your notifications, so sync
       <span class="inbox-empty-hint">Notifications</span> to populate the list — then their open
-      Dependabot and GitHub Actions bot PRs are collected here.
+      PRs from supported bots are collected here.
     </p>
   </div>`;
 }
@@ -382,7 +382,7 @@ const hoverManager = createHoverManager({
   rowHoverClass: "n-row--hover",
 });
 
-/** Render the repo-only sidebar for the Dependabot module (counts + active highlight). */
+/** Render the repo-only sidebar for the Bot PRs module (counts + active highlight). */
 function renderSidebar() {
   const filterList = $("#dependabot-filter-list");
   if (filterList) {
@@ -447,13 +447,13 @@ function renderTitle() {
   const title = $("#dependabot-view-title");
   if (!title) return;
   if (activeView === "operations") {
-    title.innerHTML = html`Dependabot<span class="crumb-sep" aria-hidden="true">›</span><span class="crumb-repo">Operations</span>`;
-    title.setAttribute("aria-label", "Dependabot, merge operations");
+    title.innerHTML = html`Bot PRs<span class="crumb-sep" aria-hidden="true">›</span><span class="crumb-repo">Operations</span>`;
+    title.setAttribute("aria-label", "Bot PRs, merge operations");
   } else if (activeRepo != null) {
-    title.innerHTML = html`Dependabot<span class="crumb-sep" aria-hidden="true">›</span><span class="crumb-repo">${activeRepo}</span>`;
-    title.setAttribute("aria-label", `Dependabot, repository ${activeRepo}`);
+    title.innerHTML = html`Bot PRs<span class="crumb-sep" aria-hidden="true">›</span><span class="crumb-repo">${activeRepo}</span>`;
+    title.setAttribute("aria-label", `Bot PRs, repository ${activeRepo}`);
   } else {
-    title.textContent = "Dependabot";
+    title.textContent = "Bot PRs";
     title.removeAttribute("aria-label");
   }
 }
@@ -463,13 +463,13 @@ function announceView() {
   if (activeView === "operations") {
     const count = mergeOperations.length;
     enqueueAnnounce(
-      `Dependabot merge operations, ${count} ${count === 1 ? "operation" : "operations"}.`,
+      `Bot PRs merge operations, ${count} ${count === 1 ? "operation" : "operations"}.`,
     );
     return;
   }
   const count = totalPrs(visibleGroups());
   const noun = count === 1 ? "pull request" : "pull requests";
-  const where = activeRepo != null ? `Dependabot, repository ${activeRepo}` : "Dependabot";
+  const where = activeRepo != null ? `Bot PRs, repository ${activeRepo}` : "Bot PRs";
   enqueueAnnounce(`${where}, ${count} ${noun}.`);
 }
 
@@ -852,7 +852,7 @@ function renderIdleStatus() {
  *  until the `finally` block so re-entrancy is reliably gated across the whole flow. */
 export async function syncDependabot() {
   if (!isAuthenticated()) {
-    setDepProgress("Connect a GitHub token to sync automation pull requests.", "error");
+    setDepProgress("Connect a GitHub token to sync Bot PRs.", "error");
     return;
   }
   if (syncing) {
@@ -863,7 +863,7 @@ export async function syncDependabot() {
   syncing = true;
   setDepStatus("pending", "Syncing…");
   setDepProgress("Starting…");
-  enqueueAnnounce("Dependabot sync started.");
+  enqueueAnnounce("Bot PRs sync started.");
   try {
     const result = await invoke("sync_dependabot");
     lastSyncAt = Date.now();
@@ -889,7 +889,7 @@ export async function syncDependabot() {
       ? "GitHub is rate-limiting requests right now. Wait a few minutes, then sync again."
       : raw;
     setDepProgress(friendly, "error");
-    enqueueAnnounce("Dependabot sync failed.");
+    enqueueAnnounce("Bot PRs sync failed.");
   } finally {
     // Only now clear the in-flight flag — kept true through the UI updates + loadDependabot
     // above so a quick `r`/re-trigger can't start a concurrent sync.
@@ -903,7 +903,7 @@ export async function syncDependabot() {
   }
 }
 
-/** Called by main.js when the Dependabot module becomes active: render cached PRs, then
+/** Called by main.js when the Bot PRs module becomes active: render cached PRs, then
  *  auto-sync if stale (never synced this session, or older than the staleness window). Also
  *  announces a concise summary of current operation state and any missed terminal transitions. */
 export async function onDependabotOpened(context = {}) {
@@ -914,7 +914,7 @@ export async function onDependabotOpened(context = {}) {
   announceReturnSummary();
   if (!isAuthenticated()) return;
   // Wait for the persisted last-sync time to load before the staleness gate, so restoring into
-  // the Dependabot module doesn't re-scan when a recent sync (from a previous run) is still
+  // the Bot PRs module doesn't re-scan when a recent sync (from a previous run) is still
   // fresh — otherwise `lastSyncAt` would still be 0 here and we'd auto-sync every launch.
   await statusLoaded;
   if (!lastSyncAt || Date.now() - lastSyncAt > AUTO_SYNC_STALE_MS) {
@@ -929,7 +929,7 @@ function onDependabotClosed() {
 
 /* ---------------------------------- Init --------------------------------- */
 
-/** Wire the Dependabot module's DOM listeners + sync events. Call once on DOMContentLoaded. */
+/** Wire the Bot PRs module's DOM listeners + sync events. Call once on DOMContentLoaded. */
 export function initDependabot() {
   const list = $("#dependabot");
   if (list) {
@@ -983,12 +983,12 @@ registerModule("dependabot", {
   deactivate: onDependabotClosed,
   shortcuts: [
     {
-      group: "Dependabot",
+      group: "Bot PRs",
       items: [
         { keys: ["j", "↓"], desc: "Next pull request" },
         { keys: ["k", "↑"], desc: "Previous pull request" },
         { keys: ["Enter"], desc: "Open in browser" },
-        { keys: ["r"], desc: "Sync Dependabot" },
+        { keys: ["r"], desc: "Sync Bot PRs" },
       ],
     },
   ],

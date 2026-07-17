@@ -1,11 +1,11 @@
 import { test, expect } from "@playwright/test";
 import { openApp, defaultFixtures } from "./tauri-mock.js";
 
-/* The Dependabot module lists supported automation PRs grouped by repository with a
+/* The Bot PRs module lists supported automation PRs grouped by repository with a
  * repo-only sidebar and a merge-readiness pill, opens a PR in the browser, and has NO
  * bookmark / mark-done affordances. Backed by the mocked `list_dependabot` / `sync_dependabot`. */
 
-/** Open the app and switch to the Dependabot module, waiting for its list to render. */
+/** Open the app and switch to the Bot PRs module, waiting for its list to render. */
 async function openDependabot(page, fixtures = defaultFixtures()) {
   await openApp(page, fixtures);
   await page.locator('.module-tab[data-module="dependabot"]').click();
@@ -29,16 +29,19 @@ test("lists open automation PRs grouped by repository", async ({ page }) => {
   await expect(page.locator('#dependabot .n-row[data-pr-id="101"]')).toContainText(
     "github-actions",
   );
+  await expect(page.locator('#dependabot .n-row[data-pr-id="102"]')).toContainText(
+    "release-controller",
+  );
 });
 
-test("Dependabot view is exposed as a named region", async ({ page }) => {
+test("Bot PRs view is exposed as a named region", async ({ page }) => {
   await openDependabot(page);
 
   await expect(page.locator("#view-dependabot")).toHaveAttribute(
     "aria-labelledby",
     "dependabot-view-title",
   );
-  await expect(page.getByRole("region", { name: "Dependabot" })).toHaveAttribute(
+  await expect(page.getByRole("region", { name: "Bot PRs" })).toHaveAttribute(
     "id",
     "view-dependabot",
   );
@@ -51,7 +54,7 @@ test("shows merge readiness and a merge action without notification controls", a
   await expect(page.locator("#dependabot .merge--clean")).toHaveCount(1);
   await expect(page.locator("#dependabot .merge--blocked")).toHaveCount(1);
 
-  // Dependabot owns its own merge action, not notification controls.
+  // Bot PRs owns its own merge action, not notification controls.
   await expect(page.locator("#dependabot .dep-merge-action")).toHaveCount(3);
   await expect(page.locator("#dependabot .dep-discard-action")).toHaveCount(3);
   await expect(page.locator("#dependabot .n-bookmark")).toHaveCount(0);
@@ -405,7 +408,7 @@ test("the sidebar lists repositories and refines the list", async ({ page }) => 
   await expect(page.locator("#dependabot .repo-section")).toHaveCount(2);
 });
 
-test("notification sidebar rerenders preserve Dependabot counts", async ({ page }) => {
+test("notification sidebar rerenders preserve Bot PR counts", async ({ page }) => {
   await openDependabot(page);
 
   const allCount = page.locator('#dependabot-filter-list [data-filter="all"] .source-count');
@@ -444,9 +447,7 @@ test("empty state when there are no automation PRs", async ({ page }) => {
   await openDependabot(page, { ...defaultFixtures(), dependabot: [] });
 
   await expect(page.locator("#dependabot .inbox-empty")).toBeVisible();
-  await expect(page.locator("#dependabot")).toContainText(
-    "No open Dependabot or GitHub Actions pull requests",
-  );
+  await expect(page.locator("#dependabot")).toContainText("No open bot pull requests");
   await expect(page.locator("#dependabot-repo-list .source-empty")).toBeVisible();
 });
 
@@ -845,8 +846,8 @@ test("expanded detail escapes untrusted explanation/next-action/event content", 
 /* ---------------------------------------------------------------------------------------
  * Phase 3: snapshot normalization and announcement behavior (issue #133).
  * - Sync progress is announced to the live region.
- * - Terminal operation transitions are announced when the Dependabot module is active.
- * - Returning to Dependabot announces a summary of any missed transitions.
+ * - Terminal operation transitions are announced when the Bot PRs module is active.
+ * - Returning to Bot PRs announces a summary of any missed transitions.
  * - Unchanged poll snapshots produce no announcement noise.
  * --------------------------------------------------------------------------------------- */
 
@@ -859,7 +860,7 @@ test("sync announces start, completion, and result to the live region", async ({
   await expect(announcer).toContainText(/Sync complete/);
 });
 
-test("a terminal operation transition announces to the live region while Dependabot is active", async ({
+test("a terminal operation transition announces to the live region while Bot PRs is active", async ({
   page,
 }) => {
   const operation = mergeOperation({ id: 50, state: "delegated", phase: "waiting_checks" });
@@ -952,11 +953,11 @@ test("every snapshot path clears a vanished repository refinement", async ({ pag
   });
 
   // The refinement should be cleared — show acme/widgets.
-  await expect(page.locator("#dependabot-view-title")).toContainText("Dependabot");
+  await expect(page.locator("#dependabot-view-title")).toContainText("Bot PRs");
   await expect(page.locator("#dependabot-view-title")).not.toContainText("octo/hello");
 });
 
-test("returning to Dependabot announces a summary when operations have state", async ({ page }) => {
+test("returning to Bot PRs announces a summary when operations have state", async ({ page }) => {
   const operation = mergeOperation({ id: 55, state: "delegated", phase: "waiting_checks" });
   await openDependabot(page, { ...defaultFixtures(), mergeOperations: [operation] });
 
@@ -976,7 +977,7 @@ test("returning to Dependabot announces a summary when operations have state", a
   // Wait for the operations-changed event to propagate.
   await page.waitForTimeout(300);
 
-  // Switch back to Dependabot.
+  // Switch back to Bot PRs.
   await page.locator('.module-tab[data-module="dependabot"]').click();
   await page.waitForSelector("#dependabot .repo-section, #dependabot .inbox-empty");
 

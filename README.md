@@ -46,7 +46,7 @@ mirror GitHub's model:
   visible/filtered set from the toolbar, with optimistic local updates and per-thread
   failure reporting.
 - **API rate-limit visibility** — per-bucket usage bars in Settings.
-- **Dependabot merge operations** — manage Dependabot and GitHub Actions bot PRs with queue-safe,
+- **Bot PR merge operations** — manage PRs from supported automation bots with queue-safe,
   PAT-approved merges per repository, follow each operation in an interactive timeline, retry
   failed GitHub Actions jobs, and use GitHub merge queue automatically when the target branch
   requires it.
@@ -154,7 +154,7 @@ Rather than fight that, debug builds skip the Keychain entirely.
 > locally and never ship a debug build. There is nothing to set up — it just
 > works, with no prompts.
 
-Dependabot module merge operations require **Pull requests: read/write**, **Contents:
+Bot PR merge operations require **Pull requests: read/write**, **Contents:
 read/write**, **Actions: read/write**, and **Metadata: read** on each managed
 repository when using a fine-grained PAT. Actions permission lets Helix rerun failed
 GitHub Actions jobs; third-party CI cannot be retriggered with a PAT and is surfaced
