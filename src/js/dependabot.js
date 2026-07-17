@@ -463,7 +463,7 @@ function announceView() {
   if (activeView === "operations") {
     const count = mergeOperations.length;
     enqueueAnnounce(
-      `Bot PR merge operations, ${count} ${count === 1 ? "operation" : "operations"}.`,
+      `Bot PRs merge operations, ${count} ${count === 1 ? "operation" : "operations"}.`,
     );
     return;
   }
@@ -852,7 +852,7 @@ function renderIdleStatus() {
  *  until the `finally` block so re-entrancy is reliably gated across the whole flow. */
 export async function syncDependabot() {
   if (!isAuthenticated()) {
-    setDepProgress("Connect a GitHub token to sync automation pull requests.", "error");
+    setDepProgress("Connect a GitHub token to sync Bot PRs.", "error");
     return;
   }
   if (syncing) {
@@ -863,7 +863,7 @@ export async function syncDependabot() {
   syncing = true;
   setDepStatus("pending", "Syncing…");
   setDepProgress("Starting…");
-  enqueueAnnounce("Bot PR sync started.");
+  enqueueAnnounce("Bot PRs sync started.");
   try {
     const result = await invoke("sync_dependabot");
     lastSyncAt = Date.now();
@@ -889,7 +889,7 @@ export async function syncDependabot() {
       ? "GitHub is rate-limiting requests right now. Wait a few minutes, then sync again."
       : raw;
     setDepProgress(friendly, "error");
-    enqueueAnnounce("Bot PR sync failed.");
+    enqueueAnnounce("Bot PRs sync failed.");
   } finally {
     // Only now clear the in-flight flag — kept true through the UI updates + loadDependabot
     // above so a quick `r`/re-trigger can't start a concurrent sync.
