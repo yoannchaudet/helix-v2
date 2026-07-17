@@ -668,6 +668,8 @@ pub fn run() {
             coordinator::list_inbox,
             coordinator::list_bookmarks,
             coordinator::set_bookmark,
+            coordinator::set_notification_repo_collapsed,
+            coordinator::list_collapsed_repos,
             coordinator::mark_threads_done,
             dependabot_coordinator::sync_dependabot,
             dependabot_coordinator::list_dependabot,

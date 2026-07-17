@@ -25,6 +25,14 @@ import {
   createRowNavigator,
   createListFocusRetainer,
 } from "./list-kit.js";
+import {
+  applyRepoCollapseState,
+  collapsedRepoNames,
+  isRepoCollapsed,
+  loadRepoCollapseState,
+  setRepoCollapsed,
+  subscribeRepoCollapse,
+} from "./repo-collapse.js";
 
 /* The Bot PRs module: a list of open PRs from supported automation bots grouped by
  * repository, its
@@ -83,6 +91,18 @@ function isDependabotActive() {
   return getActiveModule() === "dependabot";
 }
 
+async function toggleRepoCollapsed(repoFullName) {
+  const collapsed = !isRepoCollapsed(repoFullName);
+  try {
+    const result = await setRepoCollapsed(repoFullName, collapsed);
+    if (result.latest) {
+      enqueueAnnounce(`${repoFullName} ${collapsed ? "collapsed" : "expanded"}.`);
+    }
+  } catch ({ error, latest }) {
+    if (latest) toast(String(error), "error");
+  }
+}
+
 /* ------------------------------ Unified snapshot ------------------------------ */
 
 /** Single path for applying a new `{ groups, operations }` snapshot to module state.
@@ -97,7 +117,7 @@ function isDependabotActive() {
  *     as `missedTransitions` when another module is active). */
 function applySnapshot(groups, operations) {
   const oldOps = mergeOperations;
-  depGroups = groups;
+  depGroups = applyRepoCollapseState(groups);
   mergeOperations = operations;
 
   // (1) Clear a repo refinement whose repository no longer exists in the new snapshot.
@@ -231,11 +251,21 @@ const kbdFocus = createKbdFocusRing({ containerSelector: "#dependabot" });
 /** Snapshot the focused PR row id so a re-render can restore focus (the list re-renders
  *  wholesale on refine/sync, which would otherwise drop focus to <body>). */
 function captureFocus() {
+  const active = document.activeElement;
+  if (active instanceof HTMLElement && active.classList.contains("repo-collapse") && active.id) {
+    return { kind: "collapse", id: active.id };
+  }
   return focusRetainer.capture();
 }
 
 /** Restore focus to the same PR/operation control after a re-render. */
 function applyFocus(target, { preventScroll = false } = {}) {
+  if (target?.kind === "collapse") {
+    const collapse = document.getElementById(target.id);
+    if (!collapse) return false;
+    collapse.focus({ preventScroll });
+    return true;
+  }
   const landed = focusRetainer.apply(target, { preventScroll });
   if (!landed) return false;
   const active = document.activeElement;
@@ -260,6 +290,7 @@ function renderList() {
     list.innerHTML = operationsList(sortMergeOperations(mergeOperations), {
       expandedId: expandedOperationId,
       details: operationDetails,
+      collapsedRepos: collapsedRepoNames(),
     });
     list.scrollTop = scrollTop;
     if (preserved != null && !applyFocus(preserved, { preventScroll: true })) {
@@ -514,6 +545,7 @@ export async function loadDependabot() {
     const [groups, operations] = await Promise.all([
       invoke("list_dependabot"),
       invoke("list_dependabot_merge_operations"),
+      loadRepoCollapseState(),
     ]);
     if (generation !== loadGeneration) return;
     applySnapshot(groups, operations);
@@ -532,6 +564,7 @@ async function reloadOperations() {
     const [groups, operations] = await Promise.all([
       invoke("list_dependabot"),
       invoke("list_dependabot_merge_operations"),
+      loadRepoCollapseState(),
     ]);
     if (generation !== loadGeneration) return;
     applySnapshot(groups, operations);
@@ -560,6 +593,11 @@ function openPr(url) {
 function onListClick(e) {
   if (e.detail > 1) return; // ignore the second click of a double-click
   const el = e.target instanceof Element ? e.target : e.target?.parentElement;
+  const collapse = el?.closest(".repo-collapse");
+  if (collapse?.dataset.repoFullName) {
+    toggleRepoCollapsed(collapse.dataset.repoFullName);
+    return;
+  }
   const disclosure = el?.closest(".dep-operation-disclosure");
   if (disclosure?.dataset.operationId) {
     toggleOperationDetail(Number(disclosure.dataset.operationId));
@@ -636,7 +674,7 @@ function onListKeydown(e) {
   if (e.key !== "Enter") return;
   if (
     e.target.closest?.(
-      ".dep-merge-action, .dep-discard-action, .dep-operation-cancel, .dep-operation-forget, .dep-operation-disclosure",
+      ".repo-collapse, .dep-merge-action, .dep-discard-action, .dep-operation-cancel, .dep-operation-forget, .dep-operation-disclosure",
     )
   ) {
     return;
@@ -940,6 +978,12 @@ export function initDependabot() {
   // List-kit: hover tracking (replaces inline mouseover/leave/scroll/blur wiring).
   hoverManager.wire();
   kbdFocus.wire();
+  subscribeRepoCollapse((repoFullName, collapsed) => {
+    depGroups = depGroups.map((group) =>
+      group.full_name === repoFullName ? { ...group, collapsed } : group,
+    );
+    if (isDependabotActive()) renderList();
+  });
   document.addEventListener("keydown", onCommandKeydown);
   $("#dependabot-sync-btn")?.addEventListener("click", syncDependabot);
 

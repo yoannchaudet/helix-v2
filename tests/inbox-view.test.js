@@ -249,6 +249,10 @@ test("repoHeader escapes the repo name and shows the filtered count", () => {
   assert.ok(html.includes("o/&lt;repo&gt;"));
   assert.ok(html.includes('<span class="repo-counts">3</span>'));
   assert.ok(html.includes("badge--lock"));
+  assert.ok(html.includes('class="repo-collapse"'));
+  assert.ok(html.includes('aria-expanded="true"'));
+  assert.ok(html.includes('aria-controls="repo-list-7"'));
+  assert.ok(html.includes('aria-label="Collapse o/&lt;repo&gt; notifications"'));
 });
 
 test("repoSection ties the list to its heading and renders each row", () => {
@@ -262,6 +266,25 @@ test("repoSection ties the list to its heading and renders each row", () => {
   assert.ok(html.includes('aria-labelledby="repo-h-7"'));
   assert.ok(html.includes('data-thread-id="t1"'));
   assert.ok(html.includes('data-thread-id="t2"'));
+  assert.ok(html.includes('id="repo-list-7"'));
+  assert.ok(!html.includes("repo-section--collapsed"));
+});
+
+test("repoSection keeps the header count but omits rows when collapsed", () => {
+  const html = repoSection({
+    repo_id: 7,
+    full_name: "o/r",
+    private: false,
+    collapsed: true,
+    notifications: [baseNotification, { ...baseNotification, thread_id: "t2" }],
+  });
+  assert.ok(html.includes("repo-section--collapsed"));
+  assert.ok(html.includes('<span class="repo-counts">2</span>'));
+  assert.ok(html.includes('aria-expanded="false"'));
+  assert.ok(html.includes('aria-label="Expand o/r notifications"'));
+  assert.match(html, /<ul class="n-list" id="repo-list-7" hidden><\/ul>/);
+  assert.ok(!html.includes('data-thread-id="t1"'));
+  assert.ok(!html.includes('data-thread-id="t2"'));
 });
 
 /* -------------------------------- typeFilterBar -------------------------------- */

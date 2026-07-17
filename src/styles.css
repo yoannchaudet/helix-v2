@@ -927,6 +927,39 @@ code,
   color: var(--text);
 }
 
+.repo-collapse {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-icon-sm);
+  height: var(--control-icon-sm);
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-lg);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.repo-collapse svg {
+  transition: transform var(--duration-fast) ease;
+}
+
+.repo-collapse[aria-expanded="false"] svg {
+  transform: rotate(-90deg);
+}
+
+.repo-collapse:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+.repo-collapse:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 .repo-counts {
   margin-left: auto;
   color: var(--muted);

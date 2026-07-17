@@ -635,6 +635,40 @@ pub fn remove_bookmark(conn: &Connection, thread_id: &str) -> rusqlite::Result<(
     Ok(())
 }
 
+/// Persist whether one Notifications repository section is collapsed.
+///
+/// The preference is keyed by full name rather than `repos.id`, and intentionally has no
+/// foreign key, so it survives a repository temporarily disappearing from the inbox.
+pub fn set_repo_collapsed(
+    conn: &Connection,
+    repo_full_name: &str,
+    collapsed: bool,
+) -> rusqlite::Result<()> {
+    if collapsed {
+        conn.execute(
+            "INSERT INTO collapsed_notification_repos (repo_full_name, collapsed_at)
+             VALUES (?1, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+             ON CONFLICT(repo_full_name) DO UPDATE SET collapsed_at = excluded.collapsed_at",
+            params![repo_full_name],
+        )?;
+    } else {
+        conn.execute(
+            "DELETE FROM collapsed_notification_repos WHERE repo_full_name = ?1",
+            params![repo_full_name],
+        )?;
+    }
+    Ok(())
+}
+
+/// Read every repository name whose shared presentation state is collapsed.
+pub fn list_collapsed_repos(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT repo_full_name FROM collapsed_notification_repos ORDER BY repo_full_name",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    rows.collect()
+}
+
 /// Read all bookmarks grouped by repository (repos A–Z, newest first within each repo),
 /// independent of the inbox. Uses the stored snapshot so done/removed threads still appear.
 /// Mirrors `list_by_repo`'s shape; every notification carries `bookmarked: true`.
@@ -645,7 +679,11 @@ pub fn list_bookmarks(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
                 COALESCE(b.reason, ''), b.updated_at, b.thread_url,
                 b.subject_number, b.subject_state, b.subject_html_url, b.subject_author,
                 b.subject_mergeable_state,
-               CASE WHEN n.thread_id IS NULL OR d.thread_id IS NOT NULL THEN 1 ELSE 0 END AS is_done
+                CASE WHEN n.thread_id IS NULL OR d.thread_id IS NOT NULL THEN 1 ELSE 0 END AS is_done,
+                EXISTS(
+                    SELECT 1 FROM collapsed_notification_repos c
+                    WHERE c.repo_full_name = b.repo_full_name
+                ) AS collapsed
          FROM bookmarks b
          LEFT JOIN notifications n ON n.thread_id = b.thread_id
          LEFT JOIN notification_dismissals d ON d.thread_id = b.thread_id
@@ -656,6 +694,7 @@ pub fn list_bookmarks(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
             r.get::<_, Option<i64>>(0)?.unwrap_or(0),
             r.get::<_, String>(1)?,
             r.get::<_, i64>(2)? != 0,
+            r.get::<_, i64>(16)? != 0,
             NotificationView {
                 thread_id: r.get(3)?,
                 subject_type: r.get(4)?,
@@ -678,12 +717,13 @@ pub fn list_bookmarks(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
     })?;
     let mut groups: Vec<RepoGroup> = Vec::new();
     for row in rows {
-        let (repo_id, full_name, private, view) = row?;
+        let (repo_id, full_name, private, collapsed, view) = row?;
         if groups.last().map(|g| g.repo_id) != Some(repo_id) {
             groups.push(RepoGroup {
                 repo_id,
                 full_name,
                 private,
+                collapsed,
                 total: 0,
                 notifications: Vec::new(),
             });
@@ -758,6 +798,7 @@ pub struct RepoGroup {
     pub repo_id: i64,
     pub full_name: String,
     pub private: bool,
+    pub collapsed: bool,
     pub total: i64,
     pub notifications: Vec<NotificationView>,
 }
@@ -775,7 +816,11 @@ pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
                 n.updated_at, n.thread_url,
                 n.subject_number, n.subject_state, n.subject_html_url, n.resolved_at,
                 n.is_new, n.subject_author, n.subject_mergeable_state,
-                CASE WHEN b.thread_id IS NULL THEN 0 ELSE 1 END AS bookmarked
+                CASE WHEN b.thread_id IS NULL THEN 0 ELSE 1 END AS bookmarked,
+                EXISTS(
+                    SELECT 1 FROM collapsed_notification_repos c
+                    WHERE c.repo_full_name = r.full_name
+                ) AS collapsed
          FROM notifications n
          JOIN repos r ON r.id = n.repo_id
          LEFT JOIN bookmarks b ON b.thread_id = n.thread_id
@@ -786,9 +831,10 @@ pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
 
     let rows = stmt.query_map([], |r| {
         Ok((
-            r.get::<_, i64>(0)?,      // repo id
-            r.get::<_, String>(1)?,   // full_name
-            r.get::<_, i64>(2)? != 0, // private
+            r.get::<_, i64>(0)?,       // repo id
+            r.get::<_, String>(1)?,    // full_name
+            r.get::<_, i64>(2)? != 0,  // private
+            r.get::<_, i64>(18)? != 0, // collapsed
             NotificationView {
                 thread_id: r.get(3)?,
                 subject_type: r.get(4)?,
@@ -812,13 +858,14 @@ pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
 
     let mut groups: Vec<RepoGroup> = Vec::new();
     for row in rows {
-        let (repo_id, full_name, private, view) = row?;
+        let (repo_id, full_name, private, collapsed, view) = row?;
         // Rows are ordered by repo, so we only ever append to the last group.
         if groups.last().map(|g| g.repo_id) != Some(repo_id) {
             groups.push(RepoGroup {
                 repo_id,
                 full_name,
                 private,
+                collapsed,
                 total: 0,
                 notifications: Vec::new(),
             });
@@ -911,6 +958,36 @@ mod tests {
         // A plain notification does NOT add its repo to the Bot PRs list — only a resolved
         // notification from a trusted automation bot does.
         assert!(crate::dependabot::list_repos(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn collapsed_repo_state_applies_to_inbox_and_bookmarks_and_survives_pruning() {
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "First")]).unwrap();
+        add_bookmark(&conn, "1").unwrap();
+
+        set_repo_collapsed(&conn, "octo/repo-a", true).unwrap();
+        assert_eq!(
+            list_collapsed_repos(&conn).unwrap(),
+            vec!["octo/repo-a".to_string()]
+        );
+        assert!(list_by_repo(&conn).unwrap()[0].collapsed);
+        assert!(list_bookmarks(&conn).unwrap()[0].collapsed);
+
+        // Reconcile the live inbox to another repository. The `repos` row is pruned, but the
+        // full-name preference and bookmark snapshot remain collapsed.
+        store_notifications(&mut conn, &[thread("2", 200, "octo/repo-b", "Second")]).unwrap();
+        assert!(repo_full_name(&conn, 100).unwrap().is_none());
+        assert!(list_bookmarks(&conn).unwrap()[0].collapsed);
+
+        // If the original repository reappears, its prior preference still applies.
+        store_notifications(&mut conn, &[thread("3", 100, "octo/repo-a", "Third")]).unwrap();
+        assert!(list_by_repo(&conn).unwrap()[0].collapsed);
+
+        set_repo_collapsed(&conn, "octo/repo-a", false).unwrap();
+        assert!(list_collapsed_repos(&conn).unwrap().is_empty());
+        assert!(!list_by_repo(&conn).unwrap()[0].collapsed);
+        assert!(!list_bookmarks(&conn).unwrap()[0].collapsed);
     }
 
     #[test]

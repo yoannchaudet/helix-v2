@@ -89,6 +89,9 @@ test("repoHeader shows the repo name, its PR count, and no mark-done control", (
   const header = repoHeader({ full_name: "octo/hello", prs: [basePr, { ...basePr, id: 2 }] });
   assert.ok(header.includes("octo/hello"));
   assert.ok(header.includes('class="repo-counts">2<'));
+  assert.ok(header.includes('class="repo-collapse"'));
+  assert.ok(header.includes('aria-expanded="true"'));
+  assert.ok(header.includes('aria-controls="dep-repo-octo-hello-list"'));
   assert.ok(!header.includes("repo-done"));
 });
 
@@ -98,6 +101,15 @@ test("repoSection wraps rows in a labeled group tied to its heading", () => {
   assert.ok(section.includes('aria-labelledby="dep-repo-octo-hello"'));
   assert.ok(section.includes('id="dep-repo-octo-hello"'));
   assert.ok(section.includes("n-list"));
+});
+
+test("repoSection hides bot PR rows while preserving the repository count when collapsed", () => {
+  const section = repoSection({ full_name: "octo/hello", collapsed: true, prs: [basePr] });
+  assert.ok(section.includes("repo-section--collapsed"));
+  assert.ok(section.includes('class="repo-counts">1<'));
+  assert.ok(section.includes('aria-expanded="false"'));
+  assert.ok(section.includes('id="dep-repo-octo-hello-list" hidden'));
+  assert.ok(!section.includes('data-pr-id="101"'));
 });
 
 const baseOperation = {
@@ -236,6 +248,17 @@ test("operationsList splits active and recent operations into repository groups"
   assert.equal(output.match(/class="operation-repo-group"/g)?.length, 3);
   assert.ok(output.indexOf("octo/hello") < output.indexOf("acme/widgets"));
   assert.ok(output.indexOf('data-operation-id="7"') < output.indexOf('data-operation-id="10"'));
+});
+
+test("operationsList applies repository collapse without hiding operation counts", () => {
+  const output = operationsList([baseOperation], {
+    collapsedRepos: new Set(["octo/hello"]),
+  });
+  assert.ok(output.includes("repo-section--collapsed"));
+  assert.ok(output.includes('class="repo-counts">1<'));
+  assert.ok(output.includes('aria-label="Expand octo/hello merge operations"'));
+  assert.ok(output.includes('id="operation-repo-active-0-list" hidden'));
+  assert.ok(!output.includes('data-operation-id="7"'));
 });
 
 test("operationsList escapes repository group names", () => {

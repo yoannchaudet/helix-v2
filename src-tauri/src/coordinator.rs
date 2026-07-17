@@ -431,6 +431,25 @@ pub fn set_bookmark(
     Ok(())
 }
 
+/// Persist one repository section's shared presentation state (local-only).
+#[tauri::command]
+pub fn set_notification_repo_collapsed(
+    repo_full_name: String,
+    collapsed: bool,
+    state: State<'_, AppState>,
+) -> CommandResult<()> {
+    let conn = lock_conn(&state.db.0)?;
+    sync::set_repo_collapsed(&conn, &repo_full_name, collapsed)?;
+    Ok(())
+}
+
+/// Read the repository names collapsed across Notifications and Bot PRs.
+#[tauri::command]
+pub fn list_collapsed_repos(state: State<'_, AppState>) -> CommandResult<Vec<String>> {
+    let conn = lock_conn(&state.db.0)?;
+    Ok(sync::list_collapsed_repos(&conn)?)
+}
+
 /// A single thread that failed to mutate, surfaced to the UI so partial failures are
 /// reported without aborting the rest of the batch.
 #[derive(Debug, Clone, Serialize)]

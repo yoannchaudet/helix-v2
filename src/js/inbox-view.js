@@ -85,6 +85,7 @@ const DONE_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="
 /** Bookmark glyph: hollow when not bookmarked, filled when bookmarked. */
 const BOOKMARK_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 2.5h8v11l-4-3-4 3z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>`;
 const BOOKMARK_ICON_FILLED = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 2.5h8v11l-4-3-4 3z" fill="currentColor" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>`;
+const COLLAPSE_ICON = `<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
 export function notificationRow(n) {
   const number =
@@ -138,6 +139,15 @@ export function notificationRow(n) {
 }
 
 export function repoHeader(group) {
+  const collapsed = Boolean(group.collapsed);
+  const listId = `repo-list-${group.repo_id}`;
+  const collapse = iconButton({
+    icon: COLLAPSE_ICON,
+    className: "repo-collapse",
+    title: collapsed ? "Expand repository notifications" : "Collapse repository notifications",
+    label: `${collapsed ? "Expand" : "Collapse"} ${group.full_name} notifications`,
+    attrs: html`data-collapse-repo="${group.repo_id}" data-repo-full-name="${group.full_name}" aria-expanded="${!collapsed}" aria-controls="${listId}"`,
+  });
   const privacy = group.private
     ? pill("private", "badge badge--lock", { title: "Private repository" })
     : "";
@@ -156,6 +166,7 @@ export function repoHeader(group) {
   // also names the group region (see `repoSection`).
   return html`
     <div class="repo-header">
+      ${rawHtml(collapse)}
       <h2 class="repo-name" id="repo-h-${group.repo_id}">${group.full_name}</h2>
       ${rawHtml(privacy)}
       ${rawHtml(counts)}
@@ -164,12 +175,15 @@ export function repoHeader(group) {
 }
 
 export function repoSection(group) {
-  const rows = group.notifications.map(notificationRow).join("");
+  const collapsed = Boolean(group.collapsed);
+  const rows = collapsed ? "" : group.notifications.map(notificationRow).join("");
+  const hidden = collapsed ? rawHtml(" hidden") : "";
+  const collapsedClass = collapsed ? " repo-section--collapsed" : "";
   // `role=group` + `aria-labelledby` ties the list to its repo heading for assistive tech
   // without creating a landmark per repo (which would be noisy with many repos).
-  return html`<section class="repo-section" role="group" aria-labelledby="repo-h-${group.repo_id}">${rawHtml(
+  return html`<section class="repo-section${collapsedClass}" role="group" aria-labelledby="repo-h-${group.repo_id}">${rawHtml(
     repoHeader(group),
-  )}<ul class="n-list">${rawHtml(rows)}</ul></section>`;
+  )}<ul class="n-list" id="repo-list-${group.repo_id}"${hidden}>${rawHtml(rows)}</ul></section>`;
 }
 
 /** The top-of-view subject-type filter: a leading "Showing:" label plus a single line of

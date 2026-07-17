@@ -42,6 +42,92 @@ test("renders the inbox grouped by repo with sidebar counts", async ({ page }) =
   await expect(page.locator(".repo-name").first()).toHaveText("acme/widgets");
 });
 
+test("collapses and expands a repository while preserving its count and toggle focus", async ({
+  page,
+}) => {
+  await openApp(page);
+
+  const section = page
+    .locator("#inbox .repo-section")
+    .filter({ has: page.getByRole("heading", { name: "octo/hello" }) });
+  const toggle = section.locator(".repo-collapse");
+
+  await expect(section.locator(".n-row")).toHaveCount(2);
+  await expect(section.locator(".repo-counts")).toHaveText("2");
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+
+  await toggle.click();
+  await expect(section.locator(".n-row")).toHaveCount(0);
+  await expect(section.locator(".repo-counts")).toHaveText("2");
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(toggle).toBeFocused();
+
+  await toggle.click();
+  await expect(section.locator(".n-row")).toHaveCount(2);
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  await expect(toggle).toBeFocused();
+});
+
+test("collapsed state applies across filters and Bookmarks and survives an inbox reload", async ({
+  page,
+}) => {
+  await openApp(page);
+
+  await page.locator('.n-row[data-thread-id="t2"]').hover();
+  await page.locator('.n-row[data-thread-id="t2"] .n-bookmark').click();
+
+  const octoSection = page
+    .locator("#inbox .repo-section")
+    .filter({ has: page.getByRole("heading", { name: "octo/hello" }) });
+  await octoSection.locator(".repo-collapse").click();
+
+  await page.locator('.source[data-filter="mention"]').click();
+  await expect(octoSection.locator(".repo-counts")).toHaveText("1");
+  await expect(octoSection.locator(".n-row")).toHaveCount(0);
+
+  await page.locator('.source[data-filter="bookmarked"]').click();
+  await expect(octoSection.locator(".repo-counts")).toHaveText("1");
+  await expect(octoSection.locator(".n-row")).toHaveCount(0);
+
+  // Force the normal authoritative list reload; the mock persists the local SQLite preference.
+  await octoSection.locator(".repo-collapse").focus();
+  await page.evaluate(() => window.__mockEmit("subjects:resolved", null));
+  await expect(octoSection.locator(".repo-collapse")).toHaveAttribute("aria-expanded", "false");
+  await expect(octoSection.locator(".n-row")).toHaveCount(0);
+  await expect(octoSection.locator(".repo-collapse")).toBeFocused();
+});
+
+test("bulk mark-done includes notifications hidden in collapsed repositories", async ({ page }) => {
+  await openApp(page);
+
+  const octoSection = page
+    .locator("#inbox .repo-section")
+    .filter({ has: page.getByRole("heading", { name: "octo/hello" }) });
+  await octoSection.locator(".repo-collapse").click();
+  await expect(octoSection.locator(".n-row")).toHaveCount(0);
+
+  await page.locator("#mark-all-done-btn").click();
+  await page.getByRole("menuitem", { name: /Confirm: mark 3 as done/ }).click();
+
+  await expect(page.locator("#inbox .n-row")).toHaveCount(0);
+  await expect(page.locator("#inbox .inbox-empty")).toBeVisible();
+});
+
+test("a collapse persistence failure restores the expanded section and focus", async ({ page }) => {
+  await openApp(page, { ...defaultFixtures(), collapseError: "collapse write failed" });
+
+  const section = page
+    .locator("#inbox .repo-section")
+    .filter({ has: page.getByRole("heading", { name: "octo/hello" }) });
+  const toggle = section.locator(".repo-collapse");
+  await toggle.click();
+
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  await expect(section.locator(".n-row")).toHaveCount(2);
+  await expect(toggle).toBeFocused();
+  await expect(page.locator(".js-sync-progress").first()).toContainText("collapse write failed");
+});
+
 test("an unresolved PR/Issue row shows the awaiting-state stripe cue", async ({ page }) => {
   const fx = defaultFixtures();
   // Simulate a row pulled but not yet resolved (no subject_state); its neighbor stays resolved.
