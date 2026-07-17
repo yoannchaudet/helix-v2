@@ -14,6 +14,7 @@ import {
 import { initSettings, loadSettings, showSettings } from "./js/settings.js";
 import "./js/inbox.js";
 import { startDependabotMergePolling, stopDependabotMergePolling } from "./js/dependabot.js";
+import "./js/slo-dips.js";
 import {
   initModules,
   configureModules,
@@ -23,7 +24,8 @@ import {
 import { initShortcuts } from "./js/shortcuts.js";
 import { initBrandFlip } from "./js/brand-flip.js";
 
-// Note: inbox.js and dependabot.js self-register with the module system (registerModule)
+// Note: inbox.js, dependabot.js, and slo-dips.js self-register with the module system
+// (registerModule)
 // at import time, including their lifecycle, sidebar selector, and shortcut groups. The
 // named imports above trigger those registrations, so initModules() can wire them without
 // separate side-effect imports.
@@ -58,7 +60,7 @@ window.addEventListener("DOMContentLoaded", () => {
   initShortcuts();
   initBrandFlip();
 
-  // Module system: render the title-bar module picker, wire ⌘1/⌘2, then call each
+  // Module system: render the title-bar module picker, wire registry-driven ⌘N jumps, then call each
   // registered module's init() and load(). Modules register themselves via side-effect
   // imports above, so their lifecycle callbacks are available when initModules() runs.
   // The onBeforeSwitch hook dismisses the Settings overlay on any module switch (Settings

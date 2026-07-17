@@ -17,6 +17,11 @@ export const MODULES = [
     label: "Bot PRs",
     paneId: "view-dependabot",
   },
+  {
+    id: "slo-dips",
+    label: "SLO Dips",
+    paneId: "view-slo-dips",
+  },
 ];
 
 /** The module shown on launch (state is not persisted across launches). */
