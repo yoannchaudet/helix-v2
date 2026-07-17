@@ -13,7 +13,7 @@ const SHORTCUTS = [
     group: "General",
     items: [
       { keys: ["⌘", "1"], desc: "Notifications module" },
-      { keys: ["⌘", "2"], desc: "Dependabot module" },
+      { keys: ["⌘", "2"], desc: "Bot PRs module" },
       { keys: ["⌘", ","], desc: "Open Settings" },
       { keys: ["?"], desc: "Show this cheatsheet" },
       { keys: ["Esc"], desc: "Close menu / overlay" },

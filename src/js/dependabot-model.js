@@ -1,4 +1,4 @@
-/* Pure model logic for the Dependabot module: the repo-refine → sort pipeline over the
+/* Pure model logic for the Bot PRs module: the repo-refine → sort pipeline over the
  * by-repo PR groups the backend returns. No DOM, no shared mutable state — every function
  * takes its inputs and returns new data, so this is the testable core the view renders from.
  *
@@ -73,7 +73,7 @@ export function diffOperationStates(oldOps, newOps) {
 }
 
 /** Build a concise one-line summary of current operation state, suitable for announcing
- *  when the user returns to the Dependabot module. Returns `null` if there are no operations
+ *  when the user returns to the Bot PRs module. Returns `null` if there are no operations
  *  worth summarizing (no active work, no recent terminal events). */
 export function operationStateSummary(operations) {
   const active = operations.filter(isActiveMergeOperation).length;

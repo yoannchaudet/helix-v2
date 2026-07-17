@@ -63,6 +63,11 @@ test("prRow marks a bot author and drops the [bot] suffix", () => {
   assert.ok(actionsRow.includes("n-author--bot"));
   assert.ok(actionsRow.includes("github-actions"));
   assert.ok(!actionsRow.includes("github-actions[bot]</span>"));
+
+  const releaseControllerRow = prRow({ ...basePr, author: "release-controller[bot]" });
+  assert.ok(releaseControllerRow.includes("n-author--bot"));
+  assert.ok(releaseControllerRow.includes("release-controller"));
+  assert.ok(!releaseControllerRow.includes("release-controller[bot]</span>"));
 });
 
 test("prRow escapes untrusted fields", () => {

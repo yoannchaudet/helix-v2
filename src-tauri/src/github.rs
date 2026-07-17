@@ -680,11 +680,14 @@ struct PullListItem {
     updated_at: String,
 }
 
-/// Whether `login` is a bot author trusted for Dependabot module automation.
+/// Whether `login` is a bot author trusted for Bot PRs module automation.
 pub fn is_trusted_automation_author(login: &str) -> bool {
     matches!(
         login,
-        "dependabot[bot]" | "dependabot-preview[bot]" | "github-actions[bot]"
+        "dependabot[bot]"
+            | "dependabot-preview[bot]"
+            | "github-actions[bot]"
+            | "release-controller[bot]"
     )
 }
 
@@ -3000,9 +3003,11 @@ mod tests {
         assert!(is_trusted_automation_author("dependabot[bot]"));
         assert!(is_trusted_automation_author("dependabot-preview[bot]"));
         assert!(is_trusted_automation_author("github-actions[bot]"));
+        assert!(is_trusted_automation_author("release-controller[bot]"));
         assert!(!is_trusted_automation_author("octocat"));
         assert!(!is_trusted_automation_author("renovate[bot]"));
         assert!(!is_trusted_automation_author("github-actions"));
+        assert!(!is_trusted_automation_author("release-controller"));
         assert!(!is_trusted_automation_author("dependabot"));
     }
 
@@ -3150,6 +3155,10 @@ mod tests {
         assert!(merge_pull_has_trusted_author(&pull(
             "github-actions[bot]",
             "head-pushed-by-a-human"
+        )));
+        assert!(merge_pull_has_trusted_author(&pull(
+            "release-controller[bot]",
+            "release-controller-head"
         )));
         assert!(!merge_pull_has_trusted_author(&pull(
             "octocat",
