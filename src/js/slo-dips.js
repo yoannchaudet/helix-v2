@@ -312,7 +312,7 @@ function renderCategoryStep(errorMessage = "") {
     <div class="slo-repo-dialog" role="document">
       <h2 id="slo-repo-dialog-title">${mode === "edit" ? "Edit Discussion categories" : "Choose Discussion categories"}</h2>
       <p class="slo-category-repo">${inspection.repository.full_name}${inspection.repository.private ? " 🔒" : ""}</p>
-      ${staleCount ? html`<p class="slo-category-warning">${staleCount} previously selected ${staleCount === 1 ? "category is" : "categories are"} no longer available on GitHub.</p>` : ""}
+      ${staleCount ? rawHtml(html`<p class="slo-category-warning">${staleCount} previously selected ${staleCount === 1 ? "category is" : "categories are"} no longer available on GitHub.</p>`) : ""}
       <details class="slo-category-picker">
         <summary id="slo-category-summary">${selectionSummary()}</summary>
         <div class="slo-category-options">
@@ -324,7 +324,7 @@ function renderCategoryStep(errorMessage = "") {
                     <input type="checkbox" value="${category.id}" ${selected.has(category.id) ? rawHtml("checked") : ""} />
                     <span class="slo-category-option-text">
                       <span>${category.emoji ? `${category.emoji} ` : ""}${category.name}</span>
-                      ${category.description ? html`<span class="slo-category-option-desc">${category.description}</span>` : ""}
+                      ${category.description ? rawHtml(html`<span class="slo-category-option-desc">${category.description}</span>`) : ""}
                     </span>
                   </label>`,
               )
@@ -334,7 +334,7 @@ function renderCategoryStep(errorMessage = "") {
       </details>
       <p class="slo-repo-error" id="slo-repo-modal-error" role="alert">${errorMessage}</p>
       <div class="slo-repo-actions">
-        ${mode === "add" ? html`<button type="button" class="btn" data-modal-action="back">Back</button>` : ""}
+        ${mode === "add" ? rawHtml(html`<button type="button" class="btn" data-modal-action="back">Back</button>`) : ""}
         <button type="button" class="btn" data-modal-action="cancel">Cancel</button>
         <button type="button" class="btn btn--primary" data-modal-action="save">
           ${mode === "edit" ? "Save categories" : "Add repository"}

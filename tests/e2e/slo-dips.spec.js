@@ -21,8 +21,11 @@ test("adds a canonical repository with multiple selected Discussion categories",
   await inspectRepository(page);
 
   const dialog = page.getByRole("dialog", { name: "Choose Discussion categories" });
+  await expect(dialog.getByRole("button", { name: "Back" })).toBeVisible();
+  await expect(dialog).not.toContainText('<button type="button"');
   await dialog.getByText("Select categories").click();
   await dialog.getByRole("checkbox", { name: /SLO Dips/ }).check();
+  await expect(dialog.getByText("Service-level objective regressions")).toBeVisible();
   await dialog.getByRole("checkbox", { name: /Incidents/ }).check();
   await expect(dialog.getByText("2 categories selected")).toBeVisible();
   await dialog.getByRole("button", { name: "Add repository" }).click();
