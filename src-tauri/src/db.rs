@@ -386,6 +386,11 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX IF NOT EXISTS idx_slo_dips_categories_repo
         ON slo_dips_repo_categories(repo_id, name);
     "#,
+    // v21 — resolved GitHub emoji asset for each selected Discussion category. Keep the
+    // original shortcode too so the source metadata remains inspectable.
+    r#"
+    ALTER TABLE slo_dips_repo_categories ADD COLUMN emoji_url TEXT;
+    "#,
 ];
 
 /// Open the database at `db_path`, apply any pending migrations, and return the
@@ -918,7 +923,7 @@ mod tests {
         conn.pragma_update(None, "foreign_keys", "ON").unwrap();
         run_migrations(&conn).unwrap();
 
-        assert_eq!(schema_version(&conn).unwrap(), 20);
+        assert_eq!(schema_version(&conn).unwrap(), 21);
         let tables = table_names(&conn).unwrap();
         assert!(tables.contains(&"slo_dips_repos".to_string()));
         assert!(tables.contains(&"slo_dips_repo_categories".to_string()));

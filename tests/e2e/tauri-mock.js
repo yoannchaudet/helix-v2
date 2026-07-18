@@ -28,6 +28,7 @@ export function installTauriMock(fixtures) {
     sloDipsRepos: JSON.parse(JSON.stringify(fixtures.sloDipsRepos ?? [])),
     sloDipsCatalog: JSON.parse(JSON.stringify(fixtures.sloDipsCatalog ?? {})),
     sloDipsErrors: { ...(fixtures.sloDipsErrors ?? {}) },
+    sloDipsInspectDelayMs: fixtures.sloDipsInspectDelayMs ?? 0,
     lastModule: fixtures.lastModule ?? null,
     // When true, `get_dependabot_merge_operation_detail` calls don't resolve on their own —
     // they queue in `pendingDetailCalls` for a spec to resolve explicitly (in any order) via
@@ -173,7 +174,10 @@ export function installTauriMock(fixtures) {
       }
       const inspection = state.sloDipsCatalog[String(repository).trim().toLowerCase()];
       if (!inspection) return Promise.reject(new Error("GitHub returned 404 Not Found."));
-      return JSON.parse(JSON.stringify(inspection));
+      const result = JSON.parse(JSON.stringify(inspection));
+      return state.sloDipsInspectDelayMs
+        ? new Promise((resolve) => setTimeout(() => resolve(result), state.sloDipsInspectDelayMs))
+        : result;
     },
     add_slo_dips_repo: ({ repository, categoryIds }) => {
       if (state.sloDipsErrors.add) return Promise.reject(new Error(state.sloDipsErrors.add));
@@ -195,7 +199,12 @@ export function installTauriMock(fixtures) {
       }
       const added = {
         ...inspection.repository,
-        categories: selected.map(({ id, name, emoji }) => ({ id, name, emoji })),
+        categories: selected.map(({ id, name, emoji, emoji_url }) => ({
+          id,
+          name,
+          emoji,
+          emoji_url,
+        })),
       };
       state.sloDipsRepos.push(added);
       state.sloDipsRepos.sort((a, b) => a.full_name.localeCompare(b.full_name));
@@ -217,7 +226,12 @@ export function installTauriMock(fixtures) {
           ),
         );
       }
-      stored.categories = selected.map(({ id, name, emoji }) => ({ id, name, emoji }));
+      stored.categories = selected.map(({ id, name, emoji, emoji_url }) => ({
+        id,
+        name,
+        emoji,
+        emoji_url,
+      }));
       return JSON.parse(JSON.stringify(stored));
     },
     remove_slo_dips_repo: ({ repoId }) => {
@@ -555,7 +569,7 @@ export function defaultFixtures() {
     },
     db: {
       path: "/Users/test/Library/Application Support/helix/helix.db",
-      schema_version: 20,
+      schema_version: 21,
       tables: [
         "bookmarks",
         "collapsed_notification_repos",
@@ -599,21 +613,24 @@ export function defaultFixtures() {
           {
             id: "DC_kwA",
             name: "SLO Dips",
-            emoji: "📉",
+            emoji: ":microscope:",
+            emoji_url: "https://github.githubassets.com/images/icons/emoji/unicode/1f52c.png?v8",
             description: "Service-level objective regressions",
             is_answerable: false,
           },
           {
             id: "DC_kwB",
             name: "Incidents",
-            emoji: "🚨",
+            emoji: ":fire_extinguisher:",
+            emoji_url: "https://github.githubassets.com/images/icons/emoji/unicode/1f9ef.png?v8",
             description: "Production incidents and follow-up",
             is_answerable: true,
           },
           {
             id: "DC_kwC",
             name: "Announcements",
-            emoji: "📣",
+            emoji: ":mega:",
+            emoji_url: "https://github.githubassets.com/images/icons/emoji/unicode/1f4e3.png?v8",
             description: null,
             is_answerable: false,
           },

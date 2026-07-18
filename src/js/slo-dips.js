@@ -9,24 +9,65 @@ const STALE_CATEGORIES_CODE = "SLO_DIPS_STALE_CATEGORIES:";
 
 let repositories = [];
 let activeRepoId = null;
-let overlay = null;
-let returnFocus = null;
-let modalState = null;
+let editor = { mode: "idle" };
+let requestSequence = 0;
+
+function errorText(error) {
+  return String(error)
+    .replace(/^Error:\s*/, "")
+    .replace(`${STALE_CATEGORIES_CODE} `, "");
+}
 
 function activeRepository() {
   return repositories.find((repository) => repository.id === activeRepoId) ?? null;
 }
 
+function selectionsMatch(left, right) {
+  return left.size === right.size && [...left].every((id) => right.has(id));
+}
+
+function hasUnsavedCategoryChanges() {
+  return (
+    editor.mode === "categories" &&
+    !editor.pending &&
+    !selectionsMatch(editor.selected, editor.originalSelected)
+  );
+}
+
+function confirmDiscardChanges(anchor, action) {
+  if (!hasUnsavedCategoryChanges()) {
+    action();
+    return;
+  }
+  const rect = anchor.getBoundingClientRect();
+  openContextMenu(rect.left + 12, rect.top + 12, [
+    { label: "Discard category changes", danger: true, action },
+    { label: "Cancel", action() {} },
+  ]);
+}
+
+function categoryEmoji(category) {
+  if (category.emoji_url) {
+    return html`<img class="slo-category-emoji" src="${category.emoji_url}" alt="" aria-hidden="true" />`;
+  }
+  return category.emoji
+    ? html`<span class="slo-category-emoji-fallback" aria-hidden="true">${category.emoji}</span>`
+    : "";
+}
+
 async function loadRepositories({ focusRepoId = null } = {}) {
   try {
     repositories = await invoke("list_slo_dips_repos");
-    if (activeRepoId != null && !activeRepository()) activeRepoId = null;
+    if (activeRepoId != null && !activeRepository()) {
+      activeRepoId = null;
+      editor = { mode: "idle" };
+    }
     render();
     if (focusRepoId != null) {
       $(`#slo-dips-repo-list [data-repo-id="${focusRepoId}"]`)?.focus();
     }
   } catch (error) {
-    toast(String(error), "error");
+    toast(errorText(error), "error");
   }
 }
 
@@ -58,263 +99,98 @@ function renderSidebar() {
     .join("");
 }
 
-function renderContent() {
+function renderTitle(repository = null) {
   const title = $("#slo-dips-view-title");
-  const placeholder = $("#slo-dips-placeholder");
-  if (!title || !placeholder) return;
-  const repository = activeRepository();
+  if (!title) return;
   if (!repository) {
-    title.textContent = "SLO Dips";
+    title.textContent = editor.mode === "add" ? "Add repository" : "SLO Dips";
     title.removeAttribute("aria-label");
-    placeholder.innerHTML = html`
-      <img class="module-placeholder-art" src="/assets/helix-muted.svg" alt="" width="116" height="116" />
-      <p class="module-placeholder-title">${repositories.length ? "Select a repository." : "Add a repository to begin."}</p>
-      <p class="module-placeholder-sub">Choose the GitHub Discussion categories that will provide SLO dips.</p>`;
     return;
   }
   title.innerHTML = html`SLO Dips<span class="crumb-sep" aria-hidden="true">›</span><span class="crumb-repo">${repository.full_name}</span>`;
   title.setAttribute("aria-label", `SLO Dips, repository ${repository.full_name}`);
-  placeholder.innerHTML = html`
-    <img class="module-placeholder-art" src="/assets/helix-muted.svg" alt="" width="116" height="116" />
-    <p class="module-placeholder-title">${repository.full_name}</p>
-    <p class="module-placeholder-sub">Tracking ${repository.categories.length} Discussion ${repository.categories.length === 1 ? "category" : "categories"} for future SLO dips.</p>
-    <ul class="slo-category-list" aria-label="Selected Discussion categories">
-      ${rawHtml(
-        repository.categories
-          .map(
-            (category) =>
-              html`<li>${category.emoji ? `${category.emoji} ` : ""}${category.name}</li>`,
-          )
-          .join(""),
-      )}
-    </ul>`;
 }
 
-function selectRepository(repoId) {
-  activeRepoId = repoId;
-  render();
-}
-
-function modalFocusable() {
-  return overlay
-    ? [
-        ...overlay.querySelectorAll(
-          'button:not(:disabled), input:not(:disabled), summary, [tabindex]:not([tabindex="-1"])',
-        ),
-      ].filter((element) => !element.hidden)
-    : [];
-}
-
-function errorText(error) {
-  return String(error)
-    .replace(/^Error:\s*/, "")
-    .replace(`${STALE_CATEGORIES_CODE} `, "");
-}
-
-function modalCanClose() {
-  return !modalState?.pending || modalState.pendingKind === "inspect";
-}
-
-function onModalKeydown(event) {
-  if (!overlay) return;
-  if (event.key === "Escape" && modalCanClose()) {
-    event.preventDefault();
-    closeModal();
-  } else if (event.key === "Tab") {
-    const focusable = modalFocusable();
-    if (!focusable.length) return;
-    const index = focusable.indexOf(document.activeElement);
-    if (index < 0) {
-      event.preventDefault();
-      (event.shiftKey ? focusable.at(-1) : focusable[0])?.focus();
-    } else if (event.shiftKey && index === 0) {
-      event.preventDefault();
-      focusable.at(-1)?.focus();
-    } else if (!event.shiftKey && index === focusable.length - 1) {
-      event.preventDefault();
-      focusable[0]?.focus();
-    }
-  }
-}
-
-function openOverlay() {
-  if (overlay) return;
-  returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  overlay = document.createElement("div");
-  overlay.className = "slo-repo-overlay";
-  overlay.setAttribute("role", "dialog");
-  overlay.setAttribute("aria-modal", "true");
-  overlay.setAttribute("aria-labelledby", "slo-repo-dialog-title");
-  overlay.addEventListener("mousedown", (event) => {
-    if (event.target === overlay && modalCanClose()) closeModal();
-  });
-  document.addEventListener("keydown", onModalKeydown, true);
-  document.body.appendChild(overlay);
-}
-
-function closeModal() {
-  if (!overlay) return;
-  overlay.remove();
-  document.removeEventListener("keydown", onModalKeydown, true);
-  overlay = null;
-  modalState = null;
-  const target = returnFocus;
-  returnFocus = null;
-  if (target && document.contains(target)) target.focus();
-}
-
-function setModalError(message) {
-  const error = $("#slo-repo-modal-error");
-  if (error) error.textContent = message ? errorText(message) : "";
-}
-
-function setPending(pending, pendingKind = "") {
-  if (!modalState || !overlay) return;
-  modalState.pending = pending;
-  modalState.pendingKind = pending ? pendingKind : "";
-  for (const control of overlay.querySelectorAll("button, input")) {
-    const cancellableInspect =
-      pendingKind === "inspect" && control.matches('[data-modal-action="cancel"]');
-    control.disabled = pending && !cancellableInspect;
-  }
-  for (const spinner of overlay.querySelectorAll(".slo-modal-spinner")) {
-    spinner.hidden = !pending;
-  }
-  overlay.setAttribute("aria-busy", String(pending));
-}
-
-function openAddModal() {
-  openOverlay();
-  modalState = { mode: "add", step: "repository", pending: false, repositoryInput: "" };
-  renderRepositoryStep();
-}
-
-function renderRepositoryStep() {
-  overlay.innerHTML = html`
-    <div class="slo-repo-dialog" role="document">
-      <h2 id="slo-repo-dialog-title">Add SLO Dips repository</h2>
-      <p class="slo-repo-dialog-intro">Enter a repository, then choose the Discussion categories that contain SLO dips.</p>
-      <label class="slo-repo-field">
-        Repository
-        <input id="slo-repo-input" type="text" autocomplete="off" placeholder="org/repo-name" value="${modalState.repositoryInput ?? ""}" aria-describedby="slo-repo-modal-error" />
-      </label>
-      <p class="slo-repo-error" id="slo-repo-modal-error" role="alert"></p>
-      <div class="slo-repo-actions">
-        <button type="button" class="btn" data-modal-action="cancel">Cancel</button>
-        <button type="button" class="btn btn--primary" data-modal-action="inspect">
-          Continue <span class="spinner slo-modal-spinner" aria-hidden="true" hidden></span>
-        </button>
-      </div>
-    </div>`;
-  overlay.querySelector('[data-modal-action="cancel"]').addEventListener("click", closeModal);
-  overlay.querySelector('[data-modal-action="inspect"]').addEventListener("click", inspectAddInput);
-  overlay.querySelector("#slo-repo-input").addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      inspectAddInput();
-    }
-  });
-  overlay.querySelector("#slo-repo-input")?.focus();
-}
-
-async function inspectAddInput() {
-  const input = $("#slo-repo-input");
-  modalState.repositoryInput = input?.value.trim() ?? "";
-  const requestState = modalState;
-  setModalError("");
-  setPending(true, "inspect");
-  try {
-    const inspection = await invoke("inspect_slo_dips_repo", {
-      repository: modalState.repositoryInput,
-    });
-    if (modalState !== requestState) return;
-    if (!inspection.categories.length) {
-      throw new Error(
-        "This repository has no GitHub Discussion categories. Enable Discussions and add a category first.",
-      );
-    }
-    modalState.inspection = inspection;
-    modalState.selected = new Set();
-    modalState.step = "categories";
-    renderCategoryStep();
-  } catch (error) {
-    if (modalState !== requestState) return;
-    setPending(false);
-    setModalError(error);
-  }
-}
-
-async function openEditModal(repository) {
-  openOverlay();
-  modalState = {
-    mode: "edit",
-    pending: true,
-    pendingKind: "inspect",
-    repositoryInput: repository.full_name,
-    repository,
-  };
-  overlay.innerHTML = html`
-    <div class="slo-repo-dialog" role="document">
-      <h2 id="slo-repo-dialog-title">Edit Discussion categories</h2>
-      <p class="slo-repo-dialog-intro"><span class="spinner" aria-hidden="true"></span> Loading categories for ${repository.full_name}…</p>
-      <div class="slo-repo-actions">
-        <button type="button" class="btn" data-modal-action="cancel">Cancel</button>
-      </div>
-    </div>`;
-  overlay.querySelector('[data-modal-action="cancel"]').addEventListener("click", closeModal);
-  overlay.setAttribute("aria-busy", "true");
-  const requestState = modalState;
-  try {
-    const inspection = await invoke("inspect_slo_dips_repo", {
-      repository: repository.full_name,
-    });
-    if (modalState !== requestState) return;
-    if (!inspection.categories.length) {
-      throw new Error("This repository no longer has any GitHub Discussion categories.");
-    }
-    modalState.inspection = inspection;
-    modalState.selected = new Set(
-      repository.categories
-        .map((category) => category.id)
-        .filter((id) => inspection.categories.some((category) => category.id === id)),
-    );
-    modalState.staleCount = repository.categories.length - modalState.selected.size;
-    modalState.pending = false;
-    renderCategoryStep();
-  } catch (error) {
-    if (modalState !== requestState) return;
-    modalState.pending = false;
-    overlay.setAttribute("aria-busy", "false");
-    overlay.innerHTML = html`
-      <div class="slo-repo-dialog" role="document">
-        <h2 id="slo-repo-dialog-title">Edit Discussion categories</h2>
-        <p class="slo-repo-error" role="alert">${errorText(error)}</p>
-        <div class="slo-repo-actions">
-          <button type="button" class="btn" data-modal-action="cancel">Close</button>
+function renderContent() {
+  const content = $("#slo-dips-content");
+  if (!content) return;
+  if (editor.mode === "add") {
+    renderTitle();
+    content.innerHTML = html`
+      <div class="slo-editor-card">
+        <h2>Add a repository</h2>
+        <p class="slo-editor-intro">Enter a repository, then choose the GitHub Discussion categories that contain SLO dips.</p>
+        <label class="slo-repo-field">
+          Repository
+          <input id="slo-repo-input" type="text" autocomplete="off" placeholder="org/repo-name" value="${editor.repositoryInput ?? ""}" aria-describedby="slo-editor-error" ${editor.pending ? rawHtml("disabled") : ""} />
+        </label>
+        <p class="slo-repo-error" id="slo-editor-error" role="alert" tabindex="-1">${editor.error ?? ""}</p>
+        <div class="slo-editor-actions">
+          <button type="button" class="btn" data-editor-action="cancel" ${editor.pending ? rawHtml("disabled") : ""}>Cancel</button>
+          <button type="button" class="btn btn--primary" data-editor-action="inspect" ${editor.pending ? rawHtml("disabled") : ""}>
+            Continue ${editor.pending ? rawHtml('<span class="spinner spinner--button" aria-hidden="true"></span>') : ""}
+          </button>
         </div>
       </div>`;
-    overlay.querySelector("button")?.addEventListener("click", closeModal);
-    overlay.querySelector("button")?.focus();
+    content.querySelector('[data-editor-action="cancel"]').addEventListener("click", closeEditor);
+    content
+      .querySelector('[data-editor-action="inspect"]')
+      .addEventListener("click", inspectAddInput);
+    content.querySelector("#slo-repo-input").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        inspectAddInput();
+      }
+    });
+    return;
   }
+
+  if (editor.mode === "loading") {
+    renderTitle(editor.repository);
+    content.innerHTML = html`
+      <div class="slo-editor-card">
+        <div class="slo-editor-loading" role="status">
+          <span class="spinner" aria-hidden="true"></span>
+          <span>Loading Discussion categories for ${editor.repository.full_name}…</span>
+        </div>
+        <div class="slo-editor-actions">
+          <button type="button" class="btn" data-editor-action="cancel">Cancel</button>
+        </div>
+      </div>`;
+    content.querySelector('[data-editor-action="cancel"]').addEventListener("click", closeEditor);
+    return;
+  }
+
+  if (editor.mode === "categories") {
+    renderCategoryEditor(content);
+    return;
+  }
+
+  renderTitle();
+  content.innerHTML = html`
+    <div class="module-placeholder">
+      <img class="module-placeholder-art" src="/assets/helix-muted.svg" alt="" width="116" height="116" />
+      <p class="module-placeholder-title">${repositories.length ? "Select a repository." : "Add a repository to begin."}</p>
+      <p class="module-placeholder-sub">Repositories and their selected Discussion categories appear together here.</p>
+    </div>`;
 }
 
-function selectionSummary() {
-  const count = modalState.selected.size;
-  return count
-    ? `${count} ${count === 1 ? "category" : "categories"} selected`
-    : "Select categories";
-}
-
-function renderCategoryStep(errorMessage = "") {
-  const { inspection, selected, mode, staleCount = 0 } = modalState;
-  overlay.setAttribute("aria-busy", "false");
-  overlay.innerHTML = html`
-    <div class="slo-repo-dialog" role="document">
-      <h2 id="slo-repo-dialog-title">${mode === "edit" ? "Edit Discussion categories" : "Choose Discussion categories"}</h2>
-      <p class="slo-category-repo">${inspection.repository.full_name}${inspection.repository.private ? " 🔒" : ""}</p>
+function renderCategoryEditor(content) {
+  const { inspection, selected, purpose, staleCount = 0, pending = false, error = "" } = editor;
+  const repository = inspection.repository;
+  renderTitle(repository);
+  content.innerHTML = html`
+    <div class="slo-editor-card">
+      <div class="slo-editor-heading">
+        <div>
+          <h2 id="slo-editor-heading" tabindex="-1">${repository.full_name}${repository.private ? " 🔒" : ""}</h2>
+          <p class="slo-editor-intro">${purpose === "add" ? "Choose the categories to track before adding this repository." : "Choose the Discussion categories Helix should use as SLO dip sources."}</p>
+        </div>
+        <span class="slo-selection-count" aria-live="polite">${selected.size} ${selected.size === 1 ? "category" : "categories"} selected</span>
+      </div>
       ${staleCount ? rawHtml(html`<p class="slo-category-warning">${staleCount} previously selected ${staleCount === 1 ? "category is" : "categories are"} no longer available on GitHub.</p>`) : ""}
-      <details class="slo-category-picker">
-        <summary id="slo-category-summary">${selectionSummary()}</summary>
+      <fieldset class="slo-category-fieldset" ${pending ? rawHtml("disabled") : ""}>
+        <legend>Discussion categories</legend>
         <div class="slo-category-options">
           ${rawHtml(
             inspection.categories
@@ -323,7 +199,7 @@ function renderCategoryStep(errorMessage = "") {
                   <label class="slo-category-option">
                     <input type="checkbox" value="${category.id}" ${selected.has(category.id) ? rawHtml("checked") : ""} />
                     <span class="slo-category-option-text">
-                      <span>${category.emoji ? `${category.emoji} ` : ""}${category.name}</span>
+                      <span class="slo-category-option-name">${rawHtml(categoryEmoji(category))}${category.name}</span>
                       ${category.description ? rawHtml(html`<span class="slo-category-option-desc">${category.description}</span>`) : ""}
                     </span>
                   </label>`,
@@ -331,83 +207,235 @@ function renderCategoryStep(errorMessage = "") {
               .join(""),
           )}
         </div>
-      </details>
-      <p class="slo-repo-error" id="slo-repo-modal-error" role="alert">${errorMessage}</p>
-      <div class="slo-repo-actions">
-        ${mode === "add" ? rawHtml(html`<button type="button" class="btn" data-modal-action="back">Back</button>`) : ""}
-        <button type="button" class="btn" data-modal-action="cancel">Cancel</button>
-        <button type="button" class="btn btn--primary" data-modal-action="save">
-          ${mode === "edit" ? "Save categories" : "Add repository"}
-          <span class="spinner slo-modal-spinner" aria-hidden="true" hidden></span>
+      </fieldset>
+      <p class="slo-repo-error" id="slo-editor-error" role="alert" tabindex="-1">${error}</p>
+      <div class="slo-editor-actions">
+        ${purpose === "add" ? rawHtml(html`<button type="button" class="btn" data-editor-action="back" ${pending ? rawHtml("disabled") : ""}>Back</button>`) : rawHtml(html`<button type="button" class="btn" data-editor-action="reset" ${pending ? rawHtml("disabled") : ""}>Reset</button>`)}
+        <button type="button" class="btn btn--primary" data-editor-action="save" ${pending ? rawHtml("disabled") : ""}>
+          ${purpose === "add" ? "Add repository" : "Save categories"}
+          ${pending ? rawHtml('<span class="spinner spinner--button" aria-hidden="true"></span>') : ""}
         </button>
       </div>
     </div>`;
-  for (const checkbox of overlay.querySelectorAll('.slo-category-option input[type="checkbox"]')) {
+  for (const checkbox of content.querySelectorAll('.slo-category-option input[type="checkbox"]')) {
     checkbox.addEventListener("change", () => {
-      if (checkbox.checked) modalState.selected.add(checkbox.value);
-      else modalState.selected.delete(checkbox.value);
-      $("#slo-category-summary").textContent = selectionSummary();
-      setModalError("");
+      if (checkbox.checked) editor.selected.add(checkbox.value);
+      else editor.selected.delete(checkbox.value);
+      editor.error = "";
+      renderContent();
+      content.querySelector(`input[value="${CSS.escape(checkbox.value)}"]`)?.focus();
     });
   }
-  overlay
-    .querySelector('[data-modal-action="back"]')
-    ?.addEventListener("click", renderRepositoryStep);
-  overlay.querySelector('[data-modal-action="cancel"]').addEventListener("click", closeModal);
-  overlay.querySelector('[data-modal-action="save"]').addEventListener("click", saveCategories);
-  overlay.querySelector(".slo-category-picker summary")?.focus();
+  content.querySelector('[data-editor-action="back"]')?.addEventListener("click", () => {
+    editor = {
+      mode: "add",
+      repositoryInput: editor.repositoryInput,
+      pending: false,
+      error: "",
+    };
+    renderContent();
+    $("#slo-repo-input")?.focus();
+  });
+  content.querySelector('[data-editor-action="reset"]')?.addEventListener("click", resetSelection);
+  content.querySelector('[data-editor-action="save"]').addEventListener("click", saveCategories);
+}
+
+function beginAdd() {
+  requestSequence += 1;
+  activeRepoId = null;
+  editor = { mode: "add", repositoryInput: "", pending: false, error: "" };
+  render();
+  $("#slo-repo-input")?.focus();
+}
+
+function closeEditor() {
+  requestSequence += 1;
+  activeRepoId = null;
+  editor = { mode: "idle" };
+  render();
+  $("#slo-dips-add-repo")?.focus();
+}
+
+async function inspectAddInput() {
+  const repositoryInput = $("#slo-repo-input")?.value.trim() ?? "";
+  const requestId = ++requestSequence;
+  editor = { mode: "add", repositoryInput, pending: true, error: "" };
+  renderContent();
+  try {
+    const inspection = await invoke("inspect_slo_dips_repo", { repository: repositoryInput });
+    if (requestId !== requestSequence) return;
+    if (!inspection.categories.length) {
+      throw new Error(
+        "This repository has no GitHub Discussion categories. Enable Discussions and add a category first.",
+      );
+    }
+    editor = {
+      mode: "categories",
+      purpose: "add",
+      repositoryInput,
+      inspection,
+      selected: new Set(),
+      originalSelected: new Set(),
+      pending: false,
+      error: "",
+    };
+  } catch (error) {
+    if (requestId !== requestSequence) return;
+    editor = { mode: "add", repositoryInput, pending: false, error: errorText(error) };
+  }
+  renderContent();
+  if (editor.error) $("#slo-editor-error")?.focus();
+  else $("#slo-editor-heading")?.focus();
+}
+
+async function selectRepository(repoId) {
+  const repository = repositories.find((candidate) => candidate.id === repoId);
+  if (!repository) return;
+  activeRepoId = repoId;
+  const requestId = ++requestSequence;
+  editor = { mode: "loading", repository };
+  render();
+  try {
+    const inspection = await invoke("inspect_slo_dips_repo", {
+      repository: repository.full_name,
+    });
+    if (requestId !== requestSequence) return;
+    if (!inspection.categories.length) {
+      throw new Error("This repository no longer has any GitHub Discussion categories.");
+    }
+    const selected = new Set(
+      repository.categories
+        .map((category) => category.id)
+        .filter((id) => inspection.categories.some((category) => category.id === id)),
+    );
+    editor = {
+      mode: "categories",
+      purpose: "edit",
+      repository,
+      inspection,
+      selected,
+      originalSelected: new Set(selected),
+      staleCount: repository.categories.length - selected.size,
+      pending: false,
+      error: "",
+    };
+  } catch (error) {
+    if (requestId !== requestSequence) return;
+    editor = {
+      mode: "categories",
+      purpose: "edit",
+      repository,
+      inspection: {
+        repository,
+        categories: repository.categories.map((category) => ({
+          ...category,
+          description: null,
+        })),
+      },
+      selected: new Set(repository.categories.map((category) => category.id)),
+      originalSelected: new Set(repository.categories.map((category) => category.id)),
+      pending: false,
+      error: errorText(error),
+    };
+  }
+  render();
+  $("#slo-editor-heading")?.focus();
+}
+
+function resetSelection() {
+  const repository = activeRepository();
+  if (!repository || editor.mode !== "categories") return;
+  editor.selected = new Set(
+    repository.categories
+      .map((category) => category.id)
+      .filter((id) => editor.inspection.categories.some((category) => category.id === id)),
+  );
+  editor.originalSelected = new Set(editor.selected);
+  editor.error = "";
+  renderContent();
 }
 
 async function saveCategories() {
-  if (!modalState.selected.size) {
-    setModalError("Select at least one GitHub Discussion category.");
+  if (!editor.selected.size) {
+    editor.error = "Select at least one GitHub Discussion category.";
+    renderContent();
+    $("#slo-editor-error")?.focus();
     return;
   }
-  const categoryIds = [...modalState.selected];
-  setPending(true, "save");
+  const requestState = editor;
+  const requestId = ++requestSequence;
+  const categoryIds = [...editor.selected];
+  editor.pending = true;
+  editor.error = "";
+  renderContent();
   try {
     const repository =
-      modalState.mode === "edit"
+      editor.purpose === "edit"
         ? await invoke("update_slo_dips_repo_categories", {
-            repoId: modalState.repository.id,
+            repoId: editor.repository.id,
             categoryIds,
           })
         : await invoke("add_slo_dips_repo", {
-            repository: modalState.repositoryInput,
+            repository: editor.repositoryInput,
             categoryIds,
           });
+    if (requestId !== requestSequence) {
+      await loadRepositories();
+      return;
+    }
     activeRepoId = repository.id;
-    const editing = modalState.mode === "edit";
-    closeModal();
-    await loadRepositories({ focusRepoId: editing ? repository.id : null });
-    toast(editing ? "Discussion categories updated." : "SLO Dips repository added.");
+    await loadRepositories();
+    const stored = activeRepository() ?? repository;
+    editor = {
+      mode: "categories",
+      purpose: "edit",
+      repository: stored,
+      inspection: requestState.inspection,
+      selected: new Set(stored.categories.map((category) => category.id)),
+      originalSelected: new Set(stored.categories.map((category) => category.id)),
+      pending: false,
+      error: "",
+    };
+    render();
+    $("#slo-dips-content [data-editor-action='save']")?.focus();
+    toast(
+      requestState.purpose === "edit"
+        ? "Discussion categories updated."
+        : "SLO Dips repository added.",
+    );
   } catch (error) {
-    setPending(false);
+    if (requestId !== requestSequence) return;
     if (String(error).includes(STALE_CATEGORIES_CODE)) {
       try {
         const inspection = await invoke("inspect_slo_dips_repo", {
-          repository: modalState.repositoryInput,
+          repository: requestState.repositoryInput ?? requestState.repository.full_name,
         });
-        modalState.inspection = inspection;
-        modalState.selected = new Set(
-          categoryIds.filter((id) => inspection.categories.some((category) => category.id === id)),
-        );
-        renderCategoryStep(errorText(error));
+        editor = {
+          ...requestState,
+          inspection,
+          selected: new Set(
+            categoryIds.filter((id) =>
+              inspection.categories.some((category) => category.id === id),
+            ),
+          ),
+          originalSelected: new Set(requestState.originalSelected),
+          pending: false,
+          error: errorText(error),
+        };
       } catch (reloadError) {
-        setModalError(reloadError);
+        editor = { ...requestState, pending: false, error: errorText(reloadError) };
       }
     } else {
-      setModalError(error);
+      editor = { ...requestState, pending: false, error: errorText(error) };
     }
+    renderContent();
+    $("#slo-editor-error")?.focus();
   }
 }
 
 function openRepositoryMenu(event, repository) {
   event.preventDefault();
-  returnFocus = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
   openContextMenu(event.clientX, event.clientY, [
-    { label: "Edit categories", action: () => openEditModal(repository) },
-    { separator: true },
     {
       label: "Remove repository",
       danger: true,
@@ -432,21 +460,29 @@ async function removeRepository(repository) {
   const fallback = repositories[index + 1] ?? repositories[index - 1] ?? null;
   try {
     await invoke("remove_slo_dips_repo", { repoId: repository.id });
-    if (activeRepoId === repository.id) activeRepoId = null;
+    if (activeRepoId === repository.id) {
+      activeRepoId = null;
+      editor = { mode: "idle" };
+    }
     await loadRepositories({ focusRepoId: fallback?.id ?? null });
     if (!fallback) $("#slo-dips-add-repo")?.focus();
     toast("SLO Dips repository removed.");
   } catch (error) {
-    toast(String(error), "error");
+    toast(errorText(error), "error");
   }
 }
 
 function initSloDips() {
-  $("#slo-dips-add-repo")?.addEventListener("click", openAddModal);
+  $("#slo-dips-add-repo")?.addEventListener("click", (event) => {
+    confirmDiscardChanges(event.currentTarget, beginAdd);
+  });
   const list = $("#slo-dips-repo-list");
   list?.addEventListener("click", (event) => {
     const source = event.target instanceof Element ? event.target.closest("[data-repo-id]") : null;
-    if (source) selectRepository(Number(source.dataset.repoId));
+    if (!source) return;
+    const repoId = Number(source.dataset.repoId);
+    if (repoId === activeRepoId && editor.mode === "categories") return;
+    confirmDiscardChanges(source, () => selectRepository(repoId));
   });
   list?.addEventListener("contextmenu", (event) => {
     const source = event.target instanceof Element ? event.target.closest("[data-repo-id]") : null;
@@ -466,7 +502,6 @@ function initSloDips() {
     openRepositoryMenu(
       {
         preventDefault: () => event.preventDefault(),
-        currentTarget: source,
         clientX: rect.left + 12,
         clientY: rect.top + 12,
       },
@@ -479,5 +514,4 @@ registerModule("slo-dips", {
   sidebarSelector: "#sidebar-slo-dips",
   init: initSloDips,
   load: loadRepositories,
-  deactivate: closeModal,
 });

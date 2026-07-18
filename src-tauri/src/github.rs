@@ -9,6 +9,8 @@ use reqwest::header::HeaderMap;
 use serde::{Deserialize, Serialize};
 
 const API_BASE: &str = "https://api.github.com";
+static EMOJI_CATALOG: tokio::sync::OnceCell<std::collections::HashMap<String, String>> =
+    tokio::sync::OnceCell::const_new();
 /// Pinned REST API version (see docs.github.com/en/rest).
 pub const API_VERSION: &str = "2026-03-10";
 /// GitHub requires a User-Agent on every request.
@@ -173,6 +175,7 @@ pub struct DiscussionCategory {
     pub id: String,
     pub name: String,
     pub emoji: String,
+    pub emoji_url: Option<String>,
     pub description: Option<String>,
     pub is_answerable: bool,
 }
@@ -337,6 +340,7 @@ pub async fn inspect_repository(
                     id: category.id,
                     name: category.name,
                     emoji: category.emoji,
+                    emoji_url: None,
                     description: category.description,
                     is_answerable: category.is_answerable,
                 }),
@@ -350,6 +354,48 @@ pub async fn inspect_repository(
                 what: "discussion categories",
                 source: "GitHub reported another page without a cursor".into(),
             });
+        }
+    }
+    if !categories.is_empty() {
+        let emoji_urls = EMOJI_CATALOG
+            .get_or_try_init(|| async {
+                let response = authed_get(client, &format!("{API_BASE}/emojis"), token)
+                    .send()
+                    .await
+                    .map_err(|e| GitHubError::Network(e.to_string()))?;
+                let status = response.status();
+                let mut emoji_rate = RateLimit::default();
+                emoji_rate.update_from(response.headers());
+                rates.push(emoji_rate);
+                if status == reqwest::StatusCode::UNAUTHORIZED {
+                    return Err(GitHubError::Unauthorized);
+                }
+                if status == reqwest::StatusCode::FORBIDDEN {
+                    let body = response.text().await.unwrap_or_default();
+                    return Err(GitHubError::Forbidden(body.trim().to_string()));
+                }
+                if !status.is_success() {
+                    let body = response.text().await.unwrap_or_default();
+                    return Err(GitHubError::Status {
+                        status,
+                        body: body.trim().to_string(),
+                    });
+                }
+                response.json().await.map_err(|e| GitHubError::Parse {
+                    what: "GitHub emoji catalog",
+                    source: e.to_string(),
+                })
+            })
+            .await;
+        match emoji_urls {
+            Ok(emoji_urls) => {
+                for category in &mut categories {
+                    category.emoji_url = emoji_urls.get(category.emoji.trim_matches(':')).cloned();
+                }
+            }
+            Err(error) => {
+                eprintln!("helix: loading GitHub emoji catalog failed, using shortcodes: {error}");
+            }
         }
     }
     categories.sort_by_key(|category| category.name.to_lowercase());

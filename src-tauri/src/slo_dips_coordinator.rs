@@ -74,6 +74,7 @@ fn selected_categories(
             id: category.id.clone(),
             name: category.name.clone(),
             emoji: category.emoji.clone(),
+            emoji_url: category.emoji_url.clone(),
         })
         .collect();
     if categories.len() != selected_ids.len() {
@@ -206,6 +207,7 @@ mod tests {
                 id: "one".into(),
                 name: "One".into(),
                 emoji: String::new(),
+                emoji_url: None,
                 description: None,
                 is_answerable: false,
             }],

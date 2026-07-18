@@ -6,6 +6,7 @@ pub struct SloDipsCategory {
     pub id: String,
     pub name: String,
     pub emoji: String,
+    pub emoji_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -75,7 +76,7 @@ pub fn get_repository(
 
 fn list_categories(conn: &Connection, repo_id: i64) -> rusqlite::Result<Vec<SloDipsCategory>> {
     let mut stmt = conn.prepare(
-        "SELECT category_id, name, emoji
+        "SELECT category_id, name, emoji, emoji_url
          FROM slo_dips_repo_categories
          WHERE repo_id = ?1
          ORDER BY name COLLATE NOCASE ASC, category_id ASC",
@@ -86,6 +87,7 @@ fn list_categories(conn: &Connection, repo_id: i64) -> rusqlite::Result<Vec<SloD
                 id: row.get(0)?,
                 name: row.get(1)?,
                 emoji: row.get(2)?,
+                emoji_url: row.get(3)?,
             })
         })?
         .collect();
@@ -158,11 +160,17 @@ fn insert_categories(
     categories: &[SloDipsCategory],
 ) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(
-        "INSERT INTO slo_dips_repo_categories (repo_id, category_id, name, emoji)
-         VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO slo_dips_repo_categories (repo_id, category_id, name, emoji, emoji_url)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
     )?;
     for category in categories {
-        stmt.execute(params![repo_id, category.id, category.name, category.emoji])?;
+        stmt.execute(params![
+            repo_id,
+            category.id,
+            category.name,
+            category.emoji,
+            category.emoji_url
+        ])?;
     }
     Ok(())
 }
@@ -186,6 +194,7 @@ mod tests {
              CREATE TABLE slo_dips_repo_categories (
                 repo_id INTEGER NOT NULL REFERENCES slo_dips_repos(repo_id) ON DELETE CASCADE,
                 category_id TEXT NOT NULL, name TEXT NOT NULL, emoji TEXT NOT NULL DEFAULT '',
+                emoji_url TEXT,
                 PRIMARY KEY (repo_id, category_id)
              );",
         )
@@ -206,6 +215,7 @@ mod tests {
                     id: (*id).into(),
                     name: (*name).into(),
                     emoji: "📈".into(),
+                    emoji_url: Some("https://github.githubassets.com/emoji.png".into()),
                 })
                 .collect(),
         }
@@ -223,6 +233,7 @@ mod tests {
             id: "c".into(),
             name: "Reliability".into(),
             emoji: "🛡️".into(),
+            emoji_url: None,
         }];
         let updated = replace_categories(&conn, 42, &replacement).unwrap();
         assert_eq!(updated.categories, replacement);

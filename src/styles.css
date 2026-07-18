@@ -433,21 +433,16 @@ code,
   color: var(--muted);
 }
 
-.source-group-head {
+.source-group-action {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
   margin-top: var(--space-12);
-}
-
-.source-group-head .source-group-label {
-  margin-top: var(--space-4);
 }
 
 .source-group-add {
   width: 24px;
   height: 24px;
-  margin-right: var(--space-6);
 }
 
 .source {
@@ -652,50 +647,32 @@ code,
   color: var(--muted);
 }
 
-.slo-category-list {
-  margin: var(--space-10) 0 0;
-  padding: 0;
-  list-style: none;
-  font-size: 0.84rem;
-}
-
-.slo-category-list li + li {
-  margin-top: var(--space-4);
-}
-
-/* Repository/category editor. The checkbox disclosure keeps multi-selection native while
-   presenting it as a compact dropdown inside the modal. */
-.slo-repo-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: var(--z-overlay);
+.slo-content {
+  flex: 1;
+  min-height: 0;
   display: flex;
-  align-items: center;
-  justify-content: center;
+  flex-direction: column;
+  overflow: auto;
   padding: var(--space-24);
-  background: rgba(0, 0, 0, 0.32);
-  backdrop-filter: saturate(120%) blur(2px);
-  -webkit-backdrop-filter: saturate(120%) blur(2px);
 }
 
-.slo-repo-dialog {
-  width: min(460px, 100%);
-  max-height: 100%;
-  overflow: auto;
-  padding: var(--space-18) var(--space-20) var(--space-20);
+.slo-editor-card {
+  width: min(720px, 100%);
+  box-sizing: border-box;
+  margin: 0 auto;
+  padding: var(--space-20);
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-5xl);
   box-shadow: var(--shadow);
 }
 
-.slo-repo-dialog h2 {
+.slo-editor-card h2 {
   margin: 0 0 var(--space-6);
-  font-size: 1rem;
+  font-size: 1.1rem;
 }
 
-.slo-repo-dialog-intro,
-.slo-category-repo,
+.slo-editor-intro,
 .slo-category-warning {
   margin: 0 0 var(--space-14);
   color: var(--muted);
@@ -722,6 +699,23 @@ code,
   font-weight: 400;
 }
 
+.slo-editor-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-16);
+}
+
+.slo-selection-count {
+  flex: none;
+  padding: var(--space-5) var(--space-8);
+  color: var(--muted);
+  background: var(--hover);
+  border-radius: var(--radius-pill);
+  font-size: 0.76rem;
+  font-weight: 600;
+}
+
 .slo-repo-error {
   min-height: 1.2em;
   margin: var(--space-8) 0 0;
@@ -729,38 +723,62 @@ code,
   font-size: 0.8rem;
 }
 
-.slo-category-picker {
-  margin-top: var(--space-8);
+.slo-category-fieldset {
+  margin: var(--space-8) 0 0;
+  padding: 0;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--field-bg);
 }
 
-.slo-category-picker summary {
-  padding: var(--space-9) var(--space-10);
-  cursor: pointer;
+.slo-category-fieldset legend {
+  margin-left: var(--space-8);
+  padding: 0 var(--space-4);
   font-size: 0.84rem;
   font-weight: 600;
 }
 
 .slo-category-options {
-  max-height: 220px;
-  overflow: auto;
-  padding: 0 var(--space-8) var(--space-8);
-  border-top: 1px solid var(--hairline);
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: var(--space-4);
+  padding: var(--space-8);
 }
 
 .slo-category-option {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   gap: var(--space-8);
-  padding: var(--space-8) var(--space-4);
+  padding: var(--space-10);
+  border-radius: var(--radius-lg);
   font-size: 0.84rem;
+}
+
+.slo-category-option:hover {
+  background: var(--hover);
 }
 
 .slo-category-option-text {
   display: grid;
   gap: 2px;
+}
+
+.slo-category-option-name {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+}
+
+.slo-category-emoji {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+}
+
+.slo-category-emoji-fallback {
+  min-width: 18px;
+  color: var(--muted);
+  font-size: 0.72rem;
 }
 
 .slo-category-option-desc {
@@ -769,15 +787,42 @@ code,
   line-height: 1.35;
 }
 
-.slo-repo-actions {
+.slo-editor-actions {
   display: flex;
   justify-content: flex-end;
   gap: var(--space-8);
   margin-top: var(--space-16);
 }
 
-.slo-repo-actions button {
+.slo-editor-actions button {
   min-width: 76px;
+}
+
+.slo-editor-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-6);
+}
+
+.spinner.spinner--button {
+  width: 12px;
+  height: 12px;
+  border-width: 1.5px;
+}
+
+.btn--primary .spinner--button {
+  border-color: rgba(255, 255, 255, 0.38);
+  border-top-color: var(--on-accent);
+}
+
+.slo-editor-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-8);
+  color: var(--muted);
+  font-size: 0.88rem;
 }
 
 .pane {

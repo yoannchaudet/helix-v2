@@ -211,10 +211,14 @@ CREATE TABLE bookmarks (                  -- local-only; snapshot survives done/
 - `slo_dips_repos` stores repositories explicitly added to the SLO Dips module, independently of
   notification and Bot PR repository discovery.
 - `slo_dips_repo_categories` stores one or more selected GitHub Discussion category node IDs,
-  names, and emoji per repository. The rows cascade when a repository is removed.
+  names, emoji shortcodes, and resolved GitHub emoji asset URLs per repository. The rows cascade
+  when a repository is removed.
 - Adding or editing first fetches GitHub's live category list, then revalidates the submitted IDs
   before atomically inserting or replacing the saved selection. A repository cannot be stored
   without at least one category.
+- GitHub's GraphQL category `emoji` field is a shortcode such as `:hash:`. Repository inspection
+  resolves those shortcodes through the official `GET /emojis` catalog so the UI can render the
+  same icons GitHub uses, including GitHub-specific assets such as `:octocat:`.
 
 ### Reconciliation model
 - **Remote mirror:** each synced notification is unconditionally
@@ -252,6 +256,7 @@ Native REST and GraphQL over HTTPS from the Rust core (no `gh` CLI dependency). 
 | Mark a thread as done | `DELETE /notifications/threads/{thread_id}` |
 | Validate an SLO Dips repository | `GET /repos/{owner}/{repo}` |
 | List Discussion categories | GraphQL `Repository.discussionCategories` |
+| Resolve Discussion emoji shortcodes | `GET /emojis` |
 | (Optional) auth check | `GET /user` |
 
 Headers on every request:
@@ -354,9 +359,10 @@ position.
 - **SLO Dips** module — the third top-level destination. Its sidebar is a manually managed,
   SQLite-backed repository list. Adding a repository validates `org/repo-name` with GitHub REST,
   loads its Discussion categories through GraphQL, and requires one or more categories to be
-  selected as future SLO-dip sources. A repository context menu can edit the live category
-  selection or remove the repository after confirmation. The content pane remains a
-  repository-specific placeholder until Discussion ingestion and SLO analysis are implemented.
+  selected as future SLO-dip sources. The main module pane hosts both the add flow and the selected
+  repository's live category checklist, so repository details and category configuration stay
+  visible together. A repository context menu removes the repository after confirmation.
+  Discussion ingestion and SLO analysis remain deferred.
 - **Settings is *not* a module** — it's a focused, full-width **overlay** that temporarily
   covers the active module (hiding the sidebar) and returns to it on close. The top chrome
   (and picker) stays visible, so switching modules dismisses the overlay. `modules.js` owns

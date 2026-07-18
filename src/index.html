@@ -87,8 +87,11 @@
           aria-label="SLO Dips repositories"
           hidden
         >
-          <div class="source-group-head">
-            <p class="source-group-label">Repositories</p>
+          <p class="source-group-label">Repositories</p>
+          <ul class="source-list" id="slo-dips-repo-list">
+            <li class="source-empty">No repositories yet.</li>
+          </ul>
+          <div class="source-group-action">
             <button
               type="button"
               class="icon-btn source-group-add"
@@ -101,9 +104,6 @@
               </svg>
             </button>
           </div>
-          <ul class="source-list" id="slo-dips-repo-list">
-            <li class="source-empty">No repositories yet.</li>
-          </ul>
         </nav>
       </aside>
 
@@ -198,10 +198,12 @@
           <h1 class="toolbar-title" id="slo-dips-view-title">SLO Dips</h1>
         </header>
 
-        <div class="module-placeholder" id="slo-dips-placeholder">
-          <img class="module-placeholder-art" src="/assets/helix-muted.svg" alt="" width="116" height="116" />
-          <p class="module-placeholder-title">Add a repository to begin.</p>
-          <p class="module-placeholder-sub">Choose the GitHub Discussion categories that will provide SLO dips.</p>
+        <div class="slo-content" id="slo-dips-content">
+          <div class="module-placeholder">
+            <img class="module-placeholder-art" src="/assets/helix-muted.svg" alt="" width="116" height="116" />
+            <p class="module-placeholder-title">Add a repository to begin.</p>
+            <p class="module-placeholder-sub">Repositories and their selected Discussion categories appear together here.</p>
+          </div>
         </div>
       </section>
 
