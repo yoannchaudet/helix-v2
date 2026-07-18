@@ -45,8 +45,7 @@
       <div class="app-body">
       <!-- =============================== Sidebar =============================== -->
       <!-- Module-scoped: each module shows its own sidebar sources (Notifications: smart
-           filters + repositories; Bot PRs: repositories only; SLO Dips: reserved and empty),
-           toggled by modules.js.
+           filters + repositories; Bot PRs and SLO Dips: repositories), toggled by modules.js.
            The whole sidebar is hidden while the Settings overlay is open. -->
       <aside class="sidebar">
         <!-- Notifications module sources: smart filters + repositories. -->
@@ -81,12 +80,31 @@
           </ul>
         </nav>
 
-        <!-- SLO Dips reserves its module sidebar for future navigation. -->
-        <div
+        <!-- SLO Dips repositories are managed manually and rendered by slo-dips.js. -->
+        <nav
           class="sources sidebar-module sidebar-module--slo-dips"
           id="sidebar-slo-dips"
+          aria-label="SLO Dips repositories"
           hidden
-        ></div>
+        >
+          <p class="source-group-label">Repositories</p>
+          <ul class="source-list" id="slo-dips-repo-list">
+            <li class="source-empty">No repositories yet.</li>
+          </ul>
+          <div class="source-group-action">
+            <button
+              type="button"
+              class="icon-btn source-group-add"
+              id="slo-dips-add-repo"
+              aria-label="Add SLO Dips repository"
+              title="Add repository"
+            >
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                <path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+              </svg>
+            </button>
+          </div>
+        </nav>
       </aside>
 
       <!-- Drag handle to resize the sidebar width (min = default width). -->
@@ -180,10 +198,12 @@
           <h1 class="toolbar-title" id="slo-dips-view-title">SLO Dips</h1>
         </header>
 
-        <div class="module-placeholder">
-          <img class="module-placeholder-art" src="/assets/helix-muted.svg" alt="" width="116" height="116" />
-          <p class="module-placeholder-title">SLO Dips is coming soon.</p>
-          <p class="module-placeholder-sub">This module is ready for its first SLO workflow.</p>
+        <div class="slo-content" id="slo-dips-content">
+          <div class="module-placeholder">
+            <img class="module-placeholder-art" src="/assets/helix-muted.svg" alt="" width="116" height="116" />
+            <p class="module-placeholder-title">Add a repository to begin.</p>
+            <p class="module-placeholder-sub">Repositories and their selected Discussion categories appear together here.</p>
+          </div>
         </div>
       </section>
 
