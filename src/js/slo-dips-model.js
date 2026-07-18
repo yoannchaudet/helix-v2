@@ -22,10 +22,11 @@ export function summarize(dips) {
   return { total: dips.length, investigated, pending: dips.length - investigated };
 }
 
-/** A DOM-safe id fragment for a repository `full_name` (which contains `/`), used to tie a
- *  repo section to its heading via `aria-labelledby`. */
+/** A DOM-safe, collision-free id fragment for a repository `full_name` (which contains `/`),
+ *  used to tie a repo section to its heading via `aria-labelledby`. `encodeURIComponent`
+ *  keeps the encoding injective so distinct repo names can never share an id. */
 export function repoDomId(fullName) {
-  return `slo-repo-${String(fullName).replace(/[^a-zA-Z0-9]+/g, "-")}`;
+  return `slo-repo-${encodeURIComponent(String(fullName))}`;
 }
 
 /** Group dips by repository, preserving the backend's dip_date-descending order within each

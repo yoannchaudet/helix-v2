@@ -247,8 +247,12 @@ function renderRepoGroup(group) {
 
 function renderDipRow(dip) {
   const status = dipStatus(dip);
-  const investigator =
-    status === "investigated" && dip.investigated_by ? html` by ${dip.investigated_by}` : "";
+  const badge =
+    status === "investigated"
+      ? dip.investigated_by
+        ? html`investigated by ${dip.investigated_by}`
+        : "investigated"
+      : "pending";
   return html`
     <li class="slo-dip-row slo-dip-row--${status}">
       <span class="slo-dip-status" title="${status === "investigated" ? "Investigated" : "Not investigated"}">
@@ -261,7 +265,7 @@ function renderDipRow(dip) {
         ${dip.slo_url ? rawHtml(html`<button type="button" class="slo-dip-datadog" data-open-url="${dip.slo_url}" title="Open in Datadog" aria-label="Open ${dip.slo_name} in Datadog">${rawHtml(DATADOG_ICON)}</button>`) : ""}
       </span>
       <span class="slo-dip-percent">${formatPercent(dip.percent)}</span>
-      <span class="slo-dip-badge slo-dip-badge--${status}">${status === "investigated" ? html`investigated${investigator}` : "pending"}</span>
+      <span class="slo-dip-badge slo-dip-badge--${status}">${rawHtml(badge)}</span>
     </li>`;
 }
 

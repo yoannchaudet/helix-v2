@@ -56,7 +56,12 @@ test("summarize counts total, investigated and pending", () => {
 /* --------------------------------- repoDomId ---------------------------------- */
 
 test("repoDomId is DOM-safe", () => {
-  assert.equal(repoDomId("github/edge-foundation"), "slo-repo-github-edge-foundation");
+  assert.equal(repoDomId("github/edge-foundation"), "slo-repo-github%2Fedge-foundation");
+});
+
+test("repoDomId is injective for repos that differ only by separator", () => {
+  assert.notEqual(repoDomId("org/a-b"), repoDomId("org/a.b"));
+  assert.notEqual(repoDomId("org/a_b"), repoDomId("org/a-b"));
 });
 
 /* ------------------------------- groupDipsByRepo ------------------------------ */
