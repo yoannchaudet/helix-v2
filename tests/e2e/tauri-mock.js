@@ -569,7 +569,7 @@ export function defaultFixtures() {
     },
     db: {
       path: "/Users/test/Library/Application Support/helix/helix.db",
-      schema_version: 21,
+      schema_version: 22,
       tables: [
         "bookmarks",
         "collapsed_notification_repos",

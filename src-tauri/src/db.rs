@@ -391,6 +391,13 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE slo_dips_repo_categories ADD COLUMN emoji_url TEXT;
     "#,
+    // v22 — match the category listing order so SQLite can satisfy the repository filter and
+    // case-insensitive name/category tie-break ordering directly from the index.
+    r#"
+    DROP INDEX IF EXISTS idx_slo_dips_categories_repo;
+    CREATE INDEX idx_slo_dips_categories_repo
+        ON slo_dips_repo_categories(repo_id, name COLLATE NOCASE, category_id);
+    "#,
 ];
 
 /// Open the database at `db_path`, apply any pending migrations, and return the
@@ -923,10 +930,20 @@ mod tests {
         conn.pragma_update(None, "foreign_keys", "ON").unwrap();
         run_migrations(&conn).unwrap();
 
-        assert_eq!(schema_version(&conn).unwrap(), 21);
+        assert_eq!(schema_version(&conn).unwrap(), 22);
         let tables = table_names(&conn).unwrap();
         assert!(tables.contains(&"slo_dips_repos".to_string()));
         assert!(tables.contains(&"slo_dips_repo_categories".to_string()));
+        let indexes = table_index_sql(&conn, "slo_dips_repo_categories");
+        assert_eq!(
+            indexes
+                .get("idx_slo_dips_categories_repo")
+                .map(String::as_str),
+            Some(
+                "CREATE INDEX idx_slo_dips_categories_repo
+        ON slo_dips_repo_categories(repo_id, name COLLATE NOCASE, category_id)"
+            )
+        );
 
         conn.execute(
             "INSERT INTO slo_dips_repos
