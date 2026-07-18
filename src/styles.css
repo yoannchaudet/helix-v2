@@ -825,6 +825,172 @@ code,
   font-size: 0.88rem;
 }
 
+/* ------------------------------ SLO dips browse view ----------------------------- */
+
+.slo-dips-view {
+  width: min(920px, 100%);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-16);
+}
+
+.slo-dips-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  flex-wrap: wrap;
+}
+
+.slo-dips-summary-total {
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+
+.slo-dips-window {
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.slo-dip-repo {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+.slo-dip-repo-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-8);
+  padding-bottom: var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+
+.slo-dip-repo-name {
+  margin: 0;
+  font-size: 0.98rem;
+  font-weight: 650;
+}
+
+.slo-dip-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.slo-dip-row {
+  display: grid;
+  grid-template-columns: auto 5.5rem 6rem 1fr auto auto;
+  align-items: center;
+  gap: var(--space-10);
+  padding: var(--space-8) var(--space-6);
+  border-radius: var(--radius-2xl);
+  font-size: 0.86rem;
+}
+
+.slo-dip-row:hover {
+  background: var(--surface);
+}
+
+.slo-dip-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.slo-dip-dot--investigated {
+  background: var(--success);
+}
+
+.slo-dip-dot--pending {
+  background: var(--pending);
+}
+
+.slo-dip-date {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.slo-dip-service {
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.slo-dip-name {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.slo-dip-link {
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slo-dip-link:hover {
+  text-decoration: underline;
+}
+
+.slo-dip-datadog {
+  flex: none;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  display: inline-flex;
+}
+
+.slo-dip-datadog:hover {
+  color: var(--text);
+}
+
+.slo-dip-percent {
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.slo-dip-badge {
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 2px var(--space-6);
+  border-radius: var(--radius-pill, 999px);
+  white-space: nowrap;
+}
+
+.slo-dip-badge--pending {
+  color: var(--pending);
+  background: color-mix(in srgb, var(--pending) 16%, transparent);
+}
+
+.slo-dip-badge--investigated {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 16%, transparent);
+}
+
+.js-slo-refresh-btn.is-spinning > svg {
+  animation: spin 0.7s linear infinite;
+}
+
 .pane {
   min-height: 0;
   flex: 1;

@@ -158,9 +158,113 @@ test("cancels an existing repository load without allowing its stale response to
   await expect(content.getByText("Loading Discussion categories")).toBeVisible();
   await content.getByRole("button", { name: "Cancel" }).click();
 
-  await expect(content.locator(".module-placeholder-title")).toHaveText("Select a repository.");
+  await expect(content.locator(".module-placeholder-title")).toHaveText(
+    "No SLO dips in the last 60 days.",
+  );
   await page.waitForTimeout(350);
-  await expect(content.locator(".module-placeholder-title")).toHaveText("Select a repository.");
+  await expect(content.locator(".module-placeholder-title")).toHaveText(
+    "No SLO dips in the last 60 days.",
+  );
+});
+
+test("renders collected dips grouped by repo and refreshes on demand", async ({ page }) => {
+  const fixtures = defaultFixtures();
+  const reliability = fixtures.sloDipsCatalog["octo/reliability"];
+  fixtures.sloDipsRepos = [
+    {
+      ...reliability.repository,
+      categories: reliability.categories.slice(0, 1),
+    },
+  ];
+  fixtures.sloDips = [
+    {
+      comment_id: 16633787,
+      repo_id: 9001,
+      repo_full_name: "Octo/Reliability",
+      discussion_number: 7585,
+      discussion_title: "SLO investigations for `dns` - Week of April 13, 2026",
+      service: "dns",
+      comment_url: "https://github.com/octo/reliability/discussions/7585#c1",
+      slo_name: "dns-global-api/availability",
+      slo_url: "https://app.datadoghq.com/slo/1",
+      dip_date: "2026-04-19",
+      percent: 99.967,
+      goal_percent: 99.99,
+      investigated: true,
+      investigated_by: "yoannchaudet",
+      investigated_at: "2026-04-20T00:00:00Z",
+      comment_created_at: "2026-04-19T00:00:00Z",
+    },
+    {
+      comment_id: 16633788,
+      repo_id: 9001,
+      repo_full_name: "Octo/Reliability",
+      discussion_number: 7585,
+      discussion_title: "SLO investigations for `dns` - Week of April 13, 2026",
+      service: "dns",
+      comment_url: "https://github.com/octo/reliability/discussions/7585#c2",
+      slo_name: "dns-global-api/latency",
+      slo_url: null,
+      dip_date: "2026-04-18",
+      percent: 98.5,
+      goal_percent: 99.9,
+      investigated: false,
+      investigated_by: null,
+      investigated_at: null,
+      comment_created_at: "2026-04-18T00:00:00Z",
+    },
+  ];
+  await openSloDips(page, fixtures);
+
+  const content = page.locator("#slo-dips-content");
+  await expect(content.locator(".slo-dips-summary-total")).toHaveText("2 dips");
+  const rows = content.locator(".slo-dip-row");
+  await expect(rows).toHaveCount(2);
+  await expect(content.locator(".slo-dip-repo-name")).toHaveText("Octo/Reliability");
+  await expect(rows.first().locator(".slo-dip-badge--investigated")).toContainText(
+    "investigated by yoannchaudet",
+  );
+  await expect(rows.nth(1).locator(".slo-dip-badge--pending")).toHaveText("pending");
+  // The Datadog deep link only appears when a slo_url is present.
+  await expect(rows.first().locator(".slo-dip-datadog")).toHaveCount(1);
+  await expect(rows.nth(1).locator(".slo-dip-datadog")).toHaveCount(0);
+
+  // Links open through the backend's validated `open_url` command, not raw anchors.
+  await rows.first().locator(".slo-dip-link").click();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.__TAURI_CALLS__.filter((c) => c.cmd === "open_url").map((c) => c.args.url),
+      ),
+    )
+    .toContain("https://github.com/octo/reliability/discussions/7585#c1");
+
+  // The manual refresh button re-fetches and repaints with whatever the backend now returns.
+  await page.evaluate(() => {
+    window.__mockSetSloDips([
+      {
+        comment_id: 16633787,
+        repo_id: 9001,
+        repo_full_name: "Octo/Reliability",
+        discussion_number: 7585,
+        discussion_title: "SLO investigations for `dns` - Week of April 13, 2026",
+        service: "dns",
+        comment_url: "https://github.com/octo/reliability/discussions/7585#c1",
+        slo_name: "dns-global-api/availability",
+        slo_url: "https://app.datadoghq.com/slo/1",
+        dip_date: "2026-04-19",
+        percent: 99.967,
+        goal_percent: 99.99,
+        investigated: true,
+        investigated_by: "yoannchaudet",
+        investigated_at: "2026-04-20T00:00:00Z",
+        comment_created_at: "2026-04-19T00:00:00Z",
+      },
+    ]);
+  });
+  await page.locator(".js-slo-refresh-btn").click();
+  await expect(content.locator(".slo-dip-row")).toHaveCount(1);
+  await expect(content.locator(".slo-dips-summary-total")).toHaveText("1 dip");
 });
 
 test("confirms before switching away from unsaved category changes", async ({ page }) => {

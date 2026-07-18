@@ -398,6 +398,34 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX idx_slo_dips_categories_repo
         ON slo_dips_repo_categories(repo_id, name COLLATE NOCASE, category_id);
     "#,
+    // v23 — collected SLO dips parsed from the bot's Discussion comments. Keyed by the GitHub
+    // comment database id (stable and unique). Rows cascade with their tracked repository and
+    // are pruned to a floating window by dip_date. Investigation state is derived from whether
+    // a non-bot user replied to the dip comment.
+    r#"
+    CREATE TABLE slo_dips (
+        comment_id         INTEGER PRIMARY KEY,
+        repo_id            INTEGER NOT NULL REFERENCES slo_dips_repos(repo_id) ON DELETE CASCADE,
+        discussion_number  INTEGER NOT NULL,
+        discussion_title   TEXT NOT NULL,
+        service            TEXT NOT NULL,
+        comment_url        TEXT NOT NULL,
+        slo_name           TEXT NOT NULL,
+        slo_url            TEXT,
+        dip_date           TEXT NOT NULL,
+        percent            REAL NOT NULL,
+        goal_percent       REAL,
+        investigated       INTEGER NOT NULL DEFAULT 0,
+        investigated_by    TEXT,
+        investigated_at    TEXT,
+        comment_created_at TEXT NOT NULL,
+        fetched_at         TEXT NOT NULL
+    );
+    CREATE INDEX idx_slo_dips_repo_date
+        ON slo_dips(repo_id, dip_date DESC);
+    CREATE INDEX idx_slo_dips_date
+        ON slo_dips(dip_date);
+    "#,
 ];
 
 /// Open the database at `db_path`, apply any pending migrations, and return the
@@ -930,7 +958,7 @@ mod tests {
         conn.pragma_update(None, "foreign_keys", "ON").unwrap();
         run_migrations(&conn).unwrap();
 
-        assert_eq!(schema_version(&conn).unwrap(), 22);
+        assert_eq!(schema_version(&conn).unwrap(), 23);
         let tables = table_names(&conn).unwrap();
         assert!(tables.contains(&"slo_dips_repos".to_string()));
         assert!(tables.contains(&"slo_dips_repo_categories".to_string()));
@@ -966,5 +994,42 @@ mod tests {
             })
             .unwrap();
         assert_eq!(categories, 0);
+    }
+
+    #[test]
+    fn latest_schema_persists_slo_dips_and_cascades_with_repository() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        run_migrations(&conn).unwrap();
+
+        assert!(table_names(&conn)
+            .unwrap()
+            .contains(&"slo_dips".to_string()));
+        conn.execute(
+            "INSERT INTO slo_dips_repos
+                (repo_id, full_name, owner, name, private, added_at)
+             VALUES (1, 'octo/repo', 'octo', 'repo', 0, '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO slo_dips
+                (comment_id, repo_id, discussion_number, discussion_title, service,
+                 comment_url, slo_name, slo_url, dip_date, percent, goal_percent,
+                 investigated, investigated_by, investigated_at, comment_created_at, fetched_at)
+             VALUES (10, 1, 7585, 'SLO investigations for `dns`', 'dns',
+                 'https://example/c', 'dns-x/availability/sam', 'https://dd', '2026-04-19',
+                 99.967, 99.99, 1, 'octocat', '2026-04-20T00:00:00Z',
+                 '2026-04-20T00:00:00Z', '2026-04-21T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        conn.execute("DELETE FROM slo_dips_repos WHERE repo_id = 1", [])
+            .unwrap();
+        let dips: i64 = conn
+            .query_row("SELECT COUNT(*) FROM slo_dips", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(dips, 0);
     }
 }

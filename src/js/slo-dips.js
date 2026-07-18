@@ -3,11 +3,24 @@ import { $, html, rawHtml, toast } from "./dom.js";
 import { openContextMenu } from "./menu.js";
 import { registerModule } from "./modules.js";
 import { sourceButton } from "./ui.js";
+import { isAuthenticated } from "./account.js";
+import {
+  groupDipsByRepo,
+  summarize,
+  formatPercent,
+  dipStatus,
+  repoDomId,
+} from "./slo-dips-model.js";
 
 const REPO_ICON = `<svg viewBox="0 0 16 16" width="15" height="15"><path d="M3 2.5h7.5L13 5v8.5H3z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M5 6h4M5 8.5h6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>`;
 const STALE_CATEGORIES_CODE = "SLO_DIPS_STALE_CATEGORIES:";
 
 let repositories = [];
+let dips = [];
+let dipsLoaded = false;
+let dipsError = "";
+let refreshing = false;
+let autoRefreshed = false;
 let activeRepoId = null;
 let editor = { mode: "idle" };
 let requestSequence = 0;
@@ -167,12 +180,89 @@ function renderContent() {
   }
 
   renderTitle();
+  renderDipsView(content);
+}
+
+const DATADOG_ICON = `<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zm0 2.4l3.6 3.6-1.2 1.2L8 8.4 5.6 8.7 4.4 7.5 8 3.9z" fill="currentColor"/></svg>`;
+
+/** The home/idle view: the collected SLO dips, grouped by repository. Renders instantly from
+ *  SQLite and is re-rendered after a refresh. Configuration (add/edit/remove repositories)
+ *  stays on the sidebar; this pane is read-only browsing. */
+function renderDipsView(content) {
+  if (!repositories.length) {
+    content.innerHTML = html`
+      <div class="module-placeholder">
+        <img class="module-placeholder-art" src="/assets/helix-muted.svg" alt="" width="116" height="116" />
+        <p class="module-placeholder-title">Add a repository to begin.</p>
+        <p class="module-placeholder-sub">Track a repository's SLO-investigation Discussions to collect dips here.</p>
+      </div>`;
+    return;
+  }
+
+  if (!dipsLoaded && !dips.length) {
+    content.innerHTML = html`
+      <div class="slo-editor-loading" role="status">
+        <span class="spinner" aria-hidden="true"></span>
+        <span>Loading SLO dips…</span>
+      </div>`;
+    return;
+  }
+
+  if (!dips.length) {
+    content.innerHTML = html`
+      <div class="module-placeholder">
+        <img class="module-placeholder-art" src="/assets/helix-muted.svg" alt="" width="116" height="116" />
+        <p class="module-placeholder-title">No SLO dips in the last 60 days.</p>
+        <p class="module-placeholder-sub">${dipsError ? dipsError : rawHtml("Nice — nothing to investigate. Use Refresh to check GitHub again.")}</p>
+      </div>`;
+    return;
+  }
+
+  const totals = summarize(dips);
+  const groups = groupDipsByRepo(dips);
   content.innerHTML = html`
-    <div class="module-placeholder">
-      <img class="module-placeholder-art" src="/assets/helix-muted.svg" alt="" width="116" height="116" />
-      <p class="module-placeholder-title">${repositories.length ? "Select a repository." : "Add a repository to begin."}</p>
-      <p class="module-placeholder-sub">Repositories and their selected Discussion categories appear together here.</p>
+    <div class="slo-dips-view">
+      <div class="slo-dips-summary" aria-live="polite">
+        <span class="slo-dips-summary-total">${totals.total} ${totals.total === 1 ? "dip" : "dips"}</span>
+        <span class="slo-dip-badge slo-dip-badge--pending">${totals.pending} pending</span>
+        <span class="slo-dip-badge slo-dip-badge--investigated">${totals.investigated} investigated</span>
+        <span class="slo-dips-window">last 60 days</span>
+      </div>
+      ${rawHtml(groups.map(renderRepoGroup).join(""))}
     </div>`;
+}
+
+function renderRepoGroup(group) {
+  return html`
+    <section class="slo-dip-repo" aria-labelledby="${repoDomId(group.repoFullName)}">
+      <header class="slo-dip-repo-head">
+        <h2 class="slo-dip-repo-name" id="${repoDomId(group.repoFullName)}">${group.repoFullName}</h2>
+        <span class="slo-dip-repo-counts">${group.pending ? rawHtml(html`<span class="slo-dip-badge slo-dip-badge--pending">${group.pending} pending</span>`) : rawHtml('<span class="slo-dip-badge slo-dip-badge--investigated">all investigated</span>')}</span>
+      </header>
+      <ul class="slo-dip-list">
+        ${rawHtml(group.dips.map(renderDipRow).join(""))}
+      </ul>
+    </section>`;
+}
+
+function renderDipRow(dip) {
+  const status = dipStatus(dip);
+  const investigator =
+    status === "investigated" && dip.investigated_by ? html` by ${dip.investigated_by}` : "";
+  return html`
+    <li class="slo-dip-row slo-dip-row--${status}">
+      <span class="slo-dip-status" title="${status === "investigated" ? "Investigated" : "Not investigated"}">
+        <span class="slo-dip-dot slo-dip-dot--${status}" aria-hidden="true"></span>
+      </span>
+      <span class="slo-dip-date">${dip.dip_date}</span>
+      <span class="slo-dip-service">${dip.service}</span>
+      <span class="slo-dip-name">
+        <button type="button" class="slo-dip-link" data-open-url="${dip.comment_url}">${dip.slo_name}</button>
+        ${dip.slo_url ? rawHtml(html`<button type="button" class="slo-dip-datadog" data-open-url="${dip.slo_url}" title="Open in Datadog" aria-label="Open ${dip.slo_name} in Datadog">${rawHtml(DATADOG_ICON)}</button>`) : ""}
+      </span>
+      <span class="slo-dip-percent">${formatPercent(dip.percent)}</span>
+      <span class="slo-dip-badge slo-dip-badge--${status}">${status === "investigated" ? html`investigated${investigator}` : "pending"}</span>
+    </li>`;
 }
 
 function renderCategoryEditor(content) {
@@ -472,9 +562,86 @@ async function removeRepository(repository) {
   }
 }
 
+function setSyncState(state) {
+  const dot = $(".js-slo-sync-dot");
+  const label = $(".js-slo-sync-label");
+  const button = $(".js-slo-refresh-btn");
+  if (button) {
+    button.disabled = state === "refreshing";
+    button.classList.toggle("is-spinning", state === "refreshing");
+  }
+  const text = state === "refreshing" ? "Refreshing…" : state === "error" ? "Refresh failed" : "";
+  for (const el of [dot, label]) {
+    if (el) el.hidden = state === "idle";
+  }
+  if (dot)
+    dot.className = `status-dot status-dot--${state === "error" ? "error" : "pending"} js-slo-sync-dot`;
+  if (label) {
+    label.className = `status-label status-label--${state === "error" ? "error" : "pending"} js-slo-sync-label`;
+    label.textContent = text;
+  }
+}
+
+/** Read the collected dips from SQLite (offline-first) and repaint the home view. Never hits
+ *  the network. */
+async function loadDips() {
+  const token = ++requestSequence;
+  try {
+    const result = await invoke("list_slo_dips");
+    if (token !== requestSequence) return;
+    dips = result;
+    dipsError = "";
+  } catch (error) {
+    if (token !== requestSequence) return;
+    dipsError = errorText(error);
+  } finally {
+    if (token === requestSequence) {
+      dipsLoaded = true;
+      if (editor.mode === "idle") renderContent();
+    }
+  }
+}
+
+/** Fetch fresh dips from GitHub, reconcile them into SQLite, and repaint. Concurrency-guarded
+ *  so overlapping refreshes (auto + button) collapse into one; a request token ensures a slow
+ *  SQLite read can't clobber a newer network result (or vice versa). */
+async function refreshDips() {
+  if (refreshing) return;
+  refreshing = true;
+  autoRefreshed = true;
+  const token = ++requestSequence;
+  setSyncState("refreshing");
+  try {
+    const result = await invoke("refresh_slo_dips");
+    if (token === requestSequence) {
+      dips = result;
+      dipsError = "";
+      dipsLoaded = true;
+    }
+    setSyncState("idle");
+  } catch (error) {
+    if (token === requestSequence) dipsError = errorText(error);
+    setSyncState("error");
+    toast(errorText(error), "error");
+  } finally {
+    refreshing = false;
+    if (editor.mode === "idle") renderContent();
+  }
+}
+
 function initSloDips() {
   $("#slo-dips-add-repo")?.addEventListener("click", (event) => {
     confirmDiscardChanges(event.currentTarget, beginAdd);
+  });
+  $(".js-slo-refresh-btn")?.addEventListener("click", refreshDips);
+  $("#slo-dips-content")?.addEventListener("click", (event) => {
+    const source = event.target instanceof Element ? event.target.closest("[data-open-url]") : null;
+    const url = source?.dataset.openUrl;
+    if (!url) return;
+    invoke("open_url", { url }).catch((error) => {
+      console.error(`failed to open ${url}: ${error}`);
+      toast("Couldn't open link", "error");
+    });
   });
   const list = $("#slo-dips-repo-list");
   list?.addEventListener("click", (event) => {
@@ -510,8 +677,22 @@ function initSloDips() {
   });
 }
 
+async function loadModule() {
+  await loadRepositories();
+  await loadDips();
+}
+
+/** On module open: render from SQLite instantly (done by `load`), then auto-fetch from GitHub
+ *  exactly once per session. No polling — subsequent refreshes are user-driven via the button.
+ *  Skips the network entirely when not connected. */
+function activateModule() {
+  if (autoRefreshed || !isAuthenticated()) return;
+  refreshDips();
+}
+
 registerModule("slo-dips", {
   sidebarSelector: "#sidebar-slo-dips",
   init: initSloDips,
-  load: loadRepositories,
+  load: loadModule,
+  activate: activateModule,
 });

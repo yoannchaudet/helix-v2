@@ -689,6 +689,8 @@ pub fn run() {
             slo_dips_coordinator::add_slo_dips_repo,
             slo_dips_coordinator::update_slo_dips_repo_categories,
             slo_dips_coordinator::remove_slo_dips_repo,
+            slo_dips_coordinator::list_slo_dips,
+            slo_dips_coordinator::refresh_slo_dips,
             show_main_window,
             get_start_at_login,
             set_start_at_login,

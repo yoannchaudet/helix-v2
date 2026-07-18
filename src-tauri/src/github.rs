@@ -406,6 +406,364 @@ pub async fn inspect_repository(
     })
 }
 
+/// One weekly SLO-investigations Discussion, with the bot's comments and their human replies.
+/// This is a faithful, unparsed mirror of the GraphQL response; parsing into dips lives in
+/// `slo_dips.rs`.
+#[derive(Debug, Clone)]
+pub struct RawDiscussion {
+    pub number: i64,
+    pub title: String,
+    pub comments: Vec<RawDiscussionComment>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RawDiscussionComment {
+    pub database_id: i64,
+    pub url: String,
+    pub author_login: Option<String>,
+    pub created_at: String,
+    pub body: String,
+    pub replies: Vec<RawReply>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RawReply {
+    pub author_login: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PageInfoLite {
+    #[serde(rename = "hasNextPage")]
+    has_next_page: bool,
+    #[serde(rename = "endCursor")]
+    end_cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthorNode {
+    login: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReplyNode {
+    #[serde(rename = "createdAt")]
+    created_at: String,
+    author: Option<AuthorNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReplyConnection {
+    nodes: Vec<ReplyNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommentNode {
+    #[serde(rename = "databaseId")]
+    database_id: Option<i64>,
+    url: String,
+    #[serde(rename = "createdAt")]
+    created_at: String,
+    body: String,
+    author: Option<AuthorNode>,
+    replies: ReplyConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommentConnection {
+    #[serde(rename = "pageInfo")]
+    page_info: PageInfoLite,
+    nodes: Vec<CommentNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscussionNode {
+    number: i64,
+    title: String,
+    #[serde(rename = "createdAt")]
+    created_at: String,
+    comments: CommentConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscussionConnection {
+    #[serde(rename = "pageInfo")]
+    page_info: PageInfoLite,
+    nodes: Vec<DiscussionNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscussionsRepo {
+    discussions: DiscussionConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscussionsData {
+    repository: Option<DiscussionsRepo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscussionCommentsNode {
+    comments: CommentConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscussionCommentsRepo {
+    discussion: Option<DiscussionCommentsNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscussionCommentsData {
+    repository: Option<DiscussionCommentsRepo>,
+}
+
+/// How many comment replies we inspect per dip comment. We only need to know whether a non-bot
+/// user responded and who first did, so a generous single page is enough (threads rarely have
+/// more than a handful of replies).
+const SLO_REPLIES_PER_COMMENT: u32 = 50;
+const SLO_DISCUSSIONS_PER_PAGE: u32 = 25;
+const SLO_COMMENTS_PER_PAGE: u32 = 50;
+
+/// Run one GraphQL query and return its typed `data`, capturing the rate snapshot and mapping
+/// every failure mode to a [`GitHubError`] (matching `inspect_repository`'s discipline: a 200
+/// with a non-empty `errors` array is still an error).
+async fn graphql_query<T: for<'de> Deserialize<'de>>(
+    client: &reqwest::Client,
+    token: &str,
+    query: &str,
+    variables: serde_json::Value,
+    what: &'static str,
+    rates: &mut Vec<RateLimit>,
+) -> Result<T, GitHubError> {
+    let body = serde_json::json!({ "query": query, "variables": variables });
+    let response = authed(client.post(GRAPHQL_API).json(&body), token)
+        .send()
+        .await
+        .map_err(|e| GitHubError::Network(e.to_string()))?;
+    let status = response.status();
+    let mut rate = RateLimit::default();
+    rate.update_from(response.headers());
+    rates.push(rate);
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(GitHubError::Unauthorized);
+    }
+    if status == reqwest::StatusCode::FORBIDDEN {
+        let body = response.text().await.unwrap_or_default();
+        return Err(GitHubError::Forbidden(body.trim().to_string()));
+    }
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(GitHubError::Status {
+            status,
+            body: body.trim().to_string(),
+        });
+    }
+    let envelope: GraphQlEnvelope = response.json().await.map_err(|e| GitHubError::Parse {
+        what,
+        source: e.to_string(),
+    })?;
+    if let Some(errors) = envelope.errors.filter(|errors| !errors.is_empty()) {
+        return Err(GitHubError::Forbidden(
+            errors
+                .into_iter()
+                .map(|error| error.message)
+                .collect::<Vec<_>>()
+                .join("; "),
+        ));
+    }
+    let data = envelope.data.ok_or_else(|| GitHubError::Parse {
+        what,
+        source: "response had no data".into(),
+    })?;
+    serde_json::from_value(data).map_err(|e| GitHubError::Parse {
+        what,
+        source: e.to_string(),
+    })
+}
+
+fn to_raw_comment(node: CommentNode) -> Option<RawDiscussionComment> {
+    Some(RawDiscussionComment {
+        database_id: node.database_id?,
+        url: node.url,
+        author_login: node.author.and_then(|author| author.login),
+        created_at: node.created_at,
+        body: node.body,
+        replies: node
+            .replies
+            .nodes
+            .into_iter()
+            .map(|reply| RawReply {
+                author_login: reply.author.and_then(|author| author.login),
+                created_at: reply.created_at,
+            })
+            .collect(),
+    })
+}
+
+/// Fetch the SLO-investigations Discussions (and their comments + replies) for one repository,
+/// scoped to the given Discussion `category_ids` and to discussions created on/after
+/// `created_after` (an ISO-8601 UTC cutoff). Discussions are pulled newest-first and paging
+/// stops as soon as we pass the cutoff; comment pages within a discussion are followed fully so
+/// no dip is missed. Rate snapshots for every request are returned for the caller to persist.
+pub async fn fetch_slo_dip_discussions(
+    client: &reqwest::Client,
+    token: &str,
+    owner: &str,
+    name: &str,
+    category_ids: &[String],
+    created_after: &str,
+) -> Result<(Vec<RawDiscussion>, Vec<RateLimit>), GitHubError> {
+    const DISCUSSIONS_QUERY: &str = r#"
+      query($owner:String!,$repo:String!,$cat:ID!,$perPage:Int!,$replies:Int!,$cursor:String){
+        repository(owner:$owner,name:$repo){
+          discussions(first:$perPage, categoryId:$cat, orderBy:{field:CREATED_AT,direction:DESC}, after:$cursor){
+            pageInfo{ hasNextPage endCursor }
+            nodes{
+              number title createdAt
+              comments(first:$replies){
+                pageInfo{ hasNextPage endCursor }
+                nodes{
+                  databaseId url createdAt body
+                  author{ login }
+                  replies(first:$replies){ nodes{ createdAt author{ login } } }
+                }
+              }
+            }
+          }
+        }
+      }
+    "#;
+
+    let mut rates = Vec::new();
+    let mut discussions = Vec::new();
+    for category_id in category_ids {
+        let mut cursor: Option<String> = None;
+        'pages: loop {
+            let variables = serde_json::json!({
+                "owner": owner,
+                "repo": name,
+                "cat": category_id,
+                "perPage": SLO_DISCUSSIONS_PER_PAGE,
+                "replies": SLO_REPLIES_PER_COMMENT,
+                "cursor": cursor,
+            });
+            let data: DiscussionsData = graphql_query(
+                client,
+                token,
+                DISCUSSIONS_QUERY,
+                variables,
+                "SLO dip discussions",
+                &mut rates,
+            )
+            .await?;
+            let connection = data
+                .repository
+                .ok_or_else(|| GitHubError::Status {
+                    status: reqwest::StatusCode::NOT_FOUND,
+                    body: "Repository was not available to the GraphQL API.".into(),
+                })?
+                .discussions;
+            for node in connection.nodes {
+                if node.created_at.as_str() < created_after {
+                    // Newest-first ordering: everything after this is older too.
+                    break 'pages;
+                }
+                let number = node.number;
+                let mut comments: Vec<RawDiscussionComment> = node
+                    .comments
+                    .nodes
+                    .into_iter()
+                    .filter_map(to_raw_comment)
+                    .collect();
+                let mut page = node.comments.page_info;
+                while page.has_next_page {
+                    let cursor = page
+                        .end_cursor
+                        .as_deref()
+                        .ok_or_else(|| GitHubError::Parse {
+                            what: "SLO dip comments",
+                            source: "GitHub reported another comment page without a cursor".into(),
+                        })?;
+                    let next = fetch_discussion_comments_page(
+                        client, token, owner, name, number, cursor, &mut rates,
+                    )
+                    .await?;
+                    comments.extend(next.nodes.into_iter().filter_map(to_raw_comment));
+                    page = next.page_info;
+                }
+                discussions.push(RawDiscussion {
+                    number,
+                    title: node.title,
+                    comments,
+                });
+            }
+            if !connection.page_info.has_next_page {
+                break;
+            }
+            cursor = connection.page_info.end_cursor;
+            if cursor.is_none() {
+                return Err(GitHubError::Parse {
+                    what: "SLO dip discussions",
+                    source: "GitHub reported another page without a cursor".into(),
+                });
+            }
+        }
+    }
+    Ok((discussions, rates))
+}
+
+async fn fetch_discussion_comments_page(
+    client: &reqwest::Client,
+    token: &str,
+    owner: &str,
+    name: &str,
+    number: i64,
+    cursor: &str,
+    rates: &mut Vec<RateLimit>,
+) -> Result<CommentConnection, GitHubError> {
+    const COMMENTS_QUERY: &str = r#"
+      query($owner:String!,$repo:String!,$num:Int!,$perPage:Int!,$replies:Int!,$cursor:String){
+        repository(owner:$owner,name:$repo){
+          discussion(number:$num){
+            comments(first:$perPage, after:$cursor){
+              pageInfo{ hasNextPage endCursor }
+              nodes{
+                databaseId url createdAt body
+                author{ login }
+                replies(first:$replies){ nodes{ createdAt author{ login } } }
+              }
+            }
+          }
+        }
+      }
+    "#;
+    let variables = serde_json::json!({
+        "owner": owner,
+        "repo": name,
+        "num": number,
+        "perPage": SLO_COMMENTS_PER_PAGE,
+        "replies": SLO_REPLIES_PER_COMMENT,
+        "cursor": cursor,
+    });
+    let data: DiscussionCommentsData = graphql_query(
+        client,
+        token,
+        COMMENTS_QUERY,
+        variables,
+        "SLO dip discussion comments",
+        rates,
+    )
+    .await?;
+    Ok(data
+        .repository
+        .and_then(|repo| repo.discussion)
+        .ok_or_else(|| GitHubError::Parse {
+            what: "SLO dip discussion comments",
+            source: "discussion was not available".into(),
+        })?
+        .comments)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Subject {
     pub title: String,

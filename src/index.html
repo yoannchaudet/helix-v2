@@ -196,6 +196,15 @@
       <section id="view-slo-dips" class="pane" hidden aria-labelledby="slo-dips-view-title">
         <header class="toolbar" data-tauri-drag-region>
           <h1 class="toolbar-title" id="slo-dips-view-title">SLO Dips</h1>
+          <div class="toolbar-actions">
+            <span class="sync-status">
+              <span class="status-dot status-dot--pending js-slo-sync-dot" hidden></span>
+              <span class="status-label status-label--pending js-slo-sync-label" hidden>Loading…</span>
+            </span>
+            <button type="button" class="icon-btn js-slo-refresh-btn" id="slo-dips-refresh-btn" title="Refresh SLO dips" aria-label="Refresh SLO dips">
+              <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M13.4 7a5.5 5.5 0 10-.5 3.4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M13.6 3.4v3.2h-3.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
         </header>
 
         <div class="slo-content" id="slo-dips-content">
