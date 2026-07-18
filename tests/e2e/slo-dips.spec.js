@@ -42,12 +42,11 @@ test("adds a canonical repository with multiple selected Discussion categories",
   await expect(page.locator("#slo-dips-view-title")).toContainText("Octo/Reliability");
   await expect(content.getByRole("checkbox", { name: /SLO Dips/ })).toBeChecked();
   await expect(content.getByRole("checkbox", { name: /Incidents/ })).toBeChecked();
-  const listBox = await page.locator("#slo-dips-repo-list").boundingBox();
+  // The add button now lives in the toolbar, immediately left of the refresh button.
   const addBox = await page.locator("#slo-dips-add-repo").boundingBox();
-  expect(addBox.y).toBeGreaterThanOrEqual(listBox.y + listBox.height);
-  expect(
-    Math.abs(addBox.x + addBox.width / 2 - (listBox.x + listBox.width / 2)),
-  ).toBeLessThanOrEqual(1);
+  const refreshBox = await page.locator("#slo-dips-refresh-btn").boundingBox();
+  expect(addBox.x).toBeLessThan(refreshBox.x);
+  expect(Math.abs(addBox.y - refreshBox.y)).toBeLessThanOrEqual(1);
 
   await page.locator('.module-tab[data-module="notifications"]').click();
   await page.locator('.module-tab[data-module="slo-dips"]').click();

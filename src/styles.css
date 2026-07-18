@@ -433,18 +433,6 @@ code,
   color: var(--muted);
 }
 
-.source-group-action {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-top: var(--space-12);
-}
-
-.source-group-add {
-  width: 24px;
-  height: 24px;
-}
-
 .source {
   display: flex;
   align-items: center;
