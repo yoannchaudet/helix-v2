@@ -352,7 +352,7 @@ pub async fn inspect_repository(
             });
         }
     }
-    categories.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    categories.sort_by_key(|category| category.name.to_lowercase());
     Ok(RepositoryInspection {
         repository: metadata,
         categories,

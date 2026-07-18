@@ -206,6 +206,7 @@ export function installTauriMock(fixtures) {
       const stored = state.sloDipsRepos.find((candidate) => candidate.id === repoId);
       if (!stored) return Promise.reject(new Error("SLO Dips repository not found."));
       const inspection = state.sloDipsCatalog[stored.full_name.toLowerCase()];
+      if (!inspection) return Promise.reject(new Error("GitHub returned 404 Not Found."));
       const selected = inspection.categories.filter((category) =>
         categoryIds.includes(category.id),
       );

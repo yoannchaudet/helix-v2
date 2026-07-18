@@ -124,7 +124,10 @@ function onModalKeydown(event) {
     const focusable = modalFocusable();
     if (!focusable.length) return;
     const index = focusable.indexOf(document.activeElement);
-    if (event.shiftKey && index <= 0) {
+    if (index < 0) {
+      event.preventDefault();
+      (event.shiftKey ? focusable.at(-1) : focusable[0])?.focus();
+    } else if (event.shiftKey && index === 0) {
       event.preventDefault();
       focusable.at(-1)?.focus();
     } else if (!event.shiftKey && index === focusable.length - 1) {
