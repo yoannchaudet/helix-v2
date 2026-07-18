@@ -433,6 +433,23 @@ code,
   color: var(--muted);
 }
 
+.source-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: var(--space-12);
+}
+
+.source-group-head .source-group-label {
+  margin-top: var(--space-4);
+}
+
+.source-group-add {
+  width: 24px;
+  height: 24px;
+  margin-right: var(--space-6);
+}
+
 .source {
   display: flex;
   align-items: center;
@@ -633,6 +650,134 @@ code,
   max-width: 38ch;
   font-size: 0.88rem;
   color: var(--muted);
+}
+
+.slo-category-list {
+  margin: var(--space-10) 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.84rem;
+}
+
+.slo-category-list li + li {
+  margin-top: var(--space-4);
+}
+
+/* Repository/category editor. The checkbox disclosure keeps multi-selection native while
+   presenting it as a compact dropdown inside the modal. */
+.slo-repo-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-24);
+  background: rgba(0, 0, 0, 0.32);
+  backdrop-filter: saturate(120%) blur(2px);
+  -webkit-backdrop-filter: saturate(120%) blur(2px);
+}
+
+.slo-repo-dialog {
+  width: min(460px, 100%);
+  max-height: 100%;
+  overflow: auto;
+  padding: var(--space-18) var(--space-20) var(--space-20);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-5xl);
+  box-shadow: var(--shadow);
+}
+
+.slo-repo-dialog h2 {
+  margin: 0 0 var(--space-6);
+  font-size: 1rem;
+}
+
+.slo-repo-dialog-intro,
+.slo-category-repo,
+.slo-category-warning {
+  margin: 0 0 var(--space-14);
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.4;
+}
+
+.slo-repo-field {
+  display: grid;
+  gap: var(--space-6);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.slo-repo-field input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--space-9) var(--space-10);
+  color: var(--text);
+  background: var(--field-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  font: inherit;
+  font-weight: 400;
+}
+
+.slo-repo-error {
+  min-height: 1.2em;
+  margin: var(--space-8) 0 0;
+  color: var(--error);
+  font-size: 0.8rem;
+}
+
+.slo-category-picker {
+  margin-top: var(--space-8);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--field-bg);
+}
+
+.slo-category-picker summary {
+  padding: var(--space-9) var(--space-10);
+  cursor: pointer;
+  font-size: 0.84rem;
+  font-weight: 600;
+}
+
+.slo-category-options {
+  max-height: 220px;
+  overflow: auto;
+  padding: 0 var(--space-8) var(--space-8);
+  border-top: 1px solid var(--hairline);
+}
+
+.slo-category-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-8);
+  padding: var(--space-8) var(--space-4);
+  font-size: 0.84rem;
+}
+
+.slo-category-option-text {
+  display: grid;
+  gap: 2px;
+}
+
+.slo-category-option-desc {
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.slo-repo-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-8);
+  margin-top: var(--space-16);
+}
+
+.slo-repo-actions button {
+  min-width: 76px;
 }
 
 .pane {

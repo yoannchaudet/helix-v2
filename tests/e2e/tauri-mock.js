@@ -25,6 +25,9 @@ export function installTauriMock(fixtures) {
     mergeOperations: JSON.parse(JSON.stringify(fixtures.mergeOperations ?? [])),
     mergeOperationDetails: JSON.parse(JSON.stringify(fixtures.mergeOperationDetails ?? {})),
     dependabotLastSync: fixtures.dependabotLastSync ?? null,
+    sloDipsRepos: JSON.parse(JSON.stringify(fixtures.sloDipsRepos ?? [])),
+    sloDipsCatalog: JSON.parse(JSON.stringify(fixtures.sloDipsCatalog ?? {})),
+    sloDipsErrors: { ...(fixtures.sloDipsErrors ?? {}) },
     lastModule: fixtures.lastModule ?? null,
     // When true, `get_dependabot_merge_operation_detail` calls don't resolve on their own —
     // they queue in `pendingDetailCalls` for a spec to resolve explicitly (in any order) via
@@ -161,6 +164,68 @@ export function installTauriMock(fixtures) {
     get_last_module: () => state.lastModule ?? null,
     set_last_module: ({ moduleId }) => {
       state.lastModule = moduleId;
+      return null;
+    },
+    list_slo_dips_repos: () => JSON.parse(JSON.stringify(state.sloDipsRepos)),
+    inspect_slo_dips_repo: ({ repository }) => {
+      if (state.sloDipsErrors.inspect) {
+        return Promise.reject(new Error(state.sloDipsErrors.inspect));
+      }
+      const inspection = state.sloDipsCatalog[String(repository).trim().toLowerCase()];
+      if (!inspection) return Promise.reject(new Error("GitHub returned 404 Not Found."));
+      return JSON.parse(JSON.stringify(inspection));
+    },
+    add_slo_dips_repo: ({ repository, categoryIds }) => {
+      if (state.sloDipsErrors.add) return Promise.reject(new Error(state.sloDipsErrors.add));
+      const inspection = state.sloDipsCatalog[String(repository).trim().toLowerCase()];
+      if (!inspection) return Promise.reject(new Error("GitHub returned 404 Not Found."));
+      const existing = state.sloDipsRepos.find(
+        (candidate) => candidate.id === inspection.repository.id,
+      );
+      if (existing) return JSON.parse(JSON.stringify(existing));
+      const selected = inspection.categories.filter((category) =>
+        categoryIds.includes(category.id),
+      );
+      if (!selected.length || selected.length !== new Set(categoryIds).size) {
+        return Promise.reject(
+          new Error(
+            "SLO_DIPS_STALE_CATEGORIES: One or more selected Discussion categories are no longer available. Reload the categories and try again.",
+          ),
+        );
+      }
+      const added = {
+        ...inspection.repository,
+        categories: selected.map(({ id, name, emoji }) => ({ id, name, emoji })),
+      };
+      state.sloDipsRepos.push(added);
+      state.sloDipsRepos.sort((a, b) => a.full_name.localeCompare(b.full_name));
+      return JSON.parse(JSON.stringify(added));
+    },
+    update_slo_dips_repo_categories: ({ repoId, categoryIds }) => {
+      if (state.sloDipsErrors.update) return Promise.reject(new Error(state.sloDipsErrors.update));
+      const stored = state.sloDipsRepos.find((candidate) => candidate.id === repoId);
+      if (!stored) return Promise.reject(new Error("SLO Dips repository not found."));
+      const inspection = state.sloDipsCatalog[stored.full_name.toLowerCase()];
+      const selected = inspection.categories.filter((category) =>
+        categoryIds.includes(category.id),
+      );
+      if (!selected.length || selected.length !== new Set(categoryIds).size) {
+        return Promise.reject(
+          new Error(
+            "SLO_DIPS_STALE_CATEGORIES: One or more selected Discussion categories are no longer available. Reload the categories and try again.",
+          ),
+        );
+      }
+      stored.categories = selected.map(({ id, name, emoji }) => ({ id, name, emoji }));
+      return JSON.parse(JSON.stringify(stored));
+    },
+    remove_slo_dips_repo: ({ repoId }) => {
+      if (state.sloDipsErrors.remove) return Promise.reject(new Error(state.sloDipsErrors.remove));
+      const before = state.sloDipsRepos.length;
+      state.sloDipsRepos = state.sloDipsRepos.filter((candidate) => candidate.id !== repoId);
+      if (state.sloDipsRepos.length === before) {
+        return Promise.reject(new Error("SLO Dips repository not found."));
+      }
       return null;
     },
 
@@ -489,7 +554,7 @@ export function defaultFixtures() {
     },
     db: {
       path: "/Users/test/Library/Application Support/helix/helix.db",
-      schema_version: 19,
+      schema_version: 20,
       tables: [
         "bookmarks",
         "collapsed_notification_repos",
@@ -505,6 +570,8 @@ export function defaultFixtures() {
         "rate_limits",
         "repos",
         "settings",
+        "slo_dips_repo_categories",
+        "slo_dips_repos",
         "sync_state",
       ],
     },
@@ -517,6 +584,41 @@ export function defaultFixtures() {
     },
     appVersion: "0.1.0",
     updaterEnabled: false,
+    sloDipsRepos: [],
+    sloDipsCatalog: {
+      "octo/reliability": {
+        repository: {
+          id: 9001,
+          full_name: "Octo/Reliability",
+          owner: "Octo",
+          name: "Reliability",
+          private: true,
+        },
+        categories: [
+          {
+            id: "DC_kwA",
+            name: "SLO Dips",
+            emoji: "📉",
+            description: "Service-level objective regressions",
+            is_answerable: false,
+          },
+          {
+            id: "DC_kwB",
+            name: "Incidents",
+            emoji: "🚨",
+            description: "Production incidents and follow-up",
+            is_answerable: true,
+          },
+          {
+            id: "DC_kwC",
+            name: "Announcements",
+            emoji: "📣",
+            description: null,
+            is_answerable: false,
+          },
+        ],
+      },
+    },
     dependabot: [
       {
         full_name: "octo/hello",

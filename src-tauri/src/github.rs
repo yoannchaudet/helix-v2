@@ -159,6 +159,207 @@ pub struct RepoOwner {
     pub login: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RepositoryMetadata {
+    pub id: i64,
+    pub full_name: String,
+    pub owner: String,
+    pub name: String,
+    pub private: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DiscussionCategory {
+    pub id: String,
+    pub name: String,
+    pub emoji: String,
+    pub description: Option<String>,
+    pub is_answerable: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RepositoryInspection {
+    pub repository: RepositoryMetadata,
+    pub categories: Vec<DiscussionCategory>,
+    #[serde(skip)]
+    pub rates: Vec<RateLimit>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscussionCategoriesData {
+    repository: Option<DiscussionCategoriesRepository>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscussionCategoriesRepository {
+    #[serde(rename = "discussionCategories")]
+    discussion_categories: DiscussionCategoryConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscussionCategoryConnection {
+    nodes: Vec<DiscussionCategoryNode>,
+    #[serde(rename = "pageInfo")]
+    page_info: DiscussionCategoryPageInfo,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscussionCategoryNode {
+    id: String,
+    name: String,
+    emoji: String,
+    description: Option<String>,
+    #[serde(rename = "isAnswerable")]
+    is_answerable: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscussionCategoryPageInfo {
+    #[serde(rename = "hasNextPage")]
+    has_next_page: bool,
+    #[serde(rename = "endCursor")]
+    end_cursor: Option<String>,
+}
+
+pub async fn inspect_repository(
+    client: &reqwest::Client,
+    token: &str,
+    owner: &str,
+    name: &str,
+) -> Result<RepositoryInspection, GitHubError> {
+    let response = authed_get(client, &format!("{API_BASE}/repos/{owner}/{name}"), token)
+        .send()
+        .await
+        .map_err(|e| GitHubError::Network(e.to_string()))?;
+    let status = response.status();
+    let mut rates = Vec::new();
+    let mut rest_rate = RateLimit::default();
+    rest_rate.update_from(response.headers());
+    rates.push(rest_rate);
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(GitHubError::Unauthorized);
+    }
+    if status == reqwest::StatusCode::FORBIDDEN {
+        let body = response.text().await.unwrap_or_default();
+        return Err(GitHubError::Forbidden(body.trim().to_string()));
+    }
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(GitHubError::Status {
+            status,
+            body: body.trim().to_string(),
+        });
+    }
+    let repository: MinimalRepo = response.json().await.map_err(|e| GitHubError::Parse {
+        what: "repository",
+        source: e.to_string(),
+    })?;
+    let metadata = RepositoryMetadata {
+        id: repository.id,
+        full_name: repository.full_name,
+        owner: repository.owner.login,
+        name: repository.name,
+        private: repository.private,
+    };
+
+    let mut categories = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let query = r#"
+          query SloDipsCategories($owner: String!, $repo: String!, $cursor: String) {
+            repository(owner: $owner, name: $repo) {
+              discussionCategories(first: 100, after: $cursor) {
+                nodes { id name emoji description isAnswerable }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+          }
+        "#;
+        let variables =
+            serde_json::json!({ "owner": metadata.owner, "repo": metadata.name, "cursor": cursor });
+        let body = serde_json::json!({ "query": query, "variables": variables });
+        let response = authed(client.post(GRAPHQL_API).json(&body), token)
+            .send()
+            .await
+            .map_err(|e| GitHubError::Network(e.to_string()))?;
+        let status = response.status();
+        let mut rate = RateLimit::default();
+        rate.update_from(response.headers());
+        rates.push(rate);
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(GitHubError::Unauthorized);
+        }
+        if status == reqwest::StatusCode::FORBIDDEN {
+            let body = response.text().await.unwrap_or_default();
+            return Err(GitHubError::Forbidden(body.trim().to_string()));
+        }
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(GitHubError::Status {
+                status,
+                body: body.trim().to_string(),
+            });
+        }
+        let envelope: GraphQlEnvelope = response.json().await.map_err(|e| GitHubError::Parse {
+            what: "discussion categories",
+            source: e.to_string(),
+        })?;
+        if let Some(errors) = envelope.errors.filter(|errors| !errors.is_empty()) {
+            return Err(GitHubError::Forbidden(
+                errors
+                    .into_iter()
+                    .map(|error| error.message)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            ));
+        }
+        let data: DiscussionCategoriesData =
+            serde_json::from_value(envelope.data.ok_or_else(|| GitHubError::Parse {
+                what: "discussion categories",
+                source: "response had no data".into(),
+            })?)
+            .map_err(|e| GitHubError::Parse {
+                what: "discussion categories",
+                source: e.to_string(),
+            })?;
+        let connection = data
+            .repository
+            .ok_or_else(|| GitHubError::Status {
+                status: reqwest::StatusCode::NOT_FOUND,
+                body: "Repository was not available to the GraphQL API.".into(),
+            })?
+            .discussion_categories;
+        categories.extend(
+            connection
+                .nodes
+                .into_iter()
+                .map(|category| DiscussionCategory {
+                    id: category.id,
+                    name: category.name,
+                    emoji: category.emoji,
+                    description: category.description,
+                    is_answerable: category.is_answerable,
+                }),
+        );
+        if !connection.page_info.has_next_page {
+            break;
+        }
+        cursor = connection.page_info.end_cursor;
+        if cursor.is_none() {
+            return Err(GitHubError::Parse {
+                what: "discussion categories",
+                source: "GitHub reported another page without a cursor".into(),
+            });
+        }
+    }
+    categories.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Ok(RepositoryInspection {
+        repository: metadata,
+        categories,
+        rates,
+    })
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Subject {
     pub title: String,

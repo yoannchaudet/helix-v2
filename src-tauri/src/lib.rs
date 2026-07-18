@@ -14,6 +14,8 @@ mod dependabot;
 mod dependabot_coordinator;
 mod github;
 mod settings;
+mod slo_dips;
+mod slo_dips_coordinator;
 mod sync;
 
 use command_error::{lock_conn, CommandError, CommandResult};
@@ -682,6 +684,11 @@ pub fn run() {
             dependabot_coordinator::dependabot_merge_status,
             dependabot_coordinator::get_dependabot_merge_operation_detail,
             dependabot_coordinator::process_dependabot_merges,
+            slo_dips_coordinator::list_slo_dips_repos,
+            slo_dips_coordinator::inspect_slo_dips_repo,
+            slo_dips_coordinator::add_slo_dips_repo,
+            slo_dips_coordinator::update_slo_dips_repo_categories,
+            slo_dips_coordinator::remove_slo_dips_repo,
             show_main_window,
             get_start_at_login,
             set_start_at_login,

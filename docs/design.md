@@ -207,6 +207,15 @@ CREATE TABLE bookmarks (                  -- local-only; snapshot survives done/
 > visibility: Helix still shows read notifications until they are marked *done*. It is retained
 > solely to recognize a genuinely new generation after a dismissal. `last_read_at` is not stored.
 
+### SLO Dips repository sources
+- `slo_dips_repos` stores repositories explicitly added to the SLO Dips module, independently of
+  notification and Bot PR repository discovery.
+- `slo_dips_repo_categories` stores one or more selected GitHub Discussion category node IDs,
+  names, and emoji per repository. The rows cascade when a repository is removed.
+- Adding or editing first fetches GitHub's live category list, then revalidates the submitted IDs
+  before atomically inserting or replacing the saved selection. A repository cannot be stored
+  without at least one category.
+
 ### Reconciliation model
 - **Remote mirror:** each synced notification is unconditionally
   `INSERT ... ON CONFLICT(thread_id) DO UPDATE`, including locally-done threads.
@@ -232,7 +241,7 @@ CREATE TABLE bookmarks (                  -- local-only; snapshot survives done/
 
 ## 4. GitHub integration
 
-Native REST over HTTPS from the Rust core (no `gh` CLI dependency). A small HTTP client
+Native REST and GraphQL over HTTPS from the Rust core (no `gh` CLI dependency). A small HTTP client
 (e.g. `reqwest` or `ureq` — chosen for footprint; see AGENT.md "lightweight first").
 
 ### Endpoints (v1)
@@ -241,6 +250,8 @@ Native REST over HTTPS from the Rust core (no `gh` CLI dependency). A small HTTP
 | List notifications | `GET /notifications?all=true&per_page=50&page=N` |
 | Resolve a subject (any type with a URL) | `GET {subject_url}` |
 | Mark a thread as done | `DELETE /notifications/threads/{thread_id}` |
+| Validate an SLO Dips repository | `GET /repos/{owner}/{repo}` |
+| List Discussion categories | GraphQL `Repository.discussionCategories` |
 | (Optional) auth check | `GET /user` |
 
 Headers on every request:
@@ -340,9 +351,12 @@ position.
   Notifications and applies to both open PR and Operations groups. Expanding an
   operation reveals its strategy-specific flow, highlighted current step, next action, retry or
   GitHub queue position, and timestamped durable action log.
-- **SLO Dips** module — initialized as the third top-level destination with an empty dedicated
-  sidebar and a static placeholder pane. It intentionally has no data model, SQLite state, network
-  behavior, settings, or module-specific shortcuts yet.
+- **SLO Dips** module — the third top-level destination. Its sidebar is a manually managed,
+  SQLite-backed repository list. Adding a repository validates `org/repo-name` with GitHub REST,
+  loads its Discussion categories through GraphQL, and requires one or more categories to be
+  selected as future SLO-dip sources. A repository context menu can edit the live category
+  selection or remove the repository after confirmation. The content pane remains a
+  repository-specific placeholder until Discussion ingestion and SLO analysis are implemented.
 - **Settings is *not* a module** — it's a focused, full-width **overlay** that temporarily
   covers the active module (hiding the sidebar) and returns to it on close. The top chrome
   (and picker) stays visible, so switching modules dismisses the overlay. `modules.js` owns

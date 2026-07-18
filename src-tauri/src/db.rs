@@ -363,6 +363,29 @@ const MIGRATIONS: &[&str] = &[
         collapsed_at   TEXT NOT NULL
     );
     "#,
+    // v20 — repositories explicitly tracked by SLO Dips and the GitHub Discussion categories
+    // selected as their future dip sources. Categories are repository-scoped GraphQL node IDs
+    // and cascade with their parent so removal is one atomic local operation.
+    r#"
+    CREATE TABLE IF NOT EXISTS slo_dips_repos (
+        repo_id     INTEGER PRIMARY KEY,
+        full_name   TEXT NOT NULL UNIQUE,
+        owner       TEXT NOT NULL,
+        name        TEXT NOT NULL,
+        private     INTEGER NOT NULL DEFAULT 0,
+        added_at    TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS slo_dips_repo_categories (
+        repo_id       INTEGER NOT NULL REFERENCES slo_dips_repos(repo_id) ON DELETE CASCADE,
+        category_id   TEXT NOT NULL,
+        name          TEXT NOT NULL,
+        emoji         TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (repo_id, category_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_slo_dips_categories_repo
+        ON slo_dips_repo_categories(repo_id, name);
+    "#,
 ];
 
 /// Open the database at `db_path`, apply any pending migrations, and return the
@@ -887,5 +910,39 @@ mod tests {
                 "upgraded and fresh index SQL differ for {required}"
             );
         }
+    }
+
+    #[test]
+    fn latest_schema_persists_slo_dips_repositories_and_cascades_categories() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        run_migrations(&conn).unwrap();
+
+        assert_eq!(schema_version(&conn).unwrap(), 20);
+        let tables = table_names(&conn).unwrap();
+        assert!(tables.contains(&"slo_dips_repos".to_string()));
+        assert!(tables.contains(&"slo_dips_repo_categories".to_string()));
+
+        conn.execute(
+            "INSERT INTO slo_dips_repos
+                (repo_id, full_name, owner, name, private, added_at)
+             VALUES (1, 'octo/repo', 'octo', 'repo', 0, '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO slo_dips_repo_categories (repo_id, category_id, name, emoji)
+             VALUES (1, 'DC_1', 'SLO Dips', '📉')",
+            [],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM slo_dips_repos WHERE repo_id = 1", [])
+            .unwrap();
+        let categories: i64 = conn
+            .query_row("SELECT COUNT(*) FROM slo_dips_repo_categories", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(categories, 0);
     }
 }

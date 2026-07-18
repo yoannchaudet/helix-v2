@@ -154,11 +154,12 @@ test("each module shows its own sidebar sources; Settings hides the sidebar", as
   await expect(page.locator(".sidebar-module--slo-dips")).toBeHidden();
   await expect(page.locator("#filter-list")).toBeHidden();
 
-  // SLO Dips: its reserved sidebar is visible but intentionally empty.
+  // SLO Dips: its repository manager is visible.
   await page.locator('.module-tab[data-module="slo-dips"]').click();
   await expect(page.locator(".sidebar")).toBeVisible();
   await expect(page.locator(".sidebar-module--slo-dips")).toBeVisible();
-  await expect(page.locator(".sidebar-module--slo-dips")).toBeEmpty();
+  await expect(page.locator("#slo-dips-add-repo")).toBeVisible();
+  await expect(page.locator("#slo-dips-repo-list")).toContainText("No repositories yet.");
   await expect(page.locator(".sidebar-module--notifications")).toBeHidden();
   await expect(page.locator(".sidebar-module--dependabot")).toBeHidden();
 
@@ -258,7 +259,7 @@ test("SLO Dips exposes an accessible placeholder page", async ({ page }) => {
     "view-slo-dips",
   );
   await expect(page.locator("#view-slo-dips .module-placeholder-title")).toHaveText(
-    "SLO Dips is coming soon.",
+    "Add a repository to begin.",
   );
 });
 
