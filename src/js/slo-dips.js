@@ -10,6 +10,7 @@ import {
   formatPercent,
   dipStatus,
   repoDomId,
+  countDipsByRepoId,
 } from "./slo-dips-model.js";
 
 const REPO_ICON = `<svg viewBox="0 0 16 16" width="15" height="15"><path d="M3 2.5h7.5L13 5v8.5H3z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M5 6h4M5 8.5h6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>`;
@@ -22,6 +23,7 @@ let dipsError = "";
 let refreshing = false;
 let autoRefreshed = false;
 let activeRepoId = null;
+let filterRepoId = null;
 let editor = { mode: "idle" };
 let requestSequence = 0;
 
@@ -52,7 +54,10 @@ function confirmDiscardChanges(anchor, action) {
     action();
     return;
   }
-  const rect = anchor.getBoundingClientRect();
+  const rect = (anchor ?? $("#slo-dips-content"))?.getBoundingClientRect() ?? {
+    left: 24,
+    top: 24,
+  };
   openContextMenu(rect.left + 12, rect.top + 12, [
     { label: "Discard category changes", danger: true, action },
     { label: "Cancel", action() {} },
@@ -75,6 +80,9 @@ async function loadRepositories({ focusRepoId = null } = {}) {
       activeRepoId = null;
       editor = { mode: "idle" };
     }
+    if (filterRepoId != null && !repositories.some((repo) => repo.id === filterRepoId)) {
+      filterRepoId = null;
+    }
     render();
     if (focusRepoId != null) {
       $(`#slo-dips-repo-list [data-repo-id="${focusRepoId}"]`)?.focus();
@@ -96,19 +104,25 @@ function renderSidebar() {
     list.innerHTML = html`<li class="source-empty">No repositories yet.</li>`;
     return;
   }
+  const counts = countDipsByRepoId(dips);
+  const highlightId =
+    editor.mode === "categories" || editor.mode === "loading"
+      ? (editor.repository?.id ?? null)
+      : filterRepoId;
   list.innerHTML = repositories
-    .map((repository) =>
-      sourceButton({
+    .map((repository) => {
+      const tally = counts.get(repository.id) ?? { total: 0, investigated: 0 };
+      return sourceButton({
         icon: REPO_ICON,
         label: repository.full_name,
-        labelTitle: repository.full_name,
+        labelTitle: `${repository.full_name} · ${tally.investigated}/${tally.total} dips investigated`,
         lock: repository.private,
         className: "repo-source",
         attrs: html`data-repo-id="${repository.id}"`,
-        active: repository.id === activeRepoId,
-        count: String(repository.categories.length),
-      }),
-    )
+        active: repository.id === highlightId,
+        count: `${tally.investigated}/${tally.total}`,
+      });
+    })
     .join("");
 }
 
@@ -186,8 +200,8 @@ function renderContent() {
 const DATADOG_ICON = `<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zm0 2.4l3.6 3.6-1.2 1.2L8 8.4 5.6 8.7 4.4 7.5 8 3.9z" fill="currentColor"/></svg>`;
 
 /** The home/idle view: the collected SLO dips, grouped by repository. Renders instantly from
- *  SQLite and is re-rendered after a refresh. Configuration (add/edit/remove repositories)
- *  stays on the sidebar; this pane is read-only browsing. */
+ *  SQLite and is re-rendered after a refresh. Left-clicking a sidebar repo filters this list;
+ *  configuring categories lives behind the sidebar right-click menu. */
 function renderDipsView(content) {
   if (!repositories.length) {
     content.innerHTML = html`
@@ -208,25 +222,29 @@ function renderDipsView(content) {
     return;
   }
 
-  if (!dips.length) {
+  const filterRepo =
+    filterRepoId != null ? repositories.find((repo) => repo.id === filterRepoId) : null;
+  const visibleDips = filterRepo ? dips.filter((dip) => dip.repo_id === filterRepoId) : dips;
+
+  if (!visibleDips.length) {
     content.innerHTML = html`
       <div class="module-placeholder">
         <img class="module-placeholder-art" src="/assets/helix-muted.svg" alt="" width="116" height="116" />
-        <p class="module-placeholder-title">No SLO dips in the last 60 days.</p>
-        <p class="module-placeholder-sub">${dipsError ? dipsError : rawHtml("Nice — nothing to investigate. Use Refresh to check GitHub again.")}</p>
+        <p class="module-placeholder-title">${filterRepo ? html`No SLO dips for ${filterRepo.full_name} in the last 60 days.` : "No SLO dips in the last 60 days."}</p>
+        <p class="module-placeholder-sub">${filterRepo ? rawHtml(html`<button type="button" class="slo-dips-clear-filter" data-clear-filter>Show all repositories</button>`) : dipsError ? dipsError : rawHtml("Nice — nothing to investigate. Use Refresh to check GitHub again.")}</p>
       </div>`;
     return;
   }
 
-  const totals = summarize(dips);
-  const groups = groupDipsByRepo(dips);
+  const totals = summarize(visibleDips);
+  const groups = groupDipsByRepo(visibleDips);
   content.innerHTML = html`
     <div class="slo-dips-view">
       <div class="slo-dips-summary" aria-live="polite">
         <span class="slo-dips-summary-total">${totals.total} ${totals.total === 1 ? "dip" : "dips"}</span>
         <span class="slo-dip-badge slo-dip-badge--pending">${totals.pending} pending</span>
         <span class="slo-dip-badge slo-dip-badge--investigated">${totals.investigated} investigated</span>
-        <span class="slo-dips-window">last 60 days</span>
+        ${filterRepo ? rawHtml(html`<button type="button" class="slo-dips-clear-filter" data-clear-filter title="Show all repositories">${filterRepo.full_name} <span aria-hidden="true">✕</span></button>`) : rawHtml('<span class="slo-dips-window">last 60 days</span>')}
       </div>
       ${rawHtml(groups.map(renderRepoGroup).join(""))}
     </div>`;
@@ -304,7 +322,7 @@ function renderCategoryEditor(content) {
       </fieldset>
       <p class="slo-repo-error" id="slo-editor-error" role="alert" tabindex="-1">${error}</p>
       <div class="slo-editor-actions">
-        ${purpose === "add" ? rawHtml(html`<button type="button" class="btn" data-editor-action="back" ${pending ? rawHtml("disabled") : ""}>Back</button>`) : rawHtml(html`<button type="button" class="btn" data-editor-action="reset" ${pending ? rawHtml("disabled") : ""}>Reset</button>`)}
+        ${purpose === "add" ? rawHtml(html`<button type="button" class="btn" data-editor-action="back" ${pending ? rawHtml("disabled") : ""}>Back</button>`) : rawHtml(html`<button type="button" class="btn" data-editor-action="back-to-dips" ${pending ? rawHtml("disabled") : ""}>Back to dips</button><button type="button" class="btn" data-editor-action="reset" ${pending ? rawHtml("disabled") : ""}>Reset</button>`)}
         <button type="button" class="btn btn--primary" data-editor-action="save" ${pending ? rawHtml("disabled") : ""}>
           ${purpose === "add" ? "Add repository" : "Save categories"}
           ${pending ? rawHtml('<span class="spinner spinner--button" aria-hidden="true"></span>') : ""}
@@ -331,6 +349,9 @@ function renderCategoryEditor(content) {
     $("#slo-repo-input")?.focus();
   });
   content.querySelector('[data-editor-action="reset"]')?.addEventListener("click", resetSelection);
+  content
+    .querySelector('[data-editor-action="back-to-dips"]')
+    ?.addEventListener("click", () => confirmDiscardChanges(null, closeEditor));
   content.querySelector('[data-editor-action="save"]').addEventListener("click", saveCategories);
 }
 
@@ -348,6 +369,17 @@ function closeEditor() {
   editor = { mode: "idle" };
   render();
   $("#slo-dips-add-repo")?.focus();
+}
+
+/** Sidebar left-click: filter the dips list to one repository (or clear if it's already the
+ *  active filter). Closes any open category editor and cancels in-flight editor loads. */
+function toggleFilter(repoId) {
+  requestSequence += 1;
+  activeRepoId = null;
+  editor = { mode: "idle" };
+  filterRepoId = filterRepoId === repoId ? null : repoId;
+  render();
+  $(`#slo-dips-repo-list [data-repo-id="${repoId}"]`)?.focus();
 }
 
 async function inspectAddInput() {
@@ -531,6 +563,10 @@ function openRepositoryMenu(event, repository) {
   event.preventDefault();
   openContextMenu(event.clientX, event.clientY, [
     {
+      label: "Show categories",
+      action: () => confirmDiscardChanges(null, () => selectRepository(repository.id)),
+    },
+    {
       label: "Remove repository",
       danger: true,
       action: () => openRemoveConfirmation(event.clientX, event.clientY, repository),
@@ -601,6 +637,7 @@ async function loadDips() {
   } finally {
     if (token === requestSequence) {
       dipsLoaded = true;
+      renderSidebar();
       if (editor.mode === "idle") renderContent();
     }
   }
@@ -629,6 +666,7 @@ async function refreshDips() {
     toast(errorText(error), "error");
   } finally {
     refreshing = false;
+    renderSidebar();
     if (editor.mode === "idle") renderContent();
   }
 }
@@ -639,7 +677,12 @@ function initSloDips() {
   });
   $(".js-slo-refresh-btn")?.addEventListener("click", refreshDips);
   $("#slo-dips-content")?.addEventListener("click", (event) => {
-    const source = event.target instanceof Element ? event.target.closest("[data-open-url]") : null;
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest("[data-clear-filter]")) {
+      toggleFilter(filterRepoId);
+      return;
+    }
+    const source = target?.closest("[data-open-url]");
     const url = source?.dataset.openUrl;
     if (!url) return;
     invoke("open_url", { url }).catch((error) => {
@@ -652,8 +695,7 @@ function initSloDips() {
     const source = event.target instanceof Element ? event.target.closest("[data-repo-id]") : null;
     if (!source) return;
     const repoId = Number(source.dataset.repoId);
-    if (repoId === activeRepoId && editor.mode === "categories") return;
-    confirmDiscardChanges(source, () => selectRepository(repoId));
+    confirmDiscardChanges(source, () => toggleFilter(repoId));
   });
   list?.addEventListener("contextmenu", (event) => {
     const source = event.target instanceof Element ? event.target.closest("[data-repo-id]") : null;

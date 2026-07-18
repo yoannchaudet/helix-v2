@@ -22,6 +22,19 @@ export function summarize(dips) {
   return { total: dips.length, investigated, pending: dips.length - investigated };
 }
 
+/** Per-repository dip tallies keyed by `repo_id`, each `{ total, investigated }`. Drives the
+ *  sidebar's "investigated / total" count badges. Repos with no dips are simply absent. */
+export function countDipsByRepoId(dips) {
+  const counts = new Map();
+  for (const dip of dips) {
+    const tally = counts.get(dip.repo_id) ?? { total: 0, investigated: 0 };
+    tally.total += 1;
+    if (dip.investigated) tally.investigated += 1;
+    counts.set(dip.repo_id, tally);
+  }
+  return counts;
+}
+
 /** A DOM-safe, collision-free id fragment for a repository `full_name` (which contains `/`),
  *  used to tie a repo section to its heading via `aria-labelledby`. `encodeURIComponent`
  *  keeps the encoding injective so distinct repo names can never share an id. */

@@ -5,6 +5,7 @@ import {
   dipStatus,
   formatPercent,
   summarize,
+  countDipsByRepoId,
   repoDomId,
   groupDipsByRepo,
 } from "../src/js/slo-dips-model.js";
@@ -51,6 +52,23 @@ test("summarize counts total, investigated and pending", () => {
     dip({ investigated: true }),
   ]);
   assert.deepEqual(s, { total: 3, investigated: 2, pending: 1 });
+});
+
+/* ----------------------------- countDipsByRepoId ------------------------------ */
+
+test("countDipsByRepoId tallies total and investigated per repo, omitting empty repos", () => {
+  const counts = countDipsByRepoId([
+    dip({ repo_id: 1, investigated: true }),
+    dip({ repo_id: 1, investigated: false }),
+    dip({ repo_id: 2, investigated: true }),
+  ]);
+  assert.deepEqual(counts.get(1), { total: 2, investigated: 1 });
+  assert.deepEqual(counts.get(2), { total: 1, investigated: 1 });
+  assert.equal(counts.has(3), false);
+});
+
+test("countDipsByRepoId returns an empty map for no dips", () => {
+  assert.equal(countDipsByRepoId([]).size, 0);
 });
 
 /* --------------------------------- repoDomId ---------------------------------- */

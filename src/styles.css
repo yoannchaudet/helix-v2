@@ -842,6 +842,25 @@ code,
   letter-spacing: 0.04em;
 }
 
+.slo-dips-clear-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-6);
+  margin-left: auto;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2, transparent);
+  color: var(--muted);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.slo-dips-clear-filter:hover {
+  color: var(--fg);
+  border-color: var(--fg);
+}
+
 .slo-dip-repo {
   display: flex;
   flex-direction: column;

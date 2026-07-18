@@ -14,6 +14,12 @@ async function inspectRepository(page, name = "octo/reliability") {
   await expect(content.getByRole("group", { name: "Discussion categories" })).toBeVisible();
 }
 
+/** Open a repository's category editor via the sidebar right-click menu (left-click now filters). */
+async function openCategories(page, repoId) {
+  await page.locator(`#slo-dips-repo-list [data-repo-id="${repoId}"]`).click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Show categories" }).click();
+}
+
 test("adds a canonical repository with multiple selected Discussion categories", async ({
   page,
 }) => {
@@ -37,7 +43,8 @@ test("adds a canonical repository with multiple selected Discussion categories",
 
   const source = page.locator('#slo-dips-repo-list [data-repo-id="9001"]');
   await expect(source).toContainText("Octo/Reliability");
-  await expect(source).toContainText("2");
+  // The sidebar count is now "investigated/total" SLO dips (none collected yet in this fixture).
+  await expect(source).toContainText("0/0");
   await expect(source).toHaveAttribute("aria-current", "true");
   await expect(page.locator("#slo-dips-view-title")).toContainText("Octo/Reliability");
   await expect(content.getByRole("checkbox", { name: /SLO Dips/ })).toBeChecked();
@@ -68,7 +75,7 @@ test("edits live category selections and removes the repository with confirmatio
   await openSloDips(page, fixtures);
 
   const source = page.locator('#slo-dips-repo-list [data-repo-id="9001"]');
-  await source.click();
+  await openCategories(page, 9001);
 
   const content = page.locator("#slo-dips-content");
   await expect(content.locator("#slo-editor-heading")).toBeFocused();
@@ -152,7 +159,7 @@ test("cancels an existing repository load without allowing its stale response to
   fixtures.sloDipsInspectDelayMs = 300;
   await openSloDips(page, fixtures);
 
-  await page.locator('#slo-dips-repo-list [data-repo-id="9001"]').click();
+  await openCategories(page, 9001);
   const content = page.locator("#slo-dips-content");
   await expect(content.getByText("Loading Discussion categories")).toBeVisible();
   await content.getByRole("button", { name: "Cancel" }).click();
@@ -293,7 +300,7 @@ test("confirms before switching away from unsaved category changes", async ({ pa
   const reliabilitySource = page.locator('#slo-dips-repo-list [data-repo-id="9001"]');
   const platformSource = page.locator('#slo-dips-repo-list [data-repo-id="9002"]');
   const content = page.locator("#slo-dips-content");
-  await reliabilitySource.click();
+  await openCategories(page, 9001);
   await content.getByRole("checkbox", { name: /Incidents/ }).check();
 
   await platformSource.click();
@@ -302,8 +309,120 @@ test("confirms before switching away from unsaved category changes", async ({ pa
   await expect(reliabilitySource).toHaveAttribute("aria-current", "true");
   await expect(content.getByRole("checkbox", { name: /Incidents/ })).toBeChecked();
 
+  // Discarding proceeds with the left-click action, which now filters to the platform repo.
   await platformSource.click();
   await page.getByRole("menuitem", { name: "Discard category changes" }).click();
   await expect(platformSource).toHaveAttribute("aria-current", "true");
-  await expect(content.locator("#slo-editor-heading")).toHaveText(/Octo\/Platform/);
+  await expect(content.locator(".module-placeholder-title")).toHaveText(
+    "No SLO dips for Octo/Platform in the last 60 days.",
+  );
+});
+
+test("left-clicking a sidebar repo filters the dips list and toggles off, with investigated/total counts", async ({
+  page,
+}) => {
+  const fixtures = defaultFixtures();
+  const reliability = fixtures.sloDipsCatalog["octo/reliability"];
+  fixtures.sloDipsCatalog["octo/platform"] = {
+    repository: {
+      ...reliability.repository,
+      id: 9002,
+      full_name: "Octo/Platform",
+      name: "Platform",
+    },
+    categories: reliability.categories,
+  };
+  fixtures.sloDipsRepos = [
+    { ...reliability.repository, categories: reliability.categories.slice(0, 1) },
+    {
+      ...fixtures.sloDipsCatalog["octo/platform"].repository,
+      categories: reliability.categories.slice(0, 1),
+    },
+  ];
+  fixtures.sloDips = [
+    {
+      comment_id: 1,
+      repo_id: 9001,
+      repo_full_name: "Octo/Reliability",
+      discussion_number: 7585,
+      discussion_title: "SLO investigations for `dns`",
+      service: "dns",
+      comment_url: "https://github.com/octo/reliability/discussions/7585#c1",
+      slo_name: "dns/availability",
+      slo_url: null,
+      dip_date: "2026-04-19",
+      percent: 99.9,
+      goal_percent: 99.99,
+      investigated: true,
+      investigated_by: "yoannchaudet",
+      investigated_at: "2026-04-20T00:00:00Z",
+      comment_created_at: "2026-04-19T00:00:00Z",
+    },
+    {
+      comment_id: 2,
+      repo_id: 9001,
+      repo_full_name: "Octo/Reliability",
+      discussion_number: 7585,
+      discussion_title: "SLO investigations for `dns`",
+      service: "dns",
+      comment_url: "https://github.com/octo/reliability/discussions/7585#c2",
+      slo_name: "dns/latency",
+      slo_url: null,
+      dip_date: "2026-04-18",
+      percent: 98.5,
+      goal_percent: 99.9,
+      investigated: false,
+      investigated_by: null,
+      investigated_at: null,
+      comment_created_at: "2026-04-18T00:00:00Z",
+    },
+    {
+      comment_id: 3,
+      repo_id: 9002,
+      repo_full_name: "Octo/Platform",
+      discussion_number: 7600,
+      discussion_title: "SLO investigations for `web`",
+      service: "web",
+      comment_url: "https://github.com/octo/platform/discussions/7600#c1",
+      slo_name: "web/availability",
+      slo_url: null,
+      dip_date: "2026-04-17",
+      percent: 97.2,
+      goal_percent: 99.9,
+      investigated: false,
+      investigated_by: null,
+      investigated_at: null,
+      comment_created_at: "2026-04-17T00:00:00Z",
+    },
+  ];
+  await openSloDips(page, fixtures);
+
+  const content = page.locator("#slo-dips-content");
+  const reliabilitySource = page.locator('#slo-dips-repo-list [data-repo-id="9001"]');
+  const platformSource = page.locator('#slo-dips-repo-list [data-repo-id="9002"]');
+
+  // Sidebar counts are investigated/total per repo.
+  await expect(reliabilitySource).toContainText("1/2");
+  await expect(platformSource).toContainText("0/1");
+
+  // Default view shows every dip across both repos.
+  await expect(content.locator(".slo-dip-row")).toHaveCount(3);
+
+  // Left-click filters to a single repo.
+  await reliabilitySource.click();
+  await expect(reliabilitySource).toHaveAttribute("aria-current", "true");
+  await expect(content.locator(".slo-dip-row")).toHaveCount(2);
+  await expect(content.locator(".slo-dip-repo-name")).toHaveText("Octo/Reliability");
+
+  // The clear-filter chip returns to the full list.
+  await content.locator("[data-clear-filter]").click();
+  await expect(content.locator(".slo-dip-row")).toHaveCount(3);
+  await expect(reliabilitySource).not.toHaveAttribute("aria-current", "true");
+
+  // Left-clicking a repo, then clicking it again, toggles the filter off.
+  await platformSource.click();
+  await expect(content.locator(".slo-dip-row")).toHaveCount(1);
+  await platformSource.click();
+  await expect(content.locator(".slo-dip-row")).toHaveCount(3);
+  await expect(platformSource).not.toHaveAttribute("aria-current", "true");
 });
