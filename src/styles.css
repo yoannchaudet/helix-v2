@@ -892,7 +892,7 @@ code,
 
 .slo-dip-row {
   display: grid;
-  grid-template-columns: auto 5.5rem 1fr 5rem auto;
+  grid-template-columns: auto 5.5rem 1fr 5rem 13rem;
   align-items: center;
   gap: var(--space-10);
   padding: var(--space-8) var(--space-6);
@@ -971,6 +971,7 @@ code,
 }
 
 .slo-dip-badge {
+  justify-self: start;
   font-size: 0.72rem;
   font-weight: 600;
   padding: 2px var(--space-6);
