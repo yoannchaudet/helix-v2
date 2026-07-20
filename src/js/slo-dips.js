@@ -277,7 +277,6 @@ function renderDipRow(dip) {
         <span class="slo-dip-dot slo-dip-dot--${status}" aria-hidden="true"></span>
       </span>
       <span class="slo-dip-date">${dip.dip_date}</span>
-      <span class="slo-dip-service">${dip.service}</span>
       <span class="slo-dip-name">
         <button type="button" class="slo-dip-link" data-open-url="${dip.comment_url}">${dip.slo_name}</button>
         ${dip.slo_url ? rawHtml(html`<button type="button" class="slo-dip-datadog" data-open-url="${dip.slo_url}" title="Open in Datadog" aria-label="Open ${dip.slo_name} in Datadog">${rawHtml(DATADOG_ICON)}</button>`) : ""}
