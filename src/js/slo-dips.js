@@ -266,7 +266,7 @@ function renderDipsView(content) {
         <span class="slo-dips-summary-total">${totals.total} ${totals.total === 1 ? "dip" : "dips"}</span>
         <span class="slo-dip-badge slo-dip-badge--pending">${totals.pending} pending</span>
         <span class="slo-dip-badge slo-dip-badge--investigated">${totals.investigated} investigated</span>
-        ${filterRepo ? rawHtml(html`<button type="button" class="slo-dips-clear-filter" data-clear-filter title="Show all repositories">${filterRepo.full_name} <span aria-hidden="true">✕</span></button>`) : rawHtml('<span class="slo-dips-window">last 60 days</span>')}
+        <span class="slo-dips-window">last 60 days</span>
       </div>
       ${rawHtml(groups.map(renderRepoGroup).join(""))}
     </div>`;

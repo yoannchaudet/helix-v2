@@ -427,8 +427,8 @@ test("left-clicking a sidebar repo filters the dips list and toggles off, with i
   await expect(content.locator(".slo-dip-row")).toHaveCount(2);
   await expect(content.locator(".slo-dip-repo-name")).toHaveText("Octo/Reliability");
 
-  // The clear-filter chip returns to the full list.
-  await content.locator("[data-clear-filter]").click();
+  // Clicking the active repo again toggles the filter off.
+  await reliabilitySource.click();
   await expect(content.locator(".slo-dip-row")).toHaveCount(3);
   await expect(reliabilitySource).not.toHaveAttribute("aria-current", "true");
 
