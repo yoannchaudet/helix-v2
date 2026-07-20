@@ -892,7 +892,7 @@ code,
 
 .slo-dip-row {
   display: grid;
-  grid-template-columns: auto 5.5rem 1fr 5rem 13rem;
+  grid-template-columns: 12px 6rem 1fr 5.5rem 13rem;
   align-items: center;
   gap: var(--space-10);
   padding: var(--space-8) var(--space-6);
@@ -904,6 +904,24 @@ code,
   background: var(--surface);
 }
 
+.slo-dip-head {
+  display: grid;
+  grid-template-columns: 12px 6rem 1fr 5.5rem 13rem;
+  align-items: center;
+  gap: var(--space-10);
+  padding: var(--space-4) var(--space-6);
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.slo-dip-head-num {
+  text-align: right;
+}
+
 .slo-dip-dot {
   width: 9px;
   height: 9px;
@@ -911,17 +929,37 @@ code,
   display: inline-block;
 }
 
-.slo-dip-dot--investigated {
-  background: var(--success);
+.slo-dip-dot--high {
+  background: var(--danger-text);
 }
 
-.slo-dip-dot--pending {
+.slo-dip-dot--medium {
   background: var(--pending);
 }
 
+.slo-dip-dot--low {
+  background: var(--success);
+}
+
+.slo-dip-dot--unknown {
+  background: var(--muted);
+}
+
 .slo-dip-date {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
+}
+
+.slo-dip-date-abs {
+  color: var(--text);
+}
+
+.slo-dip-date-rel {
+  font-size: 0.72rem;
+  color: var(--muted);
 }
 
 .slo-dip-name {
@@ -972,11 +1010,28 @@ code,
 
 .slo-dip-badge {
   justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  max-width: 100%;
   font-size: 0.72rem;
   font-weight: 600;
   padding: 2px var(--space-6);
   border-radius: var(--radius-pill, 999px);
   white-space: nowrap;
+}
+
+.slo-dip-avatar {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--surface);
+}
+
+.slo-dip-investigator {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .slo-dip-badge--pending {

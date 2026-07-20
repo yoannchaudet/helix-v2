@@ -227,10 +227,16 @@ test("renders collected dips grouped by repo and refreshes on demand", async ({ 
   const rows = content.locator(".slo-dip-row");
   await expect(rows).toHaveCount(2);
   await expect(content.locator(".slo-dip-repo-name")).toHaveText("Octo/Reliability");
-  await expect(rows.first().locator(".slo-dip-badge--investigated")).toContainText(
-    "investigated by yoannchaudet",
+  // The investigated pill is normalized to the responder's handle + avatar.
+  await expect(rows.first().locator(".slo-dip-badge--investigated")).toContainText("yoannchaudet");
+  await expect(rows.first().locator(".slo-dip-badge--investigated")).toHaveAttribute(
+    "title",
+    /Investigated by yoannchaudet/,
   );
+  await expect(rows.first().locator(".slo-dip-avatar")).toHaveCount(1);
   await expect(rows.nth(1).locator(".slo-dip-badge--pending")).toHaveText("pending");
+  // Column headers label the implied columns.
+  await expect(content.locator(".slo-dip-head")).toContainText("Attainment");
   // The Datadog deep link only appears when a slo_url is present.
   await expect(rows.first().locator(".slo-dip-datadog")).toHaveCount(1);
   await expect(rows.nth(1).locator(".slo-dip-datadog")).toHaveCount(0);
@@ -398,8 +404,14 @@ test("left-clicking a sidebar repo filters the dips list and toggles off, with i
   await openSloDips(page, fixtures);
 
   const content = page.locator("#slo-dips-content");
+  const allFilter = page.locator('#slo-dips-filter-list [data-filter="all"]');
   const reliabilitySource = page.locator('#slo-dips-repo-list [data-repo-id="9001"]');
   const platformSource = page.locator('#slo-dips-repo-list [data-repo-id="9002"]');
+
+  // The "All" entry shows the overall investigated/total and is active by default.
+  await expect(allFilter).toContainText("All");
+  await expect(allFilter).toContainText("1/3");
+  await expect(allFilter).toHaveAttribute("aria-current", "true");
 
   // Sidebar counts are investigated/total per repo.
   await expect(reliabilitySource).toContainText("1/2");
@@ -408,9 +420,10 @@ test("left-clicking a sidebar repo filters the dips list and toggles off, with i
   // Default view shows every dip across both repos.
   await expect(content.locator(".slo-dip-row")).toHaveCount(3);
 
-  // Left-click filters to a single repo.
+  // Left-click filters to a single repo; "All" is no longer active.
   await reliabilitySource.click();
   await expect(reliabilitySource).toHaveAttribute("aria-current", "true");
+  await expect(allFilter).not.toHaveAttribute("aria-current", "true");
   await expect(content.locator(".slo-dip-row")).toHaveCount(2);
   await expect(content.locator(".slo-dip-repo-name")).toHaveText("Octo/Reliability");
 
@@ -419,10 +432,11 @@ test("left-clicking a sidebar repo filters the dips list and toggles off, with i
   await expect(content.locator(".slo-dip-row")).toHaveCount(3);
   await expect(reliabilitySource).not.toHaveAttribute("aria-current", "true");
 
-  // Left-clicking a repo, then clicking it again, toggles the filter off.
+  // The sidebar "All" entry also clears a repo filter.
   await platformSource.click();
   await expect(content.locator(".slo-dip-row")).toHaveCount(1);
-  await platformSource.click();
+  await allFilter.click();
   await expect(content.locator(".slo-dip-row")).toHaveCount(3);
+  await expect(allFilter).toHaveAttribute("aria-current", "true");
   await expect(platformSource).not.toHaveAttribute("aria-current", "true");
 });

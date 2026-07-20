@@ -4,16 +4,20 @@ import { openContextMenu } from "./menu.js";
 import { registerModule } from "./modules.js";
 import { sourceButton } from "./ui.js";
 import { isAuthenticated } from "./account.js";
+import { relTime } from "./format.js";
 import {
   groupDipsByRepo,
   summarize,
   formatPercent,
   dipStatus,
+  dipSeverity,
+  avatarUrl,
   repoDomId,
   countDipsByRepoId,
 } from "./slo-dips-model.js";
 
 const REPO_ICON = `<svg viewBox="0 0 16 16" width="15" height="15"><path d="M3 2.5h7.5L13 5v8.5H3z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M5 6h4M5 8.5h6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>`;
+const ALL_ICON = `<svg viewBox="0 0 16 16" width="15" height="15"><circle cx="8" cy="8" r="5.25" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M5.5 8l1.6 1.7L10.6 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 const STALE_CATEGORIES_CODE = "SLO_DIPS_STALE_CATEGORIES:";
 
 let repositories = [];
@@ -98,6 +102,29 @@ function render() {
 }
 
 function renderSidebar() {
+  const editorOpen = editor.mode === "categories" || editor.mode === "loading";
+  const highlightId = editorOpen ? (editor.repository?.id ?? null) : filterRepoId;
+
+  const filterList = $("#slo-dips-filter-list");
+  if (filterList) {
+    if (!repositories.length) {
+      filterList.innerHTML = "";
+    } else {
+      const totals = summarize(dips);
+      filterList.innerHTML = sourceButton({
+        icon: ALL_ICON,
+        label: "All",
+        labelTitle: `All repositories · ${totals.investigated}/${totals.total} dips investigated`,
+        attrs: html`data-filter="all"`,
+        active: !editorOpen && filterRepoId == null,
+        count: `${totals.investigated}/${totals.total}`,
+      });
+      filterList.querySelector('[data-filter="all"]')?.addEventListener("click", (event) => {
+        confirmDiscardChanges(event.currentTarget, showAllDips);
+      });
+    }
+  }
+
   const list = $("#slo-dips-repo-list");
   if (!list) return;
   if (!repositories.length) {
@@ -105,10 +132,6 @@ function renderSidebar() {
     return;
   }
   const counts = countDipsByRepoId(dips);
-  const highlightId =
-    editor.mode === "categories" || editor.mode === "loading"
-      ? (editor.repository?.id ?? null)
-      : filterRepoId;
   list.innerHTML = repositories
     .map((repository) => {
       const tally = counts.get(repository.id) ?? { total: 0, investigated: 0 };
@@ -258,32 +281,70 @@ function renderRepoGroup(group) {
         <span class="slo-dip-repo-counts">${group.pending ? rawHtml(html`<span class="slo-dip-badge slo-dip-badge--pending">${group.pending} pending</span>`) : rawHtml('<span class="slo-dip-badge slo-dip-badge--investigated">all investigated</span>')}</span>
       </header>
       <ul class="slo-dip-list">
+        ${rawHtml(DIP_HEADER_ROW)}
         ${rawHtml(group.dips.map(renderDipRow).join(""))}
       </ul>
     </section>`;
 }
 
+const DIP_HEADER_ROW = html`
+  <li class="slo-dip-head" aria-hidden="true">
+    <span></span>
+    <span>Date</span>
+    <span>SLO</span>
+    <span class="slo-dip-head-num">Attainment</span>
+    <span>Status</span>
+  </li>`;
+
+const SEVERITY_LABELS = {
+  low: "Minor dip",
+  medium: "Moderate dip",
+  high: "Severe dip",
+  unknown: "Severity unknown (no target posted)",
+};
+
 function renderDipRow(dip) {
   const status = dipStatus(dip);
-  const badge =
-    status === "investigated"
-      ? dip.investigated_by
-        ? html`investigated by ${dip.investigated_by}`
-        : "investigated"
-      : "pending";
+  const severity = dipSeverity(dip);
+  const sevTitle =
+    severity.gap != null
+      ? `${SEVERITY_LABELS[severity.level]} — ${formatPercent(severity.gap)} below target`
+      : SEVERITY_LABELS.unknown;
+  const rel = relTime(`${dip.dip_date}T00:00:00`);
+  const relCell = rel ? rawHtml(html`<span class="slo-dip-date-rel">${rel}</span>`) : "";
+  const statusCell = rawHtml(renderStatusCell(dip, status));
   return html`
     <li class="slo-dip-row slo-dip-row--${status}">
-      <span class="slo-dip-status" title="${status === "investigated" ? "Investigated" : "Not investigated"}">
-        <span class="slo-dip-dot slo-dip-dot--${status}" aria-hidden="true"></span>
+      <span class="slo-dip-sev" title="${sevTitle}">
+        <span class="slo-dip-dot slo-dip-dot--${severity.level}" aria-hidden="true"></span>
       </span>
-      <span class="slo-dip-date">${dip.dip_date}</span>
+      <span class="slo-dip-date">
+        <span class="slo-dip-date-abs">${dip.dip_date}</span>
+        ${relCell}
+      </span>
       <span class="slo-dip-name">
         <button type="button" class="slo-dip-link" data-open-url="${dip.comment_url}">${dip.slo_name}</button>
         ${dip.slo_url ? rawHtml(html`<button type="button" class="slo-dip-datadog" data-open-url="${dip.slo_url}" title="Open in Datadog" aria-label="Open ${dip.slo_name} in Datadog">${rawHtml(DATADOG_ICON)}</button>`) : ""}
       </span>
       <span class="slo-dip-percent">${formatPercent(dip.percent)}</span>
-      <span class="slo-dip-badge slo-dip-badge--${status}">${rawHtml(badge)}</span>
+      ${statusCell}
     </li>`;
+}
+
+/** Status column: a plain "pending" pill, or an investigated pill normalized to the responder's
+ *  GitHub handle plus their avatar so investigators are scannable at a glance. */
+function renderStatusCell(dip, status) {
+  if (status !== "investigated") {
+    return html`<span class="slo-dip-badge slo-dip-badge--pending">pending</span>`;
+  }
+  if (!dip.investigated_by) {
+    return html`<span class="slo-dip-badge slo-dip-badge--investigated">investigated</span>`;
+  }
+  const when = dip.investigated_at ? ` · ${relTime(dip.investigated_at)}` : "";
+  return html`<span class="slo-dip-badge slo-dip-badge--investigated" title="Investigated by ${dip.investigated_by}${when}">
+    <img class="slo-dip-avatar" src="${avatarUrl(dip.investigated_by)}" alt="" width="16" height="16" loading="lazy" />
+    <span class="slo-dip-investigator">${dip.investigated_by}</span>
+  </span>`;
 }
 
 function renderCategoryEditor(content) {
@@ -379,6 +440,16 @@ function toggleFilter(repoId) {
   filterRepoId = filterRepoId === repoId ? null : repoId;
   render();
   $(`#slo-dips-repo-list [data-repo-id="${repoId}"]`)?.focus();
+}
+
+/** Sidebar "All": clear any repo filter and close the editor, returning to the full dips list. */
+function showAllDips() {
+  requestSequence += 1;
+  activeRepoId = null;
+  editor = { mode: "idle" };
+  filterRepoId = null;
+  render();
+  $('#slo-dips-filter-list [data-filter="all"]')?.focus();
 }
 
 async function inspectAddInput() {

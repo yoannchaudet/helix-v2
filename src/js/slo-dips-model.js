@@ -8,6 +8,26 @@ export function dipStatus(dip) {
   return dip.investigated ? "investigated" : "pending";
 }
 
+/** Severity of a dip = how far its attainment fell below the SLO target, in percentage points.
+ *  Drives the color of the row's severity dot (distinct info from the investigated status) and
+ *  a tooltip. When the bot didn't post a goal, severity is unknown. Thresholds: <0.5pt low,
+ *  0.5–2pt medium, ≥2pt high. */
+export function dipSeverity(dip) {
+  const goal = dip.goal_percent;
+  if (typeof goal !== "number" || Number.isNaN(goal) || typeof dip.percent !== "number") {
+    return { level: "unknown", gap: null };
+  }
+  const gap = Math.max(0, goal - dip.percent);
+  const level = gap >= 2 ? "high" : gap >= 0.5 ? "medium" : "low";
+  return { level, gap };
+}
+
+/** Public GitHub avatar URL for a login, sized for a table row. Uses the `github.com/{login}.png`
+ *  redirect (whitelisted in our CSP) so no extra API call is needed. */
+export function avatarUrl(login, size = 32) {
+  return `https://github.com/${encodeURIComponent(String(login))}.png?size=${size}`;
+}
+
 /** Format a raw percentage number for display, trimming floating-point noise to at most three
  *  decimals (the precision the SLO bot posts). e.g. `99.967` → `"99.967%"`, `99.99` → `"99.99%"`. */
 export function formatPercent(percent) {
