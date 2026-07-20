@@ -10,7 +10,6 @@ import {
   summarize,
   formatPercent,
   dipStatus,
-  dipSeverity,
   avatarUrl,
   repoDomId,
   countDipsByRepoId,
@@ -289,35 +288,19 @@ function renderRepoGroup(group) {
 
 const DIP_HEADER_ROW = html`
   <li class="slo-dip-head" aria-hidden="true">
-    <span></span>
     <span>Date</span>
     <span>SLO</span>
     <span class="slo-dip-head-num">Attainment</span>
     <span>Status</span>
   </li>`;
 
-const SEVERITY_LABELS = {
-  low: "Minor dip",
-  medium: "Moderate dip",
-  high: "Severe dip",
-  unknown: "Severity unknown (no target posted)",
-};
-
 function renderDipRow(dip) {
   const status = dipStatus(dip);
-  const severity = dipSeverity(dip);
-  const sevTitle =
-    severity.gap != null
-      ? `${SEVERITY_LABELS[severity.level]} — ${formatPercent(severity.gap)} below target`
-      : SEVERITY_LABELS.unknown;
   const rel = relTime(`${dip.dip_date}T00:00:00`);
   const relCell = rel ? rawHtml(html`<span class="slo-dip-date-rel">${rel}</span>`) : "";
   const statusCell = rawHtml(renderStatusCell(dip, status));
   return html`
     <li class="slo-dip-row slo-dip-row--${status}">
-      <span class="slo-dip-sev" title="${sevTitle}">
-        <span class="slo-dip-dot slo-dip-dot--${severity.level}" aria-hidden="true"></span>
-      </span>
       <span class="slo-dip-date">
         <span class="slo-dip-date-abs">${dip.dip_date}</span>
         ${relCell}

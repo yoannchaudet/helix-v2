@@ -892,7 +892,7 @@ code,
 
 .slo-dip-row {
   display: grid;
-  grid-template-columns: 12px 6rem 1fr 5.5rem 13rem;
+  grid-template-columns: 6rem 1fr 5.5rem 13rem;
   align-items: center;
   gap: var(--space-10);
   padding: var(--space-8) var(--space-6);
@@ -906,7 +906,7 @@ code,
 
 .slo-dip-head {
   display: grid;
-  grid-template-columns: 12px 6rem 1fr 5.5rem 13rem;
+  grid-template-columns: 6rem 1fr 5.5rem 13rem;
   align-items: center;
   gap: var(--space-10);
   padding: var(--space-4) var(--space-6);
@@ -920,29 +920,6 @@ code,
 
 .slo-dip-head-num {
   text-align: right;
-}
-
-.slo-dip-dot {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  display: inline-block;
-}
-
-.slo-dip-dot--high {
-  background: var(--danger-text);
-}
-
-.slo-dip-dot--medium {
-  background: var(--pending);
-}
-
-.slo-dip-dot--low {
-  background: var(--success);
-}
-
-.slo-dip-dot--unknown {
-  background: var(--muted);
 }
 
 .slo-dip-date {

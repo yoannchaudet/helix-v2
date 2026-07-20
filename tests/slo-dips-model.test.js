@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 
 import {
   dipStatus,
-  dipSeverity,
   avatarUrl,
   formatPercent,
   summarize,
@@ -30,22 +29,6 @@ function dip(overrides = {}) {
 test("dipStatus reflects the investigated flag", () => {
   assert.equal(dipStatus(dip({ investigated: true })), "investigated");
   assert.equal(dipStatus(dip({ investigated: false })), "pending");
-});
-
-/* --------------------------------- dipSeverity -------------------------------- */
-
-test("dipSeverity buckets by how far below target the attainment fell", () => {
-  assert.equal(dipSeverity(dip({ percent: 99.9, goal_percent: 99.99 })).level, "low");
-  assert.equal(dipSeverity(dip({ percent: 98.5, goal_percent: 99.9 })).level, "medium");
-  assert.equal(dipSeverity(dip({ percent: 92.4, goal_percent: 99.9 })).level, "high");
-});
-
-test("dipSeverity reports the raw gap and handles a missing goal", () => {
-  const withGoal = dipSeverity(dip({ percent: 99, goal_percent: 99.5 }));
-  assert.equal(withGoal.level, "medium");
-  assert.ok(Math.abs(withGoal.gap - 0.5) < 1e-9);
-  const noGoal = dipSeverity(dip({ percent: 99, goal_percent: null }));
-  assert.deepEqual(noGoal, { level: "unknown", gap: null });
 });
 
 /* ---------------------------------- avatarUrl -------------------------------- */
