@@ -28,6 +28,7 @@ export function installTauriMock(fixtures) {
     sloDipsRepos: JSON.parse(JSON.stringify(fixtures.sloDipsRepos ?? [])),
     sloDipsCatalog: JSON.parse(JSON.stringify(fixtures.sloDipsCatalog ?? {})),
     sloDipsErrors: { ...(fixtures.sloDipsErrors ?? {}) },
+    sloDips: JSON.parse(JSON.stringify(fixtures.sloDips ?? [])),
     sloDipsInspectDelayMs: fixtures.sloDipsInspectDelayMs ?? 0,
     lastModule: fixtures.lastModule ?? null,
     // When true, `get_dependabot_merge_operation_detail` calls don't resolve on their own —
@@ -124,6 +125,10 @@ export function installTauriMock(fixtures) {
     state.dependabot = JSON.parse(JSON.stringify(newGroups));
   };
 
+  window.__mockSetSloDips = (dips) => {
+    state.sloDips = JSON.parse(JSON.stringify(dips));
+  };
+
   const countAll = () => state.inbox.reduce((sum, g) => sum + g.notifications.length, 0);
   const withCollapsedState = (groups) =>
     groups.map((group) => ({
@@ -168,6 +173,13 @@ export function installTauriMock(fixtures) {
       return null;
     },
     list_slo_dips_repos: () => JSON.parse(JSON.stringify(state.sloDipsRepos)),
+    list_slo_dips: () => JSON.parse(JSON.stringify(state.sloDips)),
+    refresh_slo_dips: () => {
+      if (state.sloDipsErrors.refresh) {
+        return Promise.reject(new Error(state.sloDipsErrors.refresh));
+      }
+      return JSON.parse(JSON.stringify(state.sloDips));
+    },
     inspect_slo_dips_repo: ({ repository }) => {
       if (state.sloDipsErrors.inspect) {
         return Promise.reject(new Error(state.sloDipsErrors.inspect));
@@ -569,7 +581,7 @@ export function defaultFixtures() {
     },
     db: {
       path: "/Users/test/Library/Application Support/helix/helix.db",
-      schema_version: 22,
+      schema_version: 23,
       tables: [
         "bookmarks",
         "collapsed_notification_repos",
@@ -585,6 +597,7 @@ export function defaultFixtures() {
         "rate_limits",
         "repos",
         "settings",
+        "slo_dips",
         "slo_dips_repo_categories",
         "slo_dips_repos",
         "sync_state",

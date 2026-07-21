@@ -87,23 +87,13 @@
           aria-label="SLO Dips repositories"
           hidden
         >
+          <!-- The "All" entry (all dips, unfiltered) is rendered by slo-dips.js (renderSidebar). -->
+          <ul class="source-list" id="slo-dips-filter-list"></ul>
+
           <p class="source-group-label">Repositories</p>
           <ul class="source-list" id="slo-dips-repo-list">
             <li class="source-empty">No repositories yet.</li>
           </ul>
-          <div class="source-group-action">
-            <button
-              type="button"
-              class="icon-btn source-group-add"
-              id="slo-dips-add-repo"
-              aria-label="Add SLO Dips repository"
-              title="Add repository"
-            >
-              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-                <path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-              </svg>
-            </button>
-          </div>
         </nav>
       </aside>
 
@@ -196,6 +186,18 @@
       <section id="view-slo-dips" class="pane" hidden aria-labelledby="slo-dips-view-title">
         <header class="toolbar" data-tauri-drag-region>
           <h1 class="toolbar-title" id="slo-dips-view-title">SLO Dips</h1>
+          <div class="toolbar-actions">
+            <span class="sync-status">
+              <span class="status-dot status-dot--pending js-slo-sync-dot" hidden></span>
+              <span class="status-label status-label--pending js-slo-sync-label" hidden>Loading…</span>
+            </span>
+            <button type="button" class="icon-btn" id="slo-dips-add-repo" title="Add repository" aria-label="Add SLO Dips repository">
+              <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            </button>
+            <button type="button" class="icon-btn js-slo-refresh-btn" id="slo-dips-refresh-btn" title="Refresh SLO dips" aria-label="Refresh SLO dips">
+              <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M13.4 7a5.5 5.5 0 10-.5 3.4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M13.6 3.4v3.2h-3.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
         </header>
 
         <div class="slo-content" id="slo-dips-content">
