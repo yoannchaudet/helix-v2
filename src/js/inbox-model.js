@@ -38,6 +38,14 @@ export function isAwaitingState(n) {
   return (n.subject_type === "PullRequest" || n.subject_type === "Issue") && !n.subject_state;
 }
 
+/** Clipboard text for the copy-URLs repository action. Missing URLs are omitted; a single
+ *  URL stays bare, while multiple URLs become a Markdown-style list in display order. */
+export function notificationUrlsText(notifications) {
+  const urls = notifications.map((n) => n.subject_html_url).filter(Boolean);
+  if (urls.length === 1) return urls[0];
+  return urls.map((url) => `- ${url}`).join("\n");
+}
+
 /** Smart filters: predicate over a notification + the human label for the toolbar. */
 export const FILTERS = {
   all: { label: "All", match: () => true },

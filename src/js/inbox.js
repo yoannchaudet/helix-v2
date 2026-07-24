@@ -9,6 +9,7 @@ import {
   filterGroupsByType,
   typeMatch,
   TYPE_FILTERS,
+  notificationUrlsText,
 } from "./inbox-model.js";
 import { repoSection, typeFilterBar } from "./inbox-view.js";
 import { sourceButton } from "./ui.js";
@@ -638,15 +639,20 @@ function openNotification(url) {
   });
 }
 
-/** Copy a notification's subject URL to the clipboard. */
-async function copyNotificationUrl(url) {
-  if (!url) return;
-  if (await copyText(url)) {
-    toast("Copied URL");
+/** Copy notification subject URLs to the clipboard with consistent feedback. */
+async function copyNotificationUrls(text, multiple = false) {
+  if (!text) return;
+  if (await copyText(text)) {
+    toast(multiple ? "Copied URLs" : "Copied URL");
   } else {
-    console.error(`failed to copy ${url}`);
+    console.error(`failed to copy notification URL${multiple ? "s" : ""}`);
     toast("Copy failed", "error");
   }
+}
+
+/** Copy one notification's subject URL to the clipboard. */
+function copyNotificationUrl(url) {
+  return copyNotificationUrls(url);
 }
 
 /** Resolve the `.n-row` an inbox event landed on, normalizing text-node targets. */
@@ -811,19 +817,50 @@ function confirmRepoDone(btn) {
   confirmDone(ids, btn);
 }
 
+/** Resolve the repository id represented by an element inside a rendered repo section. */
+function repoIdForElement(el) {
+  const labelled = el.closest(".repo-section")?.getAttribute("aria-labelledby");
+  return labelled ? Number(labelled.slice("repo-h-".length)) : NaN;
+}
+
 /** Web URL for a row's repository. Every notification belongs to a repo, so this works even
  *  for subjects with no resolvable link (e.g. Copilot agent sessions). github.com is the
  *  app's only host (see `API_BASE` in github.rs); `full_name` is `owner/repo`. */
 function repoUrlForRow(row) {
-  const labelled = row.closest(".repo-section")?.getAttribute("aria-labelledby");
-  const repoId = labelled ? Number(labelled.slice("repo-h-".length)) : NaN;
-  const group = currentGroups().find((g) => g.repo_id === repoId);
+  const group = currentGroups().find((g) => g.repo_id === repoIdForElement(row));
   if (!group) return null;
   return `https://github.com/${group.full_name.split("/").map(encodeURIComponent).join("/")}`;
 }
 
-/** Right-click a notification row → copy its URL, open its repository, or mark it done. */
+/** Right-click a repository header → copy its filtered notifications' available URLs. */
+function openRepoContextMenu(header, x, y) {
+  const group = filteredGroups().find((g) => g.repo_id === repoIdForElement(header));
+  if (!group) return;
+  const text = notificationUrlsText(group.notifications);
+  openContextMenu(x, y, [
+    {
+      label: "Copy notification URLs",
+      disabled: !text,
+      action: () => copyNotificationUrls(text, text.includes("\n")),
+    },
+  ]);
+}
+
+/** Right-click a repository header or notification row for the relevant actions. */
 function onInboxContextMenu(e) {
+  const target = e.target instanceof Element ? e.target : e.target?.parentElement;
+  const header = target?.closest(".repo-header");
+  if (header) {
+    e.preventDefault();
+    let { clientX: x, clientY: y } = e;
+    if (x === 0 && y === 0) {
+      const r = header.getBoundingClientRect();
+      x = r.left + 12;
+      y = r.bottom - 8;
+    }
+    openRepoContextMenu(header, x, y);
+    return;
+  }
   const row = inboxRowFromEvent(e);
   if (!row) return;
   e.preventDefault();
