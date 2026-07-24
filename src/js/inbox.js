@@ -619,8 +619,10 @@ function scheduleSnoozeWake() {
 async function snoozeThread(threadId, optionId) {
   const untilAt = snoozeUntil(optionId);
   if (!untilAt) return;
-  // Optimistic: drop the row locally so it disappears immediately, mirroring mark-done.
-  const focusTarget = focusTargetAfterRemoval([threadId]);
+  // Optimistic: drop the row locally so it disappears immediately, mirroring mark-done —
+  // including its exception: in the Bookmarks filter the row stays (wearing its deadline),
+  // so retargeting focus would be a jarring hop away from the row the user is on.
+  const focusTarget = activeFilter === "bookmarked" ? null : focusTargetAfterRemoval([threadId]);
   inboxGroups = inboxGroups
     .map((g) => ({ ...g, notifications: g.notifications.filter((n) => n.thread_id !== threadId) }))
     .filter((g) => g.notifications.length);
