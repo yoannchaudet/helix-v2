@@ -2271,8 +2271,10 @@ mod tests {
     const PAST: &str = "2000-01-01T00:00:00Z";
 
     fn snooze_count(conn: &Connection) -> i64 {
-        conn.query_row("SELECT COUNT(*) FROM notification_snoozes", [], |r| r.get(0))
-            .unwrap()
+        conn.query_row("SELECT COUNT(*) FROM notification_snoozes", [], |r| {
+            r.get(0)
+        })
+        .unwrap()
     }
 
     #[test]

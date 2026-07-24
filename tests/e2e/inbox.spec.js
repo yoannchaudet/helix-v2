@@ -538,9 +538,9 @@ test("snoozing a row from the context menu hides it and fills the Snoozed filter
   await page.locator('.source[data-filter="snoozed"]').click();
   await expect(page.locator("#view-title")).toHaveText("Snoozed");
   await expect(page.locator("#inbox .n-row")).toHaveCount(1);
-  await expect(page.locator('.n-row[data-thread-id="t2"] .state--snoozed')).toContainText(
-    "Back in",
-  );
+  // Wording depends on whether the deadline lands today ("Back in 3h") or crosses midnight
+  // in the runner's timezone ("Back tomorrow 1:00 AM"), so pin the shape, not the words.
+  await expect(page.locator('.n-row[data-thread-id="t2"] .state--snoozed')).toHaveText(/^Back .+/);
 
   await page.locator('.n-row[data-thread-id="t2"] .n-unsnooze').click();
   await expect(page.locator("#inbox .n-row")).toHaveCount(0);
