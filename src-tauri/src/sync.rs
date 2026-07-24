@@ -11,7 +11,8 @@ use serde::Serialize;
 
 use crate::github::{NotificationThread, RateLimit, ResolvedSubject};
 
-/// Outcome of a store + reconcile pass.#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Outcome of a store + reconcile pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StoreOutcome {
     /// Remote notifications upserted from the latest fetch.
     pub stored: usize,

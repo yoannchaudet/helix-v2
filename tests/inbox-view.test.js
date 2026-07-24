@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   subjectBadge,
+  snoozePill,
   stateBadge,
   notificationRow,
   repoHeader,
@@ -329,4 +330,10 @@ test("notificationRow shows the snooze pill + unsnooze action only when snoozed"
   assert.ok(!plain.includes("n-row--snoozed"));
   assert.ok(!plain.includes("state--snoozed"));
   assert.ok(!plain.includes("n-unsnooze"));
+});
+
+test("snoozePill falls back to the raw value when the deadline can't be parsed", () => {
+  const html = snoozePill("not-a-timestamp");
+  assert.match(html, /Snoozed until not-a-timestamp/);
+  assert.ok(!html.includes("Invalid Date"));
 });

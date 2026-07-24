@@ -78,8 +78,12 @@ const SNOOZE_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden
  *  bookmark). Returns "" when the row isn't snoozed. Yellow — this is a pending state. */
 export function snoozePill(untilAt) {
   if (!untilAt) return "";
+  // An unparseable deadline shouldn't read "Invalid Date": fall back to the raw stored value,
+  // which is what `fmtSnoozeUntil` does with the same input.
+  const exact = new Date(untilAt);
+  const title = Number.isNaN(exact.getTime()) ? untilAt : exact.toLocaleString();
   return pill(`Back ${fmtSnoozeUntil(untilAt)}`, "state state--snoozed", {
-    title: `Snoozed until ${new Date(untilAt).toLocaleString()}`,
+    title: `Snoozed until ${title}`,
   });
 }
 
