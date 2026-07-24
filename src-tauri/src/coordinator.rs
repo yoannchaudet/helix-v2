@@ -170,6 +170,7 @@ where
         let conn: &mut rusqlite::Connection = &mut guard;
         let stored = sync::store_notifications(conn, &outcome.threads)?;
         sync::refresh_bookmark_snapshots(conn)?;
+        sync::prune_expired_snoozes(conn)?;
         sync::record_success(conn, &outcome.rate)?;
         Ok(stored)
     })();
@@ -428,6 +429,35 @@ pub fn set_bookmark(
     } else {
         sync::remove_bookmark(&conn, &thread_id)?;
     }
+    Ok(())
+}
+
+/// Read the currently-snoozed threads grouped by repository (local-only).
+#[tauri::command]
+pub fn list_snoozed(state: State<'_, AppState>) -> CommandResult<Vec<sync::RepoGroup>> {
+    let conn = lock_conn(&state.db.0)?;
+    Ok(sync::list_snoozed(&conn)?)
+}
+
+/// Hide a thread from the inbox until `until_at` (a UTC `...Z` timestamp computed by the
+/// frontend, which owns the user's local-time semantics). Local-only: nothing is sent to
+/// GitHub.
+#[tauri::command]
+pub fn set_snooze(
+    thread_id: String,
+    until_at: String,
+    state: State<'_, AppState>,
+) -> CommandResult<()> {
+    let conn = lock_conn(&state.db.0)?;
+    sync::snooze_thread(&conn, &thread_id, &until_at)?;
+    Ok(())
+}
+
+/// End a thread's snooze immediately (local-only).
+#[tauri::command]
+pub fn clear_snooze(thread_id: String, state: State<'_, AppState>) -> CommandResult<()> {
+    let conn = lock_conn(&state.db.0)?;
+    sync::unsnooze_thread(&conn, &thread_id)?;
     Ok(())
 }
 

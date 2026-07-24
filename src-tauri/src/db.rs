@@ -426,6 +426,23 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX idx_slo_dips_date
         ON slo_dips(dip_date);
     "#,
+    // v24 — local snooze overlay. A snoozed thread is hidden from the inbox until `until_at`
+    // passes or genuinely new activity lands. Mirrors `notification_dismissals`: local-only
+    // (never synced), no foreign key to `notifications` (rows are pruned explicitly on
+    // reconcile), and the watermark columns snapshot the notification/subject generations the
+    // user had already seen when they snoozed, so a read-only timestamp bump can't wake it.
+    r#"
+    CREATE TABLE IF NOT EXISTS notification_snoozes (
+        thread_id               TEXT PRIMARY KEY,
+        until_at                TEXT NOT NULL,
+        snoozed_at              TEXT NOT NULL,
+        notification_updated_at TEXT,
+        subject_updated_at      TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_notification_snoozes_until
+        ON notification_snoozes(until_at);
+    "#,
 ];
 
 /// Open the database at `db_path`, apply any pending migrations, and return the
@@ -958,7 +975,7 @@ mod tests {
         conn.pragma_update(None, "foreign_keys", "ON").unwrap();
         run_migrations(&conn).unwrap();
 
-        assert_eq!(schema_version(&conn).unwrap(), 23);
+        assert_eq!(schema_version(&conn).unwrap(), MIGRATIONS.len() as i64);
         let tables = table_names(&conn).unwrap();
         assert!(tables.contains(&"slo_dips_repos".to_string()));
         assert!(tables.contains(&"slo_dips_repo_categories".to_string()));

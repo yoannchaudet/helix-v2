@@ -61,6 +61,9 @@ export const FILTERS = {
   assign: { label: "Assigned", match: (n) => n.reason === "assign" },
   cleanup: { label: "Cleanup", match: (n) => isCleanupCandidate(n) },
   bookmarked: { label: "Bookmarks", match: (n) => n.bookmarked },
+  // Draws from its own dataset (`list_snoozed`), so every row in it is by definition snoozed;
+  // the predicate still guards against a row whose deadline lapsed between load and render.
+  snoozed: { label: "Snoozed", match: (n) => Boolean(n.snoozed_until) },
 };
 
 /** Subject-type buckets for the top-of-view type filter (orthogonal to the smart filters
@@ -106,6 +109,7 @@ export const EMPTY_SUBTITLES = {
   assign: "Nothing's assigned to you right now.",
   cleanup: "No stale subscriptions to clean.",
   bookmarked: "No bookmarks yet.",
+  snoozed: "Nothing is snoozed right now.",
 };
 
 /** Notifications in `group` matching the given type filter. */

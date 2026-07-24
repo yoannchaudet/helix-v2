@@ -514,3 +514,350 @@ test("marking done in the Bookmarks filter keeps focus on the same row", async (
   await expect(page.locator("#inbox .n-row")).toHaveCount(1);
   await expect(page.locator('.n-row[data-thread-id="t2"]')).toHaveAttribute("data-done", "true");
 });
+
+/* ---------------------------------- Snooze ---------------------------------- */
+
+test("snoozing a row from the context menu hides it and fills the Snoozed filter", async ({
+  page,
+}) => {
+  await openApp(page);
+
+  await expect(page.locator('.source-count[data-count="snoozed"]')).toHaveText("");
+
+  await page.locator('.n-row[data-thread-id="t2"]').click({ button: "right" });
+  // The durations live in a nested submenu, as in Slack's "Remind me".
+  await page.getByRole("menuitem", { name: "Snooze" }).click();
+  await page.getByRole("menuitem", { name: "In 3 hours" }).click();
+
+  // Hidden from the inbox and subtracted from the All count.
+  await expect(page.locator('.n-row[data-thread-id="t2"]')).toHaveCount(0);
+  await expect(page.locator('.source-count[data-count="all"]')).toHaveText("2");
+  await expect(page.locator('.source-count[data-count="snoozed"]')).toHaveText("1");
+
+  // The Snoozed view shows it with its countdown and a one-click way out.
+  await page.locator('.source[data-filter="snoozed"]').click();
+  await expect(page.locator("#view-title")).toHaveText("Snoozed");
+  await expect(page.locator("#inbox .n-row")).toHaveCount(1);
+  // Wording depends on whether the deadline lands today ("Back in 3h") or crosses midnight
+  // in the runner's timezone ("Back tomorrow 1:00 AM"), so pin the shape, not the words.
+  await expect(page.locator('.n-row[data-thread-id="t2"] .state--snoozed')).toHaveText(/^Back .+/);
+
+  await page.locator('.n-row[data-thread-id="t2"] .n-unsnooze').click();
+  await expect(page.locator("#inbox .n-row")).toHaveCount(0);
+  await expect(page.locator('.source-count[data-count="snoozed"]')).toHaveText("");
+
+  // And it's back in the inbox.
+  await page.locator('#filter-list .source[data-filter="all"]').click();
+  await expect(page.locator("#inbox .n-row")).toHaveCount(3);
+});
+
+test("a snoozed row offers Unsnooze instead of Snooze in its context menu", async ({ page }) => {
+  await openApp(page);
+
+  await page.locator('.n-row[data-thread-id="t2"]').click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Snooze" }).click();
+  await page.getByRole("menuitem", { name: "In 1 hour" }).click();
+
+  await page.locator('.source[data-filter="snoozed"]').click();
+  await page.locator('.n-row[data-thread-id="t2"]').click({ button: "right" });
+  await expect(page.getByRole("menuitem", { name: "Unsnooze" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Snooze", exact: true })).toHaveCount(0);
+});
+
+test("marking a snoozed thread done clears its snooze", async ({ page }) => {
+  await openApp(page);
+
+  await page.locator('.n-row[data-thread-id="t2"]').click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Snooze" }).click();
+  await page.getByRole("menuitem", { name: "Tomorrow" }).click();
+  await expect(page.locator('.source-count[data-count="snoozed"]')).toHaveText("1");
+
+  await page.locator('.source[data-filter="snoozed"]').click();
+  await page.locator('.n-row[data-thread-id="t2"]').hover();
+  await page.locator('.n-row[data-thread-id="t2"] .n-done').click();
+
+  await expect(page.locator('.source-count[data-count="snoozed"]')).toHaveText("");
+  await expect(page.locator("#inbox .n-row")).toHaveCount(0);
+});
+
+test("a snoozed bookmark stays visible in the Bookmarks filter with its deadline", async ({
+  page,
+}) => {
+  await openApp(page);
+
+  await page.locator('.n-row[data-thread-id="t2"]').hover();
+  await page.locator('.n-row[data-thread-id="t2"] .n-bookmark').click();
+  await page.locator('.n-row[data-thread-id="t2"]').click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Snooze" }).click();
+  await page.getByRole("menuitem", { name: "In 20 minutes" }).click();
+
+  await expect(page.locator('.n-row[data-thread-id="t2"]')).toHaveCount(0);
+  await page.locator('.source[data-filter="bookmarked"]').click();
+  await expect(page.locator("#inbox .n-row")).toHaveCount(1);
+  await expect(page.locator('.n-row[data-thread-id="t2"] .state--snoozed')).toBeVisible();
+});
+
+test("the snooze submenu is keyboard-navigable and Escape backs out one level", async ({
+  page,
+}) => {
+  await openApp(page);
+
+  await page.locator('.n-row[data-thread-id="t2"]').click({ button: "right" });
+  const parent = page.getByRole("menuitem", { name: "Snooze" });
+  await parent.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(parent).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByRole("menuitem", { name: "In 20 minutes" })).toBeFocused();
+
+  // Escape closes the submenu but keeps the parent menu open, focus back on the parent item.
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("menuitem", { name: "In 20 minutes" })).toHaveCount(0);
+  await expect(parent).toBeFocused();
+
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".context-menu")).toHaveCount(0);
+  await expect(page.locator("#inbox .n-row")).toHaveCount(3);
+});
+
+test("the s chord snoozes with a digit, and s unsnoozes a snoozed row", async ({ page }) => {
+  await openApp(page);
+
+  // Put the keyboard cursor on t2, then arm the chord: the toolbar explains the digits.
+  await page.locator('.n-row[data-thread-id="t2"] .n-open').focus();
+  await page.keyboard.press("s");
+  await expect(page.locator("#view-notifications .js-sync-progress")).toContainText(
+    "Snooze until…",
+  );
+  await expect(page.locator("#view-notifications .js-sync-progress")).toContainText("3 hours");
+
+  // 3 = "In 3 hours" — the row leaves the inbox and the digit does NOT switch filters.
+  await page.keyboard.press("3");
+  await expect(page.locator('.n-row[data-thread-id="t2"]')).toHaveCount(0);
+  await expect(page.locator("#view-title")).toHaveText("All");
+  await expect(page.locator('.source-count[data-count="snoozed"]')).toHaveText("1");
+
+  // On the Snoozed view, `s` is the inverse: it unsnoozes outright (no duration to pick).
+  await page.locator('.source[data-filter="snoozed"]').click();
+  await page.keyboard.press("j");
+  await page.keyboard.press("s");
+  await expect(page.locator('.source-count[data-count="snoozed"]')).toHaveText("");
+  await expect(page.locator("#inbox .n-row")).toHaveCount(0);
+});
+
+test("an armed snooze chord never lets a digit reach the filter switcher", async ({ page }) => {
+  await openApp(page);
+  const progress = page.locator("#view-notifications .js-sync-progress");
+
+  await page.keyboard.press("j");
+  await page.keyboard.press("s");
+  await expect(progress).toContainText("Snooze until…");
+
+  // 9 isn't one of the durations. The chord cancels, but the digit is still swallowed: it
+  // must NOT fall through and switch filters behind the user's back.
+  await page.keyboard.press("9");
+  await expect(progress).not.toContainText("Snooze until…");
+  await expect(page.locator("#view-title")).toHaveText("All");
+  await expect(page.locator('.source-count[data-count="snoozed"]')).toHaveText("");
+
+  // Same for a digit that IS a filter position (5) but was typed after the chord broke.
+  await page.keyboard.press("s");
+  await expect(progress).toContainText("Snooze until…");
+  await page.keyboard.press("x");
+  await expect(progress).not.toContainText("Snooze until…");
+  await page.keyboard.press("s");
+  await page.keyboard.press("Escape");
+  await expect(progress).not.toContainText("Snooze until…");
+  await expect(page.locator("#view-title")).toHaveText("All");
+
+  // The bare digits still switch filters once the chord is gone.
+  await page.keyboard.press("2");
+  await expect(page.locator("#view-title")).not.toHaveText("All");
+});
+
+test("a click cancels the armed snooze chord, and s without a row says why", async ({ page }) => {
+  await openApp(page);
+  const progress = page.locator("#view-notifications .js-sync-progress");
+
+  // Clicking a sidebar filter while armed disarms the chord, so the click's own keyboard
+  // follow-up can't be mistaken for a duration.
+  await page.locator('.n-row[data-thread-id="t2"] .n-open').focus();
+  await page.keyboard.press("s");
+  await expect(progress).toContainText("Snooze until…");
+  await page.locator(`#filter-list .source[data-filter="mention"]`).click();
+  await expect(progress).not.toContainText("Snooze until…");
+  await page.keyboard.press("5");
+  await expect(page.locator('.source-count[data-count="snoozed"]')).toHaveText("");
+
+  // With no row under the keyboard cursor there is nothing to arm — say so instead of
+  // silently doing nothing (which is what made the next digit look like a filter jump).
+  await page.locator("#sync-btn").focus();
+  await page.keyboard.press("s");
+  await expect(progress).toContainText("Select a notification first");
+});
+
+test("holding s snoozes several rows in a row without the digits hitting filters", async ({
+  page,
+}) => {
+  await openApp(page);
+  const progress = page.locator("#view-notifications .js-sync-progress");
+
+  // Hold `s` as a modifier. After the first digit the OS stops repeating `s`, so nothing
+  // re-arms the chord — the held key alone has to keep the digits bound to snooze.
+  await page.locator('.n-row[data-thread-id="t2"] .n-open').focus();
+  await page.keyboard.down("s");
+  await expect(progress).toContainText("Snooze until…");
+
+  await page.keyboard.press("5");
+  await expect(page.locator('.source-count[data-count="snoozed"]')).toHaveText("1");
+  await expect(page.locator("#view-title")).toHaveText("All");
+
+  // Same held `s`, second digit: another snooze, still not a filter jump.
+  await page.keyboard.press("5");
+  await expect(page.locator('.source-count[data-count="snoozed"]')).toHaveText("2");
+  await expect(page.locator("#view-title")).toHaveText("All");
+
+  // Releasing `s` takes the hold-only re-arm away again, handing the digits back to the
+  // filter switcher and dropping the legend.
+  await page.keyboard.up("s");
+  await expect(progress).not.toContainText("Snooze until…");
+  await page.keyboard.press("2");
+  await expect(page.locator("#view-title")).toHaveText("Mentions");
+});
+
+test("navigating mid-chord snoozes the row the cursor ended on", async ({ page }) => {
+  await openApp(page);
+
+  await page.locator('.n-row[data-thread-id="t1"] .n-open').focus();
+  await page.keyboard.press("s");
+  await page.keyboard.press("j"); // moved on before picking a duration
+  await page.keyboard.press("3");
+
+  // t1 stayed; the row j landed on is the one that got snoozed.
+  await expect(page.locator('.n-row[data-thread-id="t1"]')).toHaveCount(1);
+  await expect(page.locator('.source-count[data-count="snoozed"]')).toHaveText("1");
+});
+
+test("a chord with nothing left to snooze reports it instead of doing nothing", async ({
+  page,
+}) => {
+  await openApp(page);
+  const progress = page.locator("#view-notifications .js-sync-progress");
+
+  // Empty the view (a re-render with no rows parks focus on the list container, not a row).
+  await page.locator('#filter-list .source[data-filter="snoozed"]').click();
+  await expect(page.locator("#inbox .n-row")).toHaveCount(0);
+
+  await page.keyboard.down("s");
+  await expect(progress).toContainText("Select a notification first");
+  await page.keyboard.press("3");
+  await expect(progress).toContainText("Select a notification first");
+  await page.keyboard.up("s");
+
+  // The swallowed digit must not have moved the user, nor snoozed anything.
+  await expect(page.locator("#view-title")).toHaveText("Snoozed");
+  await expect(page.locator('.source-count[data-count="snoozed"]')).toHaveText("");
+});
+
+test("losing the window fully cancels an armed chord", async ({ page }) => {
+  await openApp(page);
+  const progress = page.locator("#view-notifications .js-sync-progress");
+
+  await page.locator('.n-row[data-thread-id="t2"] .n-open').focus();
+  await page.keyboard.down("s");
+  await expect(progress).toContainText("Snooze until…");
+
+  // The `s` keyup would land in whatever app the user switched to, so blur has to drop the
+  // whole chord — otherwise it waits around to eat the first digit typed on return.
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+  await page.keyboard.up("s");
+  await expect(progress).not.toContainText("Snooze until…");
+
+  await page.keyboard.press("2");
+  await expect(page.locator('.source-count[data-count="snoozed"]')).toHaveText("");
+  await expect(page.locator("#view-title")).toHaveText("Mentions");
+});
+
+test("Escape cancels the chord even while s is still held down", async ({ page }) => {
+  await openApp(page);
+  const progress = page.locator("#view-notifications .js-sync-progress");
+
+  await page.locator('.n-row[data-thread-id="t2"] .n-open').focus();
+  await page.keyboard.down("s");
+  await page.keyboard.press("Escape");
+  await expect(progress).not.toContainText("Snooze until…");
+
+  // The held key must not quietly resurrect the chord: the digit snoozes nothing, and is
+  // still swallowed rather than switching filters.
+  await page.keyboard.press("3");
+  await expect(progress).toContainText("release s first");
+  await expect(page.locator('.source-count[data-count="snoozed"]')).toHaveText("");
+  await expect(page.locator("#view-title")).toHaveText("All");
+
+  // Releasing and pressing `s` again is a fresh start.
+  await page.keyboard.up("s");
+  await page.keyboard.press("s");
+  await expect(progress).toContainText("Snooze until…");
+  await page.keyboard.press("3");
+  await expect(page.locator('.source-count[data-count="snoozed"]')).toHaveText("1");
+});
+
+test("a background reload that drops the armed row retires the chord", async ({ page }) => {
+  await openApp(page);
+  const progress = page.locator("#view-notifications .js-sync-progress");
+
+  await page.locator('.n-row[data-thread-id="t2"] .n-open').focus();
+  await page.keyboard.press("s");
+  await expect(progress).toContainText("Snooze until…");
+
+  // The armed thread goes away underneath the chord (marked done with `d` here — a click
+  // would cancel the chord on pointerdown — but a background sync reconcile that drops the
+  // row looks the same to the list).
+  await page.keyboard.press("d");
+  await expect(page.locator('.n-row[data-thread-id="t2"]')).toHaveCount(0);
+  await expect(progress).not.toContainText("Snooze until…");
+
+  // The chord is gone, so digits belong to the filter switcher again.
+  await page.keyboard.press("2");
+  await expect(page.locator("#view-title")).toHaveText("Mentions");
+  await expect(page.locator('.source-count[data-count="snoozed"]')).toHaveText("");
+});
+
+test("arrow keys follow the focused menu, not a submenu opened by hover", async ({ page }) => {
+  await openApp(page);
+
+  await page.locator('.n-row[data-thread-id="t2"]').click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Copy URL" }).focus();
+
+  // Hovering the parent opens the submenu, but focus is still in the root menu.
+  await page.getByRole("menuitem", { name: "Snooze" }).hover();
+  await expect(page.getByRole("menuitem", { name: "In 20 minutes" })).toBeVisible();
+
+  // ArrowDown must therefore walk the root menu, not the hovered submenu.
+  await page.keyboard.press("ArrowDown");
+  await expect(page.getByRole("menuitem", { name: "Open repository" })).toBeFocused();
+
+  // And ArrowRight from the focused parent still enters the submenu.
+  await page.keyboard.press("ArrowDown");
+  await expect(page.getByRole("menuitem", { name: "Bookmark", exact: true })).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowRight");
+  await expect(page.getByRole("menuitem", { name: "In 20 minutes" })).toBeFocused();
+});
+
+test("snoozing in the Bookmarks filter keeps focus on the row, which stays put", async ({
+  page,
+}) => {
+  await openApp(page);
+
+  await page.locator('.n-row[data-thread-id="t2"]').hover();
+  await page.locator('.n-row[data-thread-id="t2"] .n-bookmark').click();
+  await page.keyboard.press("7"); // Bookmarks filter (keyboard → focuses first row)
+  await expect(page.locator('.n-row[data-thread-id="t2"] .n-open')).toBeFocused();
+
+  // A bookmark is an explicit "keep this in front of me", so the row survives the snooze —
+  // and focus must not hop to a neighbour as it does when a row really vanishes.
+  await page.keyboard.press("s");
+  await page.keyboard.press("3");
+  await expect(page.locator('.n-row[data-thread-id="t2"] .state--snoozed')).toBeVisible();
+  await expect(page.locator('.n-row[data-thread-id="t2"] .n-open')).toBeFocused();
+});

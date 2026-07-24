@@ -1368,6 +1368,7 @@ code,
 .n-done,
 .repo-done,
 .n-bookmark,
+.n-unsnooze,
 .dep-merge-action,
 .dep-discard-action,
 .dep-operation-cancel,
@@ -1412,6 +1413,29 @@ code,
   width: var(--control-icon-md);
   height: var(--control-icon-md);
   margin-right: var(--space-10);
+}
+
+/* The way out of a snooze. Unlike the hover-revealed row actions this is always visible:
+   it's the primary action of the Snoozed view, and the row is otherwise inert there. */
+.n-unsnooze {
+  width: var(--control-icon-md);
+  height: var(--control-icon-md);
+  margin-right: var(--space-10);
+  opacity: 1;
+  pointer-events: auto;
+  color: var(--pending);
+}
+
+.n-unsnooze:hover {
+  color: var(--accent-strong);
+  background: var(--surface-hover);
+}
+
+.n-unsnooze:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .dep-merge-action,
@@ -2748,6 +2772,11 @@ input[type="text"]:focus {
   color: var(--muted);
   background: rgba(var(--neutral-rgb), 0.12);
 }
+/* A pending "comes back later" state, so it follows the yellow convention. */
+.state--snoozed {
+  color: var(--pending);
+  background: rgba(var(--pending-rgb), 0.12);
+}
 
 /* PR merge-readiness pill (open PRs only). Green = ready, amber = needs attention
    (checks/reviews/out-of-date), red = conflicts, muted = draft. */
@@ -2882,6 +2911,31 @@ input[type="text"]:focus {
   color: var(--muted);
   opacity: 0.55;
   cursor: default;
+}
+
+/* An item that opens a nested popover (e.g. Snooze ›): the chevron is pushed to the right
+ * edge, mirroring a native macOS submenu affordance. */
+.context-menu-item--parent {
+  justify-content: space-between;
+  gap: var(--space-8);
+}
+
+.context-menu-chevron {
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1;
+}
+
+.context-menu-item--parent:hover:not(:disabled) .context-menu-chevron,
+.context-menu-item--parent:focus-visible:not(:disabled) .context-menu-chevron,
+.context-menu-item--parent[aria-expanded="true"] .context-menu-chevron {
+  color: inherit;
+}
+
+/* Keep the parent item highlighted while its submenu is open, so the trail is obvious. */
+.context-menu-item--parent[aria-expanded="true"] {
+  background: var(--accent-tint);
+  color: var(--accent-strong);
 }
 
 .context-menu-sep {

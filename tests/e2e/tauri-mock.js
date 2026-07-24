@@ -31,6 +31,8 @@ export function installTauriMock(fixtures) {
     sloDips: JSON.parse(JSON.stringify(fixtures.sloDips ?? [])),
     sloDipsInspectDelayMs: fixtures.sloDipsInspectDelayMs ?? 0,
     lastModule: fixtures.lastModule ?? null,
+    // thread_id -> UTC deadline, mirroring the `notification_snoozes` table.
+    snoozes: new Map(Object.entries(fixtures.snoozes ?? {})),
     // When true, `get_dependabot_merge_operation_detail` calls don't resolve on their own —
     // they queue in `pendingDetailCalls` for a spec to resolve explicitly (in any order) via
     // `window.__mockResolvePendingDetail`. Lets a spec exercise the "a stale detail response
@@ -129,7 +131,17 @@ export function installTauriMock(fixtures) {
     state.sloDips = JSON.parse(JSON.stringify(dips));
   };
 
-  const countAll = () => state.inbox.reduce((sum, g) => sum + g.notifications.length, 0);
+  const countAll = () =>
+    state.inbox.reduce(
+      (sum, g) => sum + g.notifications.filter((n) => !activeSnooze(n.thread_id)).length,
+      0,
+    );
+  /** A thread's snooze deadline if it hasn't lapsed yet, else null (the backend evaluates
+   *  expiry at query time the same way). */
+  const activeSnooze = (threadId) => {
+    const until = state.snoozes.get(threadId);
+    return until && new Date(until) > new Date() ? until : null;
+  };
   const withCollapsedState = (groups) =>
     groups.map((group) => ({
       ...group,
@@ -256,7 +268,15 @@ export function installTauriMock(fixtures) {
       return null;
     },
 
-    list_inbox: () => JSON.parse(JSON.stringify(withCollapsedState(state.inbox))),
+    list_inbox: () => {
+      const groups = state.inbox
+        .map((g) => ({
+          ...g,
+          notifications: g.notifications.filter((n) => !activeSnooze(n.thread_id)),
+        }))
+        .filter((g) => g.notifications.length);
+      return JSON.parse(JSON.stringify(withCollapsedState(groups)));
+    },
     list_bookmarks: () => {
       // is_done is derived: a bookmark not present in the live inbox is done/removed.
       const inboxIds = new Set(state.inbox.flatMap((g) => g.notifications.map((n) => n.thread_id)));
@@ -265,6 +285,7 @@ export function installTauriMock(fixtures) {
         notifications: g.notifications.map((n) => ({
           ...n,
           is_done: !inboxIds.has(n.thread_id),
+          snoozed_until: activeSnooze(n.thread_id),
         })),
       }));
       return JSON.parse(JSON.stringify(withCollapsedState(groups)));
@@ -540,7 +561,31 @@ export function installTauriMock(fixtures) {
           notifications: g.notifications.filter((n) => !ids.has(n.thread_id)),
         }))
         .filter((g) => g.notifications.length);
+      // Done supersedes snoozed, as in the backend.
+      for (const id of ids) state.snoozes.delete(id);
       return { ok: threadIds.length, failed: [] };
+    },
+
+    // Snooze is a local visibility overlay: `list_inbox` hides an active snooze, `list_snoozed`
+    // projects the same rows with their deadline, and `list_bookmarks` shows it either way.
+    set_snooze: ({ threadId, untilAt }) => {
+      state.snoozes.set(threadId, untilAt);
+      return null;
+    },
+    clear_snooze: ({ threadId }) => {
+      state.snoozes.delete(threadId);
+      return null;
+    },
+    list_snoozed: () => {
+      const groups = state.inbox
+        .map((g) => ({
+          ...g,
+          notifications: g.notifications
+            .filter((n) => activeSnooze(n.thread_id))
+            .map((n) => ({ ...n, snoozed_until: activeSnooze(n.thread_id) })),
+        }))
+        .filter((g) => g.notifications.length);
+      return JSON.parse(JSON.stringify(withCollapsedState(groups)));
     },
   };
 
@@ -581,7 +626,7 @@ export function defaultFixtures() {
     },
     db: {
       path: "/Users/test/Library/Application Support/helix/helix.db",
-      schema_version: 23,
+      schema_version: 24,
       tables: [
         "bookmarks",
         "collapsed_notification_repos",
@@ -593,6 +638,7 @@ export function defaultFixtures() {
         "dependabot_prs",
         "dependabot_repos",
         "done_tombstones",
+        "notification_snoozes",
         "notifications",
         "rate_limits",
         "repos",

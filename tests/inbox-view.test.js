@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   subjectBadge,
+  snoozePill,
   stateBadge,
   notificationRow,
   repoHeader,
@@ -315,4 +316,24 @@ test("typeFilterBar reflects the selected Set via aria-pressed and .is-on", () =
   assert.match(out, /class="type-pill is-on" data-type="pr" aria-pressed="true"/);
   assert.match(out, /class="type-pill" data-type="issue" aria-pressed="false"/);
   assert.match(out, /class="type-pill" data-type="other" aria-pressed="false"/);
+});
+
+test("notificationRow shows the snooze pill + unsnooze action only when snoozed", () => {
+  const until = new Date(Date.now() + 3 * 3600_000).toISOString();
+  const snoozed = notificationRow({ ...baseNotification, snoozed_until: until });
+  assert.ok(snoozed.includes("n-row--snoozed"));
+  assert.ok(snoozed.includes("state--snoozed"));
+  assert.ok(snoozed.includes("n-unsnooze"));
+  assert.ok(snoozed.includes(`data-snoozed-until="${until}"`));
+
+  const plain = notificationRow(baseNotification);
+  assert.ok(!plain.includes("n-row--snoozed"));
+  assert.ok(!plain.includes("state--snoozed"));
+  assert.ok(!plain.includes("n-unsnooze"));
+});
+
+test("snoozePill falls back to the raw value when the deadline can't be parsed", () => {
+  const html = snoozePill("not-a-timestamp");
+  assert.match(html, /Snoozed until not-a-timestamp/);
+  assert.ok(!html.includes("Invalid Date"));
 });

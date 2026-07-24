@@ -195,6 +195,16 @@ CREATE TABLE bookmarks (                  -- local-only; snapshot survives done/
   updated_at       TEXT,
   bookmarked_at    TEXT NOT NULL
 );
+
+-- Local snooze overlay: hides a thread from the inbox until its deadline passes or genuinely
+-- new activity arrives. Same watermark discipline as `notification_dismissals`.
+CREATE TABLE notification_snoozes (
+  thread_id                TEXT PRIMARY KEY,
+  until_at                 TEXT NOT NULL,  -- UTC deadline; expiry is evaluated on read
+  snoozed_at               TEXT NOT NULL,  -- local watermark floor
+  notification_updated_at  TEXT,           -- remote notification generation at snooze time
+  subject_updated_at       TEXT            -- resolved subject generation at snooze time
+);
 ```
 
 > **Bookmarks** are a local, never-synced overlay: bookmarking snapshots the thread's
@@ -202,6 +212,16 @@ CREATE TABLE bookmarks (                  -- local-only; snapshot survives done/
 > GitHub's list. Snapshots refresh from the inbox on each sync while the thread is present.
 > Done-ness is derived on read (`notification_dismissals` contains the thread, or the mirrored
 > notification is absent), so a done bookmark simply hides its mark-as-done button.
+
+> **Snooze** is likewise local and never synced. A snoozed thread is hidden from the inbox
+> (and from every smart filter except Bookmarks, where it shows with its deadline) until either
+> `until_at` passes — evaluated at query time, so it works across restarts — or the thread wakes
+> on genuinely new activity, using the same rule as a dismissal reactivation (a new *unread*
+> generation strictly past the watermark, or a newer resolved subject timestamp for a thread
+> read outside Helix). A woken thread is flagged `is_new` so it returns highlighted. Marking a
+> thread done clears its snooze, and snoozes are pruned when their notification is reconciled
+> away. Deadlines come from a fixed set of durations (20 minutes / 1 hour / 3 hours / tomorrow
+> 09:00 / next Monday 09:00) computed in the user's local time by the frontend and stored as UTC.
 
 > Remote `unread` is synchronization metadata only. It never controls ordinary inbox
 > visibility: Helix still shows read notifications until they are marked *done*. It is retained
@@ -382,8 +402,8 @@ module's **sidebar + content** split:
   picker**, the **Helix** wordmark, and the **Settings** gear (`⌘,`).
 - **Sidebar** (`NSVisualEffect` *Sidebar* vibrancy via the `window-vibrancy` crate),
   **module-scoped**: for Notifications it shows the cross-cutting smart filters (**All**,
-  **Mentions**, **Team mentions**, **Review requests**, **Assigned**, **Cleanup**) with live
-  counts and a **Repositories** list of selectable sources. Selection is single-active (a
+  **Mentions**, **Team mentions**, **Review requests**, **Assigned**, **Cleanup**,
+  **Bookmarks**, **Snoozed**) with live counts and a **Repositories** list of selectable sources. Selection is single-active (a
   smart filter *or* a repository), Mail-style. Bot PRs uses the same shell for **All**,
   **Operations**, and repository refinement.
 - **Content pane:** an opaque pane with a **toolbar** below the chrome showing the active
@@ -396,13 +416,28 @@ module's **sidebar + content** split:
   headers** (repo name, private badge, notification count), each listing its notifications with
   subject type (PR/Issue), number, title, reason, and state label. Hairline row separators.
   Once a row's subject is resolved, clicking (or pressing Enter on) it opens the subject in
-  the browser; a right-click context menu offers **Copy URL** and **Mark as done**.
+  the browser; a right-click context menu offers **Copy URL**, **Open repository**,
+  **Bookmark**, **Snooze** (a nested submenu of fixed durations, or **Unsnooze** on an
+  already-snoozed row), and **Mark as done**.
   Each repository header has an accessible collapse toggle. Collapse is presentation-only:
   the filtered count and bulk mark-done behavior still include hidden rows. The preference is
   persisted locally in `collapsed_notification_repos`, keyed by repository full name without a
   `repos` foreign key so it survives app restarts and repositories temporarily leaving the inbox;
   the same state applies in smart filters, repository refinement, Bookmarks, Bot PRs, and Bot PR
   merge Operations.
+- **Snoozed:** the **Snoozed** sidebar filter lists the hidden threads soonest-waking first,
+  each showing when it comes back plus a one-click **Unsnooze**. The view refreshes itself when
+  the next deadline lapses, so a returning notification doesn't wait for the next poll.
+  Keyboard parity with the menu is an `s` chord: `s` on the focused row arms the snooze (the
+  toolbar shows the digit legend), then `1`–`5` picks the duration; `s` on an already-snoozed
+  row unsnoozes it. It works both tapped (`s`, release, digit) and held (`s` held as a
+  modifier while tapping digits, each snoozing the row under the cursor) because users mix the
+  two. The chord targets a thread id captured when it is armed, not whatever has focus when the
+  digit lands, because snoozing re-renders the list and a re-render can park focus on the list
+  container rather than a row. It exists because bare digits are the filter switcher — so while
+  it is armed (or `s` is held) it swallows *every* digit, even one with no matching duration,
+  never expires on a timer, and always reports why it couldn't act. Anything less lets a digit
+  silently jump filters or do nothing at all.
 - **Cleanup:** the **Cleanup** sidebar filter (§6) reuses the same by-repo list, narrowed to
   candidates; clearing them is the toolbar ••• "Mark all as done" flow with live progress.
 - **Settings:** an in-app pane (reached from the sidebar or `⌘,`) for PAT entry, the poll
