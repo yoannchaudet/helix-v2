@@ -4,6 +4,8 @@ import { openApp, emptyFixtures, defaultFixtures } from "./tauri-mock.js";
 /* Inbox flows against mocked data: rendering, the smart filters + repo refinement, and the
  * three mark-done paths (per-row, bulk-confirm, context menu). */
 
+test.use({ permissions: ["clipboard-read", "clipboard-write"] });
+
 test("a manual sync stays busy through resolution, then re-enables the controls", async ({
   page,
 }) => {
@@ -284,6 +286,44 @@ test("the bulk confirm popover can be dismissed without marking anything", async
 
   await expect(page.locator(".context-menu")).toHaveCount(0);
   await expect(page.locator("#inbox .n-row")).toHaveCount(3);
+});
+
+test("right-clicking a repo copies its notification URLs as a list", async ({ page }) => {
+  await openApp(page);
+
+  const header = page.getByRole("heading", { name: "octo/hello" }).locator("..");
+  await header.click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Copy notification URLs" }).click();
+
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe("- https://github.com/octo/hello/pull/12\n- https://github.com/octo/hello/issues/7");
+});
+
+test("repo URL copying uses the active filter and leaves one URL bare", async ({ page }) => {
+  await openApp(page);
+
+  await page.locator('.source[data-filter="review_requested"]').click();
+  const header = page.getByRole("heading", { name: "octo/hello" }).locator("..");
+  await header.click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Copy notification URLs" }).click();
+
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe("https://github.com/octo/hello/pull/12");
+});
+
+test("repo URL copying is disabled when no filtered notification has a URL", async ({ page }) => {
+  const fx = defaultFixtures();
+  fx.inbox[0].notifications.forEach((notification) => {
+    notification.subject_html_url = null;
+  });
+  await openApp(page, fx);
+
+  const header = page.getByRole("heading", { name: "octo/hello" }).locator("..");
+  await header.click({ button: "right" });
+
+  await expect(page.getByRole("menuitem", { name: "Copy notification URLs" })).toBeDisabled();
 });
 
 test("right-click offers Copy URL + Mark as done; Mark as done removes the row", async ({

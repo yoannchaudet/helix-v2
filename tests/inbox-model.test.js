@@ -14,7 +14,32 @@ import {
   TYPE_FILTERS,
   typeMatch,
   filterGroupsByType,
+  notificationUrlsText,
 } from "../src/js/inbox-model.js";
+
+/* ---------------------------- notificationUrlsText ---------------------------- */
+
+test("notificationUrlsText omits missing URLs and preserves display order", () => {
+  assert.equal(
+    notificationUrlsText([
+      { subject_html_url: "https://github.com/o/r/pull/1" },
+      { subject_html_url: null },
+      { subject_html_url: "https://github.com/o/r/issues/2" },
+    ]),
+    "- https://github.com/o/r/pull/1\n- https://github.com/o/r/issues/2",
+  );
+});
+
+test("notificationUrlsText leaves a single URL bare and returns empty text for none", () => {
+  assert.equal(
+    notificationUrlsText([
+      { subject_html_url: null },
+      { subject_html_url: "https://github.com/o/r/pull/1" },
+    ]),
+    "https://github.com/o/r/pull/1",
+  );
+  assert.equal(notificationUrlsText([{ subject_html_url: null }]), "");
+});
 
 /* ------------------------------ isAwaitingState ------------------------------ */
 // A PR/Issue pulled but not yet resolved (no subject_state) drives the striped "loading" cue.
