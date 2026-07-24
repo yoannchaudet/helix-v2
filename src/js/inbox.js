@@ -592,18 +592,21 @@ async function toggleRepoCollapsed(btn) {
  *  time instead of waiting for the next poll. */
 let snoozeWakeTimer = null;
 
-/** (Re)arm the wake timer for the soonest active deadline. Clamped to at least a second (a
- *  deadline can be in the past between a load and its render) and capped at a minute, so a
- *  long snooze doesn't rely on one enormous, drift-prone timeout. */
+/** (Re)arm the wake timer for the soonest active deadline: one timer aimed at that moment,
+ *  rather than a poll, so a week-long snooze costs nothing until it's due. Clamped to at
+ *  least a second (a deadline can be in the past between a load and its render) and to the
+ *  largest delay `setTimeout` can represent. */
 function scheduleSnoozeWake() {
   clearTimeout(snoozeWakeTimer);
   snoozeWakeTimer = null;
-  const deadlines = snoozeGroups
+  // Reduced rather than spread into `Math.min`, which blows the stack on a big enough list.
+  const soonest = snoozeGroups
     .flatMap((g) => g.notifications)
     .map((n) => new Date(n.snoozed_until).getTime())
-    .filter((t) => Number.isFinite(t));
-  if (!deadlines.length) return;
-  const delay = Math.min(Math.max(Math.min(...deadlines) - Date.now(), 1000), 60_000);
+    .filter((t) => Number.isFinite(t))
+    .reduce((min, t) => (t < min ? t : min), Infinity);
+  if (!Number.isFinite(soonest)) return;
+  const delay = Math.min(Math.max(soonest - Date.now(), 1000), 2 ** 31 - 1);
   snoozeWakeTimer = setTimeout(() => {
     snoozeWakeTimer = null;
     // A no-op reload if nothing actually expired; it also re-arms the timer.

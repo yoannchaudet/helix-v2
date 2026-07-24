@@ -821,3 +821,25 @@ test("a background reload that drops the armed row retires the chord", async ({ 
   await expect(page.locator("#view-title")).toHaveText("Mentions");
   await expect(page.locator('.source-count[data-count="snoozed"]')).toHaveText("");
 });
+
+test("arrow keys follow the focused menu, not a submenu opened by hover", async ({ page }) => {
+  await openApp(page);
+
+  await page.locator('.n-row[data-thread-id="t2"]').click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Copy URL" }).focus();
+
+  // Hovering the parent opens the submenu, but focus is still in the root menu.
+  await page.getByRole("menuitem", { name: "Snooze" }).hover();
+  await expect(page.getByRole("menuitem", { name: "In 20 minutes" })).toBeVisible();
+
+  // ArrowDown must therefore walk the root menu, not the hovered submenu.
+  await page.keyboard.press("ArrowDown");
+  await expect(page.getByRole("menuitem", { name: "Open repository" })).toBeFocused();
+
+  // And ArrowRight from the focused parent still enters the submenu.
+  await page.keyboard.press("ArrowDown");
+  await expect(page.getByRole("menuitem", { name: "Bookmark", exact: true })).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowRight");
+  await expect(page.getByRole("menuitem", { name: "In 20 minutes" })).toBeFocused();
+});

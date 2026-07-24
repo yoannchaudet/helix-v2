@@ -75,20 +75,23 @@ function onMenuKeydown(e) {
     return;
   }
   if (!openMenu) return;
-  // Arrow keys act on whichever popover currently holds focus.
-  const surface = openSubmenu ?? openMenu;
+  // Arrow keys act on the popover that actually holds focus — not simply the deepest one
+  // open, since hovering a parent item opens its submenu while focus stays in the root menu.
+  const focused = document.activeElement;
+  const surface = openSubmenu?.contains(focused) ? openSubmenu : openMenu;
   const items = [...surface.querySelectorAll(".context-menu-item:not(:disabled)")];
   if (!items.length) return;
-  const idx = items.indexOf(document.activeElement);
+  const idx = items.indexOf(focused);
   // ARIA submenu semantics: Right opens/enters a submenu, Left leaves it.
-  if (e.key === "ArrowRight" && !openSubmenu) {
+  if (e.key === "ArrowRight" && surface === openMenu) {
+    // Retargets when a *different* item's submenu is already open (e.g. via hover).
     if (items[idx]?.dataset.submenu === "true") {
       e.preventDefault();
       openSubmenuFor(items[idx], true);
     }
     return;
   }
-  if (e.key === "ArrowLeft" && openSubmenu) {
+  if (e.key === "ArrowLeft" && surface === openSubmenu) {
     e.preventDefault();
     closeSubmenu(true);
     return;
