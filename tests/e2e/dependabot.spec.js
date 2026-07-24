@@ -29,6 +29,9 @@ test("lists open automation PRs grouped by repository", async ({ page }) => {
   await expect(page.locator('#dependabot .n-row[data-pr-id="101"]')).toContainText(
     "github-actions",
   );
+  const botAvatar = page.locator('#dependabot .n-row[data-pr-id="101"] .n-author-avatar--bot');
+  await expect(botAvatar).toBeVisible();
+  await expect(botAvatar.locator("svg")).toHaveCount(1);
   await expect(page.locator('#dependabot .n-row[data-pr-id="102"]')).toContainText(
     "release-controller",
   );

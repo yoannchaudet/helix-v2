@@ -7,10 +7,10 @@ import {
   notificationRow,
   repoHeader,
   repoSection,
-  authorTag,
   mergeStateBadge,
   typeFilterBar,
 } from "../src/js/inbox-view.js";
+import { authorTag } from "../src/js/ui.js";
 
 /* These render pure HTML strings, so they're unit-testable without a DOM. The most
  * important property is that every interpolated field is HTML-escaped (the rows display
@@ -203,16 +203,21 @@ test("notificationRow shows the subject author only when present, and escapes it
 test("authorTag renders a person plainly (no bot icon)", () => {
   const tag = authorTag("octocat");
   assert.ok(tag.includes('class="n-author"'));
+  assert.ok(tag.includes('class="n-author-avatar"'));
+  assert.ok(tag.includes('src="https://github.com/octocat.png?size=32"'));
+  assert.ok(tag.includes('alt=""'));
+  assert.ok(tag.includes('width="16" height="16" loading="lazy"'));
   assert.ok(!tag.includes("n-author--bot"));
   assert.ok(!tag.includes("n-bot-icon"));
   assert.ok(tag.includes(">octocat</span>"));
   assert.ok(tag.includes('title="Author: octocat"'));
 });
 
-test("authorTag flags a [bot] login, strips the suffix, and adds a robot icon", () => {
+test("authorTag flags a [bot] login, strips the suffix, and uses a robot avatar", () => {
   const tag = authorTag("dependabot[bot]");
   assert.ok(tag.includes("n-author--bot"));
-  assert.ok(tag.includes('class="n-bot-icon"'));
+  assert.ok(tag.includes("n-author-avatar--bot"));
+  assert.ok(!tag.includes("<img"));
   assert.ok(tag.includes("<svg"));
   // The visible name drops the [bot] suffix...
   assert.ok(tag.includes(">dependabot</span>"));
@@ -230,7 +235,12 @@ test("authorTag escapes the login (including for bots)", () => {
   const tag = authorTag("<x>[bot]");
   assert.ok(!tag.includes("<x>"), "raw HTML must not appear unescaped");
   assert.ok(tag.includes("&lt;x&gt;"));
-  assert.ok(tag.includes("n-bot-icon"));
+  assert.ok(tag.includes("n-author-avatar--bot"));
+});
+
+test("authorTag URL-encodes the avatar login", () => {
+  const tag = authorTag("a/b");
+  assert.ok(tag.includes("https://github.com/a%2Fb.png?size=32"));
 });
 
 test("notificationRow gives the done button a per-row accessible name", () => {

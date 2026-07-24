@@ -8,11 +8,8 @@ export function dipStatus(dip) {
   return dip.investigated ? "investigated" : "pending";
 }
 
-/** Public GitHub avatar URL for a login, sized for a table row. Uses the `github.com/{login}.png`
- *  redirect (whitelisted in our CSP) so no extra API call is needed. */
-export function avatarUrl(login, size = 32) {
-  return `https://github.com/${encodeURIComponent(String(login))}.png?size=${size}`;
-}
+// Kept as a re-export for existing SLO callers; avatar URL construction is shared by all modules.
+export { avatarUrl } from "./github.js";
 
 /** Format a raw percentage number for display, trimming floating-point noise to at most three
  *  decimals (the precision the SLO bot posts). e.g. `99.967` → `"99.967%"`, `99.99` → `"99.99%"`. */

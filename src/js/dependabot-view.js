@@ -6,8 +6,8 @@
 
 import { html, rawHtml } from "./dom.js";
 import { relTime } from "./format.js";
-import { iconButton, pill } from "./ui.js";
-import { authorTag, mergeStateBadge } from "./inbox-view.js";
+import { authorTag, iconButton, pill } from "./ui.js";
+import { mergeStateBadge } from "./inbox-view.js";
 import {
   buildOperationDetailModel,
   isActiveMergeOperation,

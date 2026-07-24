@@ -56,6 +56,9 @@ test("prRow shows and escapes the target branch, but tolerates legacy rows", () 
 test("prRow marks a bot author and drops the [bot] suffix", () => {
   const row = prRow(basePr);
   assert.ok(row.includes("n-author--bot"));
+  assert.ok(row.includes("n-author-avatar"));
+  assert.ok(row.includes("n-author-avatar--bot"));
+  assert.ok(!row.includes("https://github.com/dependabot%5Bbot%5D.png"));
   assert.ok(row.includes("dependabot"));
   assert.ok(!row.includes("dependabot[bot]</span>"));
 

@@ -31,6 +31,12 @@ test("renders the inbox grouped by repo with sidebar counts", async ({ page }) =
   await expect(page.locator("#inbox .repo-section")).toHaveCount(2);
   await expect(page.locator("#inbox .n-row")).toHaveCount(3);
   await expect(page.locator("#view-title")).toHaveText("All");
+  const author = page.locator('.n-row[data-thread-id="t1"] .n-author');
+  await expect(author).toContainText("octocat");
+  await expect(author.locator(".n-author-avatar")).toHaveAttribute(
+    "src",
+    "https://github.com/octocat.png?size=32",
+  );
 
   // Smart-filter counts reflect the fixture (all=3, mention=1, review=1, assign=1, cleanup=1).
   await expect(page.locator('.source-count[data-count="all"]')).toHaveText("3");
