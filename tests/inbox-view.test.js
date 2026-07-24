@@ -316,3 +316,17 @@ test("typeFilterBar reflects the selected Set via aria-pressed and .is-on", () =
   assert.match(out, /class="type-pill" data-type="issue" aria-pressed="false"/);
   assert.match(out, /class="type-pill" data-type="other" aria-pressed="false"/);
 });
+
+test("notificationRow shows the snooze pill + unsnooze action only when snoozed", () => {
+  const until = new Date(Date.now() + 3 * 3600_000).toISOString();
+  const snoozed = notificationRow({ ...baseNotification, snoozed_until: until });
+  assert.ok(snoozed.includes("n-row--snoozed"));
+  assert.ok(snoozed.includes("state--snoozed"));
+  assert.ok(snoozed.includes("n-unsnooze"));
+  assert.ok(snoozed.includes(`data-snoozed-until="${until}"`));
+
+  const plain = notificationRow(baseNotification);
+  assert.ok(!plain.includes("n-row--snoozed"));
+  assert.ok(!plain.includes("state--snoozed"));
+  assert.ok(!plain.includes("n-unsnooze"));
+});

@@ -413,3 +413,16 @@ test("filterGroupsByType does not mutate the input groups (deep)", () => {
   filterGroupsByType(input, new Set(["pr"]));
   assert.deepEqual(input, snapshot);
 });
+
+test("the snoozed filter matches only rows carrying a deadline", () => {
+  const until = "2099-01-01T00:00:00Z";
+  assert.equal(FILTERS.snoozed.match({ snoozed_until: until }), true);
+  assert.equal(FILTERS.snoozed.match({ snoozed_until: null }), false);
+  assert.equal(FILTERS.snoozed.match({}), false);
+});
+
+test("every filter has an empty-state subtitle", () => {
+  for (const id of Object.keys(FILTERS)) {
+    assert.equal(typeof EMPTY_SUBTITLES[id], "string", `missing subtitle for ${id}`);
+  }
+});

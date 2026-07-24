@@ -12,6 +12,7 @@ import {
   notificationUrlsText,
 } from "./inbox-model.js";
 import { repoSection, typeFilterBar } from "./inbox-view.js";
+import { SNOOZE_OPTIONS, SNOOZE_HINT, snoozeUntil } from "./snooze-model.js";
 import { sourceButton } from "./ui.js";
 import { openContextMenu, closeMenu, isMenuOpen, menuContains } from "./menu.js";
 import { isAuthenticated } from "./account.js";
@@ -50,6 +51,9 @@ let inboxGroups = [];
 /** Bookmarked notifications (snapshot, independent of the inbox lifecycle), loaded
  *  alongside the inbox. Powers the "Bookmarks" filter and its sidebar count. */
 let bookmarkGroups = [];
+/** Currently-snoozed notifications (own snapshot, hidden from every other filter). Powers
+ *  the "Snoozed" filter and its sidebar count. */
+let snoozeGroups = [];
 /** Active notification-type filter (always set); one of the FILTERS keys. */
 let activeFilter = "all";
 /** Optional repository refinement: a repo_id, or null for "all repositories". */
@@ -61,12 +65,14 @@ let selectedTypes = new Set(TYPE_FILTERS.map((t) => t.id));
 /** Whether notifications should be reloaded next time the module becomes active. */
 let inboxStale = true;
 
-/** The dataset the active filter draws from: bookmarks come from their own snapshot (so
- *  done/removed ones still show); every other filter draws from the live inbox. The active
- *  type-pill selection pre-filters whichever dataset is chosen. */
+/** The dataset the active filter draws from: bookmarks and snoozed rows come from their own
+ *  snapshots (so hidden/done ones still show); every other filter draws from the live inbox.
+ *  The active type-pill selection pre-filters whichever dataset is chosen. */
 let typeFilterMemo = { base: null, sig: "", result: null };
 function currentGroups() {
-  const base = activeFilter === "bookmarked" ? bookmarkGroups : inboxGroups;
+  let base = inboxGroups;
+  if (activeFilter === "bookmarked") base = bookmarkGroups;
+  else if (activeFilter === "snoozed") base = snoozeGroups;
   // `selectedTypes` is mutated in place, so key the memo on its contents (not identity)
   // plus the base dataset reference (reassigned on reload).
   const sig = TYPE_FILTERS.map((t) => (selectedTypes.has(t.id) ? "1" : "0")).join("");
@@ -252,6 +258,7 @@ function renderInbox() {
       inbox.tabIndex = -1;
       inbox.focus({ preventScroll: focusTarget === preserved });
     }
+    reconcileArmedSnooze();
     return;
   }
   inbox.innerHTML = groups.map(repoSection).join("");
@@ -274,6 +281,7 @@ function renderInbox() {
       }
     }
   }
+  reconcileArmedSnooze();
 }
 
 /* Inline-SVG icons for the sidebar smart filters (keyed by FILTERS id) and repositories.
@@ -286,6 +294,7 @@ const FILTER_ICONS = {
   assign: `<svg viewBox="0 0 16 16" width="15" height="15"><circle cx="8" cy="5.2" r="2.4" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M3.5 13a4.5 4.5 0 019 0" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>`,
   cleanup: `<svg viewBox="0 0 16 16" width="15" height="15"><path d="M9.5 2.5l4 4-5.5 5.5H4v-4z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M2.5 13.5h6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>`,
   bookmarked: `<svg viewBox="0 0 16 16" width="15" height="15"><path d="M4 2.5h8v11l-4-3-4 3z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>`,
+  snoozed: `<svg viewBox="0 0 16 16" width="15" height="15"><circle cx="8" cy="8.5" r="5.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 5.5v3.2l2 1.3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
 };
 const REPO_ICON = `<svg viewBox="0 0 16 16" width="15" height="15"><path d="M3 2.5h7.5L13 5v8.5H3z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M5 6h4M5 8.5h6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>`;
 
@@ -320,6 +329,10 @@ function renderSidebar() {
   // Bookmarks live in their own snapshot dataset (incl. done/removed), so count those —
   // also narrowed to the selected types.
   counts.bookmarked = bookmarkGroups
+    .flatMap((g) => g.notifications)
+    .filter((n) => typeMatch(n, selectedTypes)).length;
+  // Snoozed rows are hidden from the live inbox, so they too come from their own dataset.
+  counts.snoozed = snoozeGroups
     .flatMap((g) => g.notifications)
     .filter((n) => typeMatch(n, selectedTypes)).length;
   for (const el of $$("#filter-list .source-count[data-count]")) {
@@ -485,13 +498,28 @@ async function onNotificationsOpened(context = {}) {
 
 function onNotificationsClosed() {
   kbdFocus.clear();
+  snoozeKeyHeld = false;
+  snoozeHoldCancelled = false;
+  disarmSnooze();
+  clearSnoozeHint();
+  // Don't reload (and re-render) a hidden module on a snooze expiry; mark it stale instead so
+  // the deadline is re-evaluated when the user comes back.
+  clearTimeout(snoozeWakeTimer);
+  snoozeWakeTimer = null;
+  if (snoozeGroups.length) inboxStale = true;
 }
 
 export async function loadInbox() {
   try {
-    const [inbox, bookmarks] = await Promise.all([invoke("list_inbox"), invoke("list_bookmarks")]);
+    const [inbox, bookmarks, snoozed] = await Promise.all([
+      invoke("list_inbox"),
+      invoke("list_bookmarks"),
+      invoke("list_snoozed"),
+    ]);
     inboxGroups = applyRepoCollapseState(inbox);
     bookmarkGroups = applyRepoCollapseState(bookmarks);
+    snoozeGroups = applyRepoCollapseState(snoozed);
+    scheduleSnoozeWake();
     // Drop a repo refinement whose repository is no longer present in the active dataset.
     if (activeRepo != null && !currentGroups().some((g) => g.repo_id === activeRepo)) {
       activeRepo = null;
@@ -525,6 +553,7 @@ function setRepoCollapsedInGroups(repoFullName, collapsed) {
     groups.map((group) => (group.full_name === repoFullName ? { ...group, collapsed } : group));
   inboxGroups = update(inboxGroups);
   bookmarkGroups = update(bookmarkGroups);
+  snoozeGroups = update(snoozeGroups);
   typeFilterMemo.base = null;
 }
 
@@ -557,7 +586,68 @@ async function toggleRepoCollapsed(btn) {
   }
 }
 
-/* -------------------------------- Mark done ------------------------------- */
+/* --------------------------------- Snooze --------------------------------- */
+
+/** Pending reload timer for the next snooze expiry, so a woken notification reappears on
+ *  time instead of waiting for the next poll. */
+let snoozeWakeTimer = null;
+
+/** (Re)arm the wake timer for the soonest active deadline. Clamped to at least a second (a
+ *  deadline can be in the past between a load and its render) and capped at a minute, so a
+ *  long snooze doesn't rely on one enormous, drift-prone timeout. */
+function scheduleSnoozeWake() {
+  clearTimeout(snoozeWakeTimer);
+  snoozeWakeTimer = null;
+  const deadlines = snoozeGroups
+    .flatMap((g) => g.notifications)
+    .map((n) => new Date(n.snoozed_until).getTime())
+    .filter((t) => Number.isFinite(t));
+  if (!deadlines.length) return;
+  const delay = Math.min(Math.max(Math.min(...deadlines) - Date.now(), 1000), 60_000);
+  snoozeWakeTimer = setTimeout(() => {
+    snoozeWakeTimer = null;
+    // A no-op reload if nothing actually expired; it also re-arms the timer.
+    loadInbox();
+  }, delay);
+}
+
+/** Hide a thread until `optionId`'s deadline, then reload so the inbox, the Snoozed list,
+ *  and the sidebar counts all reflect it. Local-only — nothing is sent to GitHub. */
+async function snoozeThread(threadId, optionId) {
+  const untilAt = snoozeUntil(optionId);
+  if (!untilAt) return;
+  // Optimistic: drop the row locally so it disappears immediately, mirroring mark-done.
+  const focusTarget = focusTargetAfterRemoval([threadId]);
+  inboxGroups = inboxGroups
+    .map((g) => ({ ...g, notifications: g.notifications.filter((n) => n.thread_id !== threadId) }))
+    .filter((g) => g.notifications.length);
+  if (activeRepo != null && !currentGroups().some((g) => g.repo_id === activeRepo)) {
+    activeRepo = null;
+  }
+  renderSidebar();
+  pendingInboxFocus = focusTarget;
+  renderInbox();
+  try {
+    await invoke("set_snooze", { threadId, untilAt });
+    announce(`Snoozed until ${new Date(untilAt).toLocaleString()}.`);
+  } catch (err) {
+    setSyncProgress(String(err), "error");
+  }
+  await loadInbox();
+}
+
+/** End a thread's snooze immediately and reload. */
+async function unsnoozeThread(threadId) {
+  try {
+    await invoke("clear_snooze", { threadId });
+    announce("Unsnoozed.");
+  } catch (err) {
+    setSyncProgress(String(err), "error");
+  }
+  await loadInbox();
+}
+
+/* --------------------------------- Mark done ------------------------------- */
 
 /** Flatten the currently visible (filtered) notifications into a flat list. */
 function visibleNotifications() {
@@ -675,6 +765,13 @@ function onInboxClick(e) {
     }
     return;
   }
+  // Per-row "unsnooze" — return a snoozed thread to the inbox now, without opening it.
+  const unsnoozeBtn = e.target.closest?.(".n-unsnooze");
+  if (unsnoozeBtn) {
+    const row = unsnoozeBtn.closest(".n-row");
+    if (row?.dataset.threadId) unsnoozeThread(row.dataset.threadId);
+    return;
+  }
   // Per-row "mark as done" — clear this thread instantly, without opening the row.
   const doneBtn = e.target.closest?.(".n-done");
   if (doneBtn) {
@@ -706,7 +803,7 @@ function onInboxKeydown(e) {
   if (e.key !== "Enter") return;
   // Let the per-row / per-repo action buttons handle their own activation; don't also
   // open the row underneath them.
-  if (e.target.closest?.(".n-done, .repo-done, .repo-collapse, .n-bookmark")) return;
+  if (e.target.closest?.(".n-done, .repo-done, .repo-collapse, .n-bookmark, .n-unsnooze")) return;
   const open = e.target.closest?.(".n-open");
   if (!open?.dataset.url) return;
   e.preventDefault();
@@ -716,8 +813,13 @@ function onInboxKeydown(e) {
 /* ----------------------- Keyboard command model -------------------------- */
 
 /* Single-key triage shortcuts for power users (j/k navigate, d/e done, c copy, b bookmark,
- * r sync, 1–7 filter). These layer on TOP of the existing Tab + Enter a11y (they don't
- * replace it): j/k just move focus among the row anchors so the list is fast without Tabbing. */
+ * s snooze, r sync, 1–8 filter). These layer on TOP of the existing Tab + Enter a11y (they
+ * don't replace it): j/k just move focus among the row anchors so the list is fast without
+ * Tabbing.
+ *
+ * `s` is a two-key chord rather than a single key because there are five durations to pick
+ * from and the bare digits are already the filter switcher: `s` arms the chord (showing the
+ * digit legend in the toolbar), and the next digit picks the duration. */
 
 /** A row's primary focus target: its openable link, else its (revealed-on-focus) done
  *  button — so every row, openable or not, has a keyboard anchor. Marks the target with
@@ -748,6 +850,191 @@ function copyActiveRowUrl() {
   if (url) copyNotificationUrl(url);
 }
 
+/* The `s` snooze chord works two ways on purpose, because both are natural and users mix
+ * them mid-flow:
+ *   - tapped: `s`, release, then a digit
+ *   - held:   `s` held down as a modifier while tapping digits
+ * Both resolve through the same armed state, which stores a *thread id captured at arm time*
+ * rather than reading focus when the digit lands. That matters because snoozing re-renders
+ * the list, and a re-render can park focus on the `#inbox` container instead of a row — at
+ * which point a focus-reading chord silently does nothing. */
+
+/** The thread an armed `s` chord will snooze — while set, the next digit picks a duration
+ *  instead of switching filters.
+ *
+ *  Deliberately has NO timeout: a chord that expired on its own would silently hand the next
+ *  digit to the filter switcher, which is exactly the surprise this shortcut must avoid. The
+ *  toolbar legend is the armed indicator, and any key or click resolves or cancels it. */
+let armedSnooze = null;
+
+/** Whether the physical `s` key is down right now. Holding it keeps the chord re-arming
+ *  after each snooze, so a burst of digits snoozes a burst of rows. */
+let snoozeKeyHeld = false;
+
+/** Set when the chord is cancelled while `s` is still physically down. The modifier stays
+ *  suppressed — swallowing digits so they can't jump filters, but snoozing nothing — until
+ *  the key is released. */
+let snoozeHoldCancelled = false;
+
+/** Whether the toolbar is currently showing the digit legend, so clearing it can't wipe out
+ *  an unrelated message (a sync error, say) that landed in the meantime. */
+let snoozeHintShown = false;
+
+function showSnoozeHint() {
+  snoozeHintShown = true;
+  setSyncProgress(SNOOZE_HINT, "pending");
+}
+
+function clearSnoozeHint() {
+  if (!snoozeHintShown) return;
+  snoozeHintShown = false;
+  // Only blank the toolbar if it's still showing OUR text: an unrelated message (a sync
+  // error, say) may have replaced the legend in the meantime and must survive.
+  const showingHint = [...$$(".js-sync-progress")].some((el) => el.textContent === SNOOZE_HINT);
+  if (showingHint) setSyncProgress("");
+}
+
+/** Report the outcome of a chord that couldn't do what the user asked. Replaces the legend,
+ *  because a silently swallowed key is worse than a wrong one. */
+function reportSnooze(message) {
+  snoozeHintShown = false;
+  flashSyncProgress(message, "");
+}
+
+/** The row under the keyboard cursor, if it's something a snooze can act on. */
+function snoozeableRowId() {
+  const row = nav.activeRow();
+  // A done row (only in Bookmarks) is already hidden for good; snoozing it is meaningless.
+  if (!row?.dataset.threadId || row.dataset.done === "true" || row.dataset.snoozedUntil) {
+    return null;
+  }
+  return row.dataset.threadId;
+}
+
+/** Point the chord at a thread and show the digit legend. `viaHold` marks an arm that only
+ *  exists because `s` is being held down, so releasing `s` takes it away again (otherwise a
+ *  burst of held snoozes would leave a live chord behind to eat the user's next digit). */
+function armSnoozeFor(threadId, viaHold = false) {
+  armedSnooze = { threadId, viaHold };
+  // Same handler + capture flag every time, so this can't stack up duplicate listeners.
+  document.addEventListener("pointerdown", onPointerDownWhileArmed, true);
+  showSnoozeHint();
+}
+
+/** Cancel the chord outright: drop the arm, drop the legend, and suppress the held-key
+ *  modifier until `s` is released. */
+function cancelSnooze() {
+  disarmSnooze();
+  clearSnoozeHint();
+  if (snoozeKeyHeld) snoozeHoldCancelled = true;
+}
+
+/** Drop the armed chord. */
+function disarmSnooze() {
+  if (!armedSnooze) return;
+  document.removeEventListener("pointerdown", onPointerDownWhileArmed, true);
+  armedSnooze = null;
+}
+
+/** Any click means the user moved on (and may be about to click a sidebar filter), so the
+ *  chord shouldn't outlive it. */
+function onPointerDownWhileArmed() {
+  cancelSnooze();
+}
+
+/** Releasing `s` ends the modifier form. It does NOT disarm: the tapped form (press `s`,
+ *  release, then a digit) lives entirely after the keyup. */
+function onSnoozeKeyUp(e) {
+  if (e.key !== "s") return;
+  snoozeKeyHeld = false;
+  snoozeHoldCancelled = false;
+  if (!armedSnooze || armedSnooze.viaHold) {
+    disarmSnooze();
+    clearSnoozeHint();
+  }
+}
+
+/** A chord must not survive losing the window: the keyup would land somewhere else, leaving
+ *  the modifier stuck on and a live chord waiting to eat the first digit typed on return. */
+function onWindowBlurWhileSnoozing() {
+  snoozeKeyHeld = false;
+  snoozeHoldCancelled = false;
+  disarmSnooze();
+  clearSnoozeHint();
+}
+
+/** `s` on the row under the keyboard cursor: unsnooze it if it's snoozed, otherwise arm the
+ *  chord so the next digit picks a duration. */
+function snoozeActiveRow() {
+  const row = nav.activeRow();
+  const threadId = row?.dataset.threadId;
+  // Nothing to snooze: say so rather than no-op silently, otherwise the user goes on to
+  // press a digit that lands on the filter switcher instead.
+  if (!threadId) {
+    reportSnooze("Select a notification first (j / k).");
+    return;
+  }
+  if (row.dataset.done === "true") {
+    reportSnooze("That notification is already done.");
+    return;
+  }
+  if (row.dataset.snoozedUntil) {
+    disarmSnooze();
+    clearSnoozeHint();
+    unsnoozeThread(threadId);
+    return;
+  }
+  armSnoozeFor(threadId);
+  announce(SNOOZE_HINT);
+}
+
+/** A background reload can remove the captured row out from under an armed chord (marked
+ *  done elsewhere, resolved, filtered away). Retire the chord rather than let a digit fire a
+ *  backend call that silently no-ops on a thread that isn't there any more. Called after
+ *  every inbox render. */
+function reconcileArmedSnooze() {
+  if (!armedSnooze) return;
+  if (nav.rows().some((row) => row.dataset.threadId === armedSnooze.threadId)) return;
+  disarmSnooze();
+  clearSnoozeHint();
+}
+
+/** Keep an armed chord pointed at the row the cursor is actually on, so navigating with j/k
+ *  mid-chord snoozes what the user is looking at. */
+function retargetSnoozeAfterMove() {
+  if (!armedSnooze && !snoozeKeyHeld) return;
+  const threadId = snoozeableRowId();
+  if (threadId) armSnoozeFor(threadId, armedSnooze ? armedSnooze.viaHold : true);
+  else {
+    disarmSnooze();
+    clearSnoozeHint();
+  }
+}
+
+/** Resolve the chord with the pressed digit. Returns false when the digit isn't one of the
+ *  offered durations or there's no thread to act on, so the caller can report it. */
+function resolveArmedSnooze(digit) {
+  const option = SNOOZE_OPTIONS[digit - 1];
+  // While `s` is held the chord may have been consumed by the previous digit; fall back to
+  // whatever the cursor is on now.
+  const threadId = option
+    ? (armedSnooze?.threadId ?? (snoozeHoldCancelled ? null : snoozeableRowId()))
+    : null;
+  if (!threadId) return false;
+  disarmSnooze();
+  clearSnoozeHint();
+  // Synchronous up to its first await: the list re-renders and moves the cursor on before
+  // this returns, so the re-arm below lands on the *next* row.
+  snoozeThread(threadId, option.id);
+  // Holding `s` means "I'm snoozing a run of these" — re-arm so the next digit keeps working
+  // instead of falling through to the filter switcher.
+  if (snoozeKeyHeld) {
+    const next = snoozeableRowId();
+    if (next) armSnoozeFor(next, true);
+  }
+  return true;
+}
+
 /** Toggle the bookmark on the row under the keyboard cursor. */
 function bookmarkActiveRow() {
   const btn = nav.activeRow()?.querySelector(".n-bookmark");
@@ -775,11 +1062,13 @@ function onCommandKeydown(e) {
     case "ArrowDown":
       e.preventDefault();
       nav.moveActiveRow(1);
+      retargetSnoozeAfterMove();
       return;
     case "k":
     case "ArrowUp":
       e.preventDefault();
       nav.moveActiveRow(-1);
+      retargetSnoozeAfterMove();
       return;
     case "d":
     case "e":
@@ -791,13 +1080,44 @@ function onCommandKeydown(e) {
     case "b":
       bookmarkActiveRow();
       return;
+    case "s":
+      e.preventDefault();
+      snoozeKeyHeld = true;
+      // Auto-repeat from holding `s` down mustn't re-announce the legend on every tick.
+      if (e.repeat) return;
+      snoozeHoldCancelled = false;
+      snoozeActiveRow();
+      return;
     case "r":
       e.preventDefault();
       syncNow();
       return;
   }
 
-  // 1–6 select a smart filter by position (FILTERS insertion order).
+  // With the snooze chord armed (or `s` held as a modifier), a digit picks the duration
+  // instead of switching filters. Every digit is consumed here, even one with no matching
+  // duration, so a mistyped chord can never fall through and switch filters behind the
+  // user's back — and an unresolvable one says why rather than doing nothing.
+  if (armedSnooze || snoozeKeyHeld) {
+    const isDigit = e.key >= "1" && e.key <= "9";
+    if (isDigit || e.key === "Escape") e.preventDefault();
+    if (isDigit && resolveArmedSnooze(Number(e.key))) return;
+    const suppressed = snoozeHoldCancelled;
+    cancelSnooze();
+    if (isDigit) {
+      reportSnooze(
+        suppressed
+          ? "Snooze cancelled — release s first."
+          : SNOOZE_OPTIONS[Number(e.key) - 1]
+            ? "Select a notification first (j / k)."
+            : `${e.key} isn't a snooze duration (1–${SNOOZE_OPTIONS.length}).`,
+      );
+      return;
+    }
+    if (e.key === "Escape") return;
+  }
+
+  // 1–8 select a smart filter by position (FILTERS insertion order).
   if (e.key >= "1" && e.key <= "9") {
     const ids = Object.keys(FILTERS);
     const idx = Number(e.key) - 1;
@@ -877,6 +1197,7 @@ function onInboxContextMenu(e) {
     y = r.bottom - 8;
   }
   const isOn = row.querySelector(".n-bookmark")?.classList.contains("is-on");
+  const snoozedUntil = row.dataset.snoozedUntil;
   const items = [
     {
       label: "Copy URL",
@@ -895,13 +1216,26 @@ function onInboxContextMenu(e) {
       action: () => toggleBookmark(threadId, !isOn),
     },
   ];
-  // A done row (only in Bookmarks) is already done, so don't offer to mark it done again.
+  // Snooze is a "come back later" verb, so it's meaningless on an already-done row (which
+  // only ever appears in Bookmarks) — and such a row can't be marked done again either. A
+  // row that's currently snoozed gets the inverse action instead.
   if (row.dataset.done !== "true") {
-    items.push({
-      label: "Mark as done",
-      danger: true,
-      action: () => markDone([threadId]),
-    });
+    items.push(
+      snoozedUntil
+        ? { label: "Unsnooze", action: () => unsnoozeThread(threadId) }
+        : {
+            label: "Snooze",
+            submenu: SNOOZE_OPTIONS.map(({ id, label }) => ({
+              label,
+              action: () => snoozeThread(threadId, id),
+            })),
+          },
+      {
+        label: "Mark as done",
+        danger: true,
+        action: () => markDone([threadId]),
+      },
+    );
   }
   openContextMenu(x, y, items);
 }
@@ -953,6 +1287,8 @@ export function initInbox() {
   // Power-user triage shortcuts (j/k/d/e/c/r/1–6) — global so filter/sync keys work from
   // anywhere on the notifications pane, not just when a row has focus.
   document.addEventListener("keydown", onCommandKeydown);
+  document.addEventListener("keyup", onSnoozeKeyUp);
+  window.addEventListener("blur", onWindowBlurWhileSnoozing);
   $("#mark-all-done-btn").addEventListener("click", (e) => {
     e.stopPropagation();
     // Toggle: a second click on the trigger closes the open confirm popover.
@@ -1008,12 +1344,13 @@ registerModule("notifications", {
         { keys: ["d", "e"], desc: "Mark as done" },
         { keys: ["c"], desc: "Copy link" },
         { keys: ["b"], desc: "Bookmark / unbookmark" },
+        { keys: ["s", "1–5"], desc: "Snooze (1 = 20 min … 5 = next week) / unsnooze" },
         { keys: ["r"], desc: "Sync now" },
       ],
     },
     {
       group: "Filters",
-      items: [{ keys: ["1"], desc: "Switch smart filter (1 = All … 7 = Bookmarks)" }],
+      items: [{ keys: ["1"], desc: "Switch smart filter (1 = All … 8 = Snoozed)" }],
     },
   ],
 });

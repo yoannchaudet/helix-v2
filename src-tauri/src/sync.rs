@@ -11,8 +11,7 @@ use serde::Serialize;
 
 use crate::github::{NotificationThread, RateLimit, ResolvedSubject};
 
-/// Outcome of a store + reconcile pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Outcome of a store + reconcile pass.#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StoreOutcome {
     /// Remote notifications upserted from the latest fetch.
     pub stored: usize,
@@ -20,6 +19,28 @@ pub struct StoreOutcome {
     pub visible: usize,
     /// Local notifications removed because they were no longer present upstream.
     pub removed: usize,
+}
+
+/// Does `thread` carry activity the user hasn't already handled?
+///
+/// Shared by the dismissal and snooze overlays: both hide a thread relative to a watermark —
+/// the remote generation captured when the user acted, floored by the wall-clock time of the
+/// action itself (`marked_at`) so a thread with no captured generation still can't be woken
+/// by pre-action activity. A new *unread* generation is GitHub's immediate signal that the
+/// thread genuinely re-surfaced; a read-only timestamp bump is not enough.
+///
+/// GitHub REST and SQLite's clock both emit canonical UTC `...Z` timestamps, so chronological
+/// order matches lexical order.
+fn has_new_generation(
+    thread: &NotificationThread,
+    snapshot_updated_at: Option<&str>,
+    marked_at: &str,
+) -> bool {
+    let watermark = match snapshot_updated_at {
+        Some(previous) if previous > marked_at => previous,
+        _ => marked_at,
+    };
+    thread.unread && thread.updated_at.as_str() > watermark
 }
 
 /// Upsert repos + notifications from a **complete** fetch and reconcile local state.
@@ -63,6 +84,14 @@ pub fn store_notifications(
          FROM notification_dismissals WHERE thread_id = ?1",
     )?;
 
+    // A snooze wakes on the same evidence as a dismissal reactivation: a new unread
+    // generation strictly newer than the watermark captured when the user snoozed. Expiry by
+    // deadline is handled at query time, so this only covers "new activity brought it back".
+    let mut snooze_stmt = tx.prepare(
+        "SELECT notification_updated_at, snoozed_at
+         FROM notification_snoozes WHERE thread_id = ?1",
+    )?;
+
     for t in threads {
         tx.execute(
             "INSERT OR IGNORE INTO present_threads (thread_id) VALUES (?1)",
@@ -75,15 +104,31 @@ pub fn store_notifications(
             })
             .optional()?;
         let reactivated = if let Some((dismissed_updated_at, dismissed_at)) = dismissal {
-            // GitHub REST and SQLite's local clock both use canonical UTC `...Z` timestamps,
-            // so their chronological order matches lexical order.
-            let watermark: &str = match dismissed_updated_at.as_deref() {
-                Some(previous) if previous > dismissed_at.as_str() => previous,
-                _ => dismissed_at.as_str(),
-            };
-            if t.unread && t.updated_at.as_str() > watermark {
+            if has_new_generation(t, dismissed_updated_at.as_deref(), &dismissed_at) {
                 tx.execute(
                     "DELETE FROM notification_dismissals WHERE thread_id = ?1",
+                    params![t.id],
+                )?;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        // An active snooze wakes on the same evidence, and the woken row is flagged `is_new`
+        // through the shared `?10` parameter below so it returns highlighted rather than
+        // silently reappearing mid-list.
+        let snooze: Option<(Option<String>, String)> = snooze_stmt
+            .query_row(params![t.id], |r| {
+                Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?))
+            })
+            .optional()?;
+        let unsnoozed = if let Some((snoozed_updated_at, snoozed_at)) = snooze {
+            if has_new_generation(t, snoozed_updated_at.as_deref(), &snoozed_at) {
+                tx.execute(
+                    "DELETE FROM notification_snoozes WHERE thread_id = ?1",
                     params![t.id],
                 )?;
                 true
@@ -141,20 +186,29 @@ pub fn store_notifications(
                 t.unread as i64,
                 t.updated_at,
                 t.url,
-                reactivated,
+                reactivated || unsnoozed,
             ],
         )?;
         stored += 1;
     }
 
-    // Release the prepared statement's borrow of the transaction before committing.
+    // Release the prepared statements' borrow of the transaction before committing.
     drop(dismissal_stmt);
+    drop(snooze_stmt);
 
     // Reconcile mirrored notifications no longer returned upstream, then prune repos that
     // ended up with no remote rows. Dismissals are deliberately independent and survive.
     let removed = tx.execute(
         "DELETE FROM notifications
          WHERE thread_id NOT IN (SELECT thread_id FROM present_threads)",
+        [],
+    )?;
+    // Snoozes, unlike dismissals, keep no snapshot of their own: a snooze only makes sense
+    // while the notification exists, so drop the orphans (and any expired rows) here.
+    tx.execute(
+        "DELETE FROM notification_snoozes
+         WHERE thread_id NOT IN (SELECT thread_id FROM notifications)
+            OR until_at <= strftime('%Y-%m-%dT%H:%M:%SZ','now')",
         [],
     )?;
     tx.execute(
@@ -369,12 +423,14 @@ pub fn read_status(conn: &Connection) -> rusqlite::Result<SyncStatus> {
     })
 }
 
-/// Count non-dismissed notifications shown in the inbox.
+/// Count non-dismissed, non-snoozed notifications shown in the inbox.
 pub fn visible_count(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row(
         "SELECT COUNT(*) FROM notifications n
          LEFT JOIN notification_dismissals d ON d.thread_id = n.thread_id
-         WHERE d.thread_id IS NULL",
+         LEFT JOIN notification_snoozes s ON s.thread_id = n.thread_id
+           AND s.until_at > strftime('%Y-%m-%dT%H:%M:%SZ','now')
+         WHERE d.thread_id IS NULL AND s.thread_id IS NULL",
         [],
         |r| r.get(0),
     )
@@ -499,6 +555,25 @@ pub fn store_resolved_subject(
         )?;
     }
 
+    // Same verification for an active snooze: a thread read outside Helix never regains its
+    // unread flag, so the subject's own timestamp is the only evidence of real activity.
+    let woken = tx.execute(
+        "DELETE FROM notification_snoozes
+         WHERE thread_id = ?1
+           AND ?2 IS NOT NULL
+           AND ?2 > CASE
+               WHEN subject_updated_at > snoozed_at THEN subject_updated_at
+               ELSE snoozed_at
+           END",
+        params![thread_id, subject.updated_at],
+    )?;
+    if woken > 0 {
+        tx.execute(
+            "UPDATE notifications SET is_new = 1 WHERE thread_id = ?1",
+            params![thread_id],
+        )?;
+    }
+
     // Keep a bookmark's snapshot current too, so a bookmarked thread marked done before the
     // next sync still carries the resolved number/state/url in the Bookmarks filter.
     tx.execute(
@@ -588,6 +663,14 @@ pub fn mark_done_local(conn: &mut Connection, thread_ids: &[String]) -> rusqlite
             dismissal_stmt.execute(params![id, notification_updated_at, subject_updated_at])?;
             dismissed += 1;
         }
+        // Done supersedes snoozed: the thread is already hidden and must not reappear in the
+        // Snoozed filter (or wake later on new activity the user has explicitly dismissed).
+        for id in thread_ids {
+            tx.execute(
+                "DELETE FROM notification_snoozes WHERE thread_id = ?1",
+                params![id],
+            )?;
+        }
     }
     tx.commit()?;
     Ok(dismissed)
@@ -633,6 +716,111 @@ pub fn remove_bookmark(conn: &Connection, thread_id: &str) -> rusqlite::Result<(
         params![thread_id],
     )?;
     Ok(())
+}
+
+/* --------------------------------- Snooze --------------------------------- */
+
+/// Hide a thread from the inbox until `until_at` (a UTC `...Z` timestamp).
+///
+/// Local-only and never synced: nothing is read, done, or unsubscribed on GitHub. The
+/// current notification/subject generations are snapshotted as the wake watermark (mirroring
+/// `notification_dismissals`), so a read-only timestamp bump can't wake the thread early —
+/// only genuinely newer activity can. Re-snoozing an already-snoozed thread refreshes both
+/// the deadline and the watermark. No-op if the thread isn't mirrored locally.
+pub fn snooze_thread(conn: &Connection, thread_id: &str, until_at: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO notification_snoozes (
+             thread_id, until_at, snoozed_at, notification_updated_at, subject_updated_at)
+         SELECT n.thread_id, ?2, strftime('%Y-%m-%dT%H:%M:%SZ','now'),
+                n.updated_at, n.subject_updated_at
+         FROM notifications n
+         WHERE n.thread_id = ?1
+         ON CONFLICT(thread_id) DO UPDATE SET
+           until_at                = excluded.until_at,
+           snoozed_at              = excluded.snoozed_at,
+           notification_updated_at = excluded.notification_updated_at,
+           subject_updated_at      = excluded.subject_updated_at",
+        params![thread_id, until_at],
+    )?;
+    Ok(())
+}
+
+/// End a snooze immediately, returning the thread to the inbox.
+pub fn unsnooze_thread(conn: &Connection, thread_id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM notification_snoozes WHERE thread_id = ?1",
+        params![thread_id],
+    )?;
+    Ok(())
+}
+
+/// Delete snoozes whose deadline has passed. Expiry is already handled at query time (the
+/// inbox joins on `until_at > now`), so this is pure housekeeping run after each sync to
+/// keep the table from accumulating dead rows.
+pub fn prune_expired_snoozes(conn: &Connection) -> rusqlite::Result<usize> {
+    conn.execute(
+        "DELETE FROM notification_snoozes
+         WHERE until_at <= strftime('%Y-%m-%dT%H:%M:%SZ','now')",
+        [],
+    )
+}
+
+/// Read the currently-snoozed threads grouped by repository, soonest-waking first within
+/// each repo. Reads live `notifications` rows (unlike bookmarks, snooze keeps no snapshot:
+/// a snooze is short-lived, and a thread that leaves the inbox has its snooze pruned).
+/// Dismissed threads are excluded — marking done already clears the snooze, and a thread
+/// dismissed outside Helix shouldn't reappear here.
+pub fn list_snoozed(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
+    let mut stmt = conn.prepare(
+        "SELECT r.id, r.full_name, r.private,
+                n.thread_id, n.subject_type, n.subject_title, n.subject_url,
+                COALESCE(n.reason, '') AS reason,
+                n.updated_at, n.thread_url,
+                n.subject_number, n.subject_state, n.subject_html_url, n.resolved_at,
+                n.is_new, n.subject_author, n.subject_mergeable_state,
+                CASE WHEN b.thread_id IS NULL THEN 0 ELSE 1 END AS bookmarked,
+                EXISTS(
+                    SELECT 1 FROM collapsed_notification_repos c
+                    WHERE c.repo_full_name = r.full_name
+                ) AS collapsed,
+                s.until_at
+         FROM notification_snoozes s
+         JOIN notifications n ON n.thread_id = s.thread_id
+         JOIN repos r ON r.id = n.repo_id
+         LEFT JOIN bookmarks b ON b.thread_id = n.thread_id
+         LEFT JOIN notification_dismissals d ON d.thread_id = n.thread_id
+         WHERE d.thread_id IS NULL
+           AND s.until_at > strftime('%Y-%m-%dT%H:%M:%SZ','now')
+         ORDER BY r.full_name ASC, s.until_at ASC, n.thread_id ASC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)? != 0,
+            r.get::<_, i64>(18)? != 0,
+            NotificationView {
+                thread_id: r.get(3)?,
+                subject_type: r.get(4)?,
+                subject_title: r.get(5)?,
+                subject_url: r.get(6)?,
+                reason: r.get(7)?,
+                updated_at: r.get(8)?,
+                thread_url: r.get(9)?,
+                subject_number: r.get(10)?,
+                subject_state: r.get(11)?,
+                subject_html_url: r.get(12)?,
+                resolved_at: r.get(13)?,
+                is_new: r.get::<_, i64>(14)? != 0,
+                subject_author: r.get(15)?,
+                subject_mergeable_state: r.get(16)?,
+                bookmarked: r.get::<_, i64>(17)? != 0,
+                is_done: false,
+                snoozed_until: r.get(19)?,
+            },
+        ))
+    })?;
+    group_by_repo(rows)
 }
 
 /// Persist whether one Notifications repository section is collapsed.
@@ -683,10 +871,13 @@ pub fn list_bookmarks(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
                 EXISTS(
                     SELECT 1 FROM collapsed_notification_repos c
                     WHERE c.repo_full_name = b.repo_full_name
-                ) AS collapsed
+                ) AS collapsed,
+                s.until_at AS snoozed_until
          FROM bookmarks b
          LEFT JOIN notifications n ON n.thread_id = b.thread_id
          LEFT JOIN notification_dismissals d ON d.thread_id = b.thread_id
+         LEFT JOIN notification_snoozes s ON s.thread_id = b.thread_id
+           AND s.until_at > strftime('%Y-%m-%dT%H:%M:%SZ','now')
          ORDER BY b.repo_full_name ASC, b.updated_at DESC, b.thread_id ASC",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -712,27 +903,11 @@ pub fn list_bookmarks(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
                 subject_mergeable_state: r.get(14)?,
                 bookmarked: true,
                 is_done: r.get::<_, i64>(15)? != 0,
+                snoozed_until: r.get(17)?,
             },
         ))
     })?;
-    let mut groups: Vec<RepoGroup> = Vec::new();
-    for row in rows {
-        let (repo_id, full_name, private, collapsed, view) = row?;
-        if groups.last().map(|g| g.repo_id) != Some(repo_id) {
-            groups.push(RepoGroup {
-                repo_id,
-                full_name,
-                private,
-                collapsed,
-                total: 0,
-                notifications: Vec::new(),
-            });
-        }
-        let group = groups.last_mut().expect("group just ensured");
-        group.total += 1;
-        group.notifications.push(view);
-    }
-    Ok(groups)
+    group_by_repo(rows)
 }
 
 /// Refresh bookmark snapshots from currently-present notifications, so a bookmarked thread's
@@ -790,6 +965,10 @@ pub struct NotificationView {
     /// True when the row was inserted or its `updated_at` changed in the latest sync;
     /// cleared on the next sync. Drives the "new since last sync" highlight.
     pub is_new: bool,
+    /// When an active snooze on this thread expires (UTC). Null when not snoozed. The inbox
+    /// hides snoozed rows entirely, so this is only ever set in the Snoozed filter and on a
+    /// bookmarked row that happens to be snoozed.
+    pub snoozed_until: Option<String>,
 }
 
 /// Notifications for one repository.
@@ -801,6 +980,32 @@ pub struct RepoGroup {
     pub collapsed: bool,
     pub total: i64,
     pub notifications: Vec<NotificationView>,
+}
+
+/// Fold repo-ordered `(repo_id, full_name, private, collapsed, view)` rows into `RepoGroup`s.
+/// Every list query orders by repository first, so we only ever append to the last group.
+fn group_by_repo<I>(rows: I) -> rusqlite::Result<Vec<RepoGroup>>
+where
+    I: Iterator<Item = rusqlite::Result<(i64, String, bool, bool, NotificationView)>>,
+{
+    let mut groups: Vec<RepoGroup> = Vec::new();
+    for row in rows {
+        let (repo_id, full_name, private, collapsed, view) = row?;
+        if groups.last().map(|g| g.repo_id) != Some(repo_id) {
+            groups.push(RepoGroup {
+                repo_id,
+                full_name,
+                private,
+                collapsed,
+                total: 0,
+                notifications: Vec::new(),
+            });
+        }
+        let group = groups.last_mut().expect("group just ensured");
+        group.total += 1;
+        group.notifications.push(view);
+    }
+    Ok(groups)
 }
 
 /// Read all stored notifications grouped by repository.
@@ -825,7 +1030,9 @@ pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
          JOIN repos r ON r.id = n.repo_id
          LEFT JOIN bookmarks b ON b.thread_id = n.thread_id
          LEFT JOIN notification_dismissals d ON d.thread_id = n.thread_id
-         WHERE d.thread_id IS NULL
+         LEFT JOIN notification_snoozes s ON s.thread_id = n.thread_id
+           AND s.until_at > strftime('%Y-%m-%dT%H:%M:%SZ','now')
+         WHERE d.thread_id IS NULL AND s.thread_id IS NULL
          ORDER BY r.full_name ASC, n.updated_at DESC, n.thread_id ASC",
     )?;
 
@@ -852,29 +1059,12 @@ pub fn list_by_repo(conn: &Connection) -> rusqlite::Result<Vec<RepoGroup>> {
                 subject_mergeable_state: r.get(16)?,
                 bookmarked: r.get::<_, i64>(17)? != 0,
                 is_done: false,
+                snoozed_until: None,
             },
         ))
     })?;
 
-    let mut groups: Vec<RepoGroup> = Vec::new();
-    for row in rows {
-        let (repo_id, full_name, private, collapsed, view) = row?;
-        // Rows are ordered by repo, so we only ever append to the last group.
-        if groups.last().map(|g| g.repo_id) != Some(repo_id) {
-            groups.push(RepoGroup {
-                repo_id,
-                full_name,
-                private,
-                collapsed,
-                total: 0,
-                notifications: Vec::new(),
-            });
-        }
-        let group = groups.last_mut().expect("group just ensured");
-        group.total += 1;
-        group.notifications.push(view);
-    }
-    Ok(groups)
+    group_by_repo(rows)
 }
 
 /// Look up a repo's full name by id (test/diagnostic helper).
@@ -2072,5 +2262,210 @@ mod tests {
         assert_eq!(mergeable_state.as_deref(), Some("clean"));
         assert_eq!(subject_updated_at.as_deref(), Some("2026-01-02T04:05:06Z"));
         assert!(resolved_at.is_some());
+    }
+
+    /* ---------------------------------- Snooze ---------------------------------- */
+
+    /// A far-future / far-past UTC deadline, so tests never race the wall clock.
+    const FUTURE: &str = "2099-01-01T00:00:00Z";
+    const PAST: &str = "2000-01-01T00:00:00Z";
+
+    fn snooze_count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM notification_snoozes", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn snoozing_hides_a_thread_and_lists_it_with_its_deadline() {
+        let mut conn = mem_conn();
+        store_notifications(
+            &mut conn,
+            &[
+                thread("1", 100, "octo/repo-a", "One"),
+                thread("2", 100, "octo/repo-a", "Two"),
+            ],
+        )
+        .unwrap();
+        snooze_thread(&conn, "1", FUTURE).unwrap();
+
+        // Hidden from the inbox and from the visible count, but listed in the Snoozed view.
+        let inbox = list_by_repo(&conn).unwrap();
+        assert_eq!(inbox[0].notifications.len(), 1);
+        assert_eq!(inbox[0].notifications[0].thread_id, "2");
+        assert_eq!(visible_count(&conn).unwrap(), 1);
+
+        let snoozed = list_snoozed(&conn).unwrap();
+        assert_eq!(snoozed[0].notifications.len(), 1);
+        assert_eq!(snoozed[0].notifications[0].thread_id, "1");
+        assert_eq!(
+            snoozed[0].notifications[0].snoozed_until.as_deref(),
+            Some(FUTURE)
+        );
+
+        // Unsnoozing returns it immediately.
+        unsnooze_thread(&conn, "1").unwrap();
+        assert_eq!(list_by_repo(&conn).unwrap()[0].notifications.len(), 2);
+        assert!(list_snoozed(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_expired_snooze_is_visible_again_and_is_pruned() {
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
+        snooze_thread(&conn, "1", PAST).unwrap();
+
+        // Expiry is evaluated at query time, so it applies even before any sync or pruning.
+        assert_eq!(list_by_repo(&conn).unwrap()[0].notifications.len(), 1);
+        assert!(list_snoozed(&conn).unwrap().is_empty());
+        assert_eq!(visible_count(&conn).unwrap(), 1);
+
+        assert_eq!(prune_expired_snoozes(&conn).unwrap(), 1);
+        assert_eq!(snooze_count(&conn), 0);
+    }
+
+    #[test]
+    fn a_read_only_timestamp_bump_does_not_wake_a_snooze() {
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
+        snooze_thread(&conn, "1", FUTURE).unwrap();
+
+        let mut bumped = thread("1", 100, "octo/repo-a", "False bump");
+        bumped.unread = false;
+        bumped.updated_at = "2098-01-01T00:00:00Z".to_string();
+        store_notifications(&mut conn, &[bumped]).unwrap();
+
+        assert!(list_by_repo(&conn).unwrap().is_empty());
+        assert_eq!(snooze_count(&conn), 1);
+    }
+
+    #[test]
+    fn a_new_unread_generation_wakes_a_snooze_and_flags_it_new() {
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
+        snooze_thread(&conn, "1", FUTURE).unwrap();
+
+        let mut newer = thread("1", 100, "octo/repo-a", "Real new activity");
+        newer.updated_at = "2098-01-01T00:00:00Z".to_string();
+        store_notifications(&mut conn, &[newer]).unwrap();
+
+        let inbox = list_by_repo(&conn).unwrap();
+        assert_eq!(inbox[0].notifications.len(), 1);
+        assert!(
+            inbox[0].notifications[0].is_new,
+            "a woken thread should be highlighted as new"
+        );
+        assert_eq!(snooze_count(&conn), 0);
+    }
+
+    #[test]
+    fn newer_subject_activity_wakes_a_snoozed_thread_read_elsewhere() {
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
+        snooze_thread(&conn, "1", FUTURE).unwrap();
+
+        // Read outside Helix: `unread` never comes back, so only the subject timestamp can
+        // prove the thread genuinely moved on.
+        let mut bumped = thread("1", 100, "octo/repo-a", "One");
+        bumped.unread = false;
+        bumped.updated_at = "2098-01-01T00:00:00Z".to_string();
+        store_notifications(&mut conn, &[bumped]).unwrap();
+        assert!(list_by_repo(&conn).unwrap().is_empty());
+
+        store_resolved_subject(
+            &conn,
+            "1",
+            &ResolvedSubject {
+                updated_at: Some("2098-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(list_by_repo(&conn).unwrap()[0].notifications.len(), 1);
+        assert_eq!(snooze_count(&conn), 0);
+    }
+
+    #[test]
+    fn marking_done_clears_a_snooze() {
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
+        snooze_thread(&conn, "1", FUTURE).unwrap();
+        mark_done_local(&mut conn, &["1".to_string()]).unwrap();
+
+        assert_eq!(snooze_count(&conn), 0);
+        assert!(list_snoozed(&conn).unwrap().is_empty());
+        assert!(list_by_repo(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_snooze_is_pruned_when_its_thread_disappears_upstream() {
+        let mut conn = mem_conn();
+        store_notifications(
+            &mut conn,
+            &[
+                thread("1", 100, "octo/repo-a", "One"),
+                thread("2", 100, "octo/repo-a", "Two"),
+            ],
+        )
+        .unwrap();
+        snooze_thread(&conn, "1", FUTURE).unwrap();
+
+        store_notifications(&mut conn, &[thread("2", 100, "octo/repo-a", "Two")]).unwrap();
+        assert_eq!(snooze_count(&conn), 0);
+    }
+
+    #[test]
+    fn a_snoozed_bookmark_stays_in_the_bookmarks_view_with_its_deadline() {
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
+        add_bookmark(&conn, "1").unwrap();
+        snooze_thread(&conn, "1", FUTURE).unwrap();
+
+        assert!(list_by_repo(&conn).unwrap().is_empty());
+        let bookmarks = list_bookmarks(&conn).unwrap();
+        assert_eq!(bookmarks[0].notifications.len(), 1);
+        assert_eq!(
+            bookmarks[0].notifications[0].snoozed_until.as_deref(),
+            Some(FUTURE)
+        );
+        assert!(
+            !bookmarks[0].notifications[0].is_done,
+            "a snoozed bookmark is hidden, not done"
+        );
+    }
+
+    #[test]
+    fn re_snoozing_refreshes_the_deadline_and_the_watermark() {
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
+        snooze_thread(&conn, "1", "2097-01-01T00:00:00Z").unwrap();
+
+        // New activity arrives and wakes it; the user snoozes again against that generation.
+        let mut newer = thread("1", 100, "octo/repo-a", "Newer");
+        newer.updated_at = "2098-01-01T00:00:00Z".to_string();
+        store_notifications(&mut conn, &[newer]).unwrap();
+        snooze_thread(&conn, "1", FUTURE).unwrap();
+
+        let (until, watermark): (String, Option<String>) = conn
+            .query_row(
+                "SELECT until_at, notification_updated_at FROM notification_snoozes",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(until, FUTURE);
+        assert_eq!(watermark.as_deref(), Some("2098-01-01T00:00:00Z"));
+
+        // Re-delivering the same generation must not wake it again.
+        let mut same = thread("1", 100, "octo/repo-a", "Newer");
+        same.updated_at = "2098-01-01T00:00:00Z".to_string();
+        store_notifications(&mut conn, &[same]).unwrap();
+        assert!(list_by_repo(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn snoozing_an_unknown_thread_is_a_noop() {
+        let conn = mem_conn();
+        snooze_thread(&conn, "missing", FUTURE).unwrap();
+        assert_eq!(snooze_count(&conn), 0);
     }
 }

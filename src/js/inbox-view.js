@@ -1,5 +1,6 @@
 import { html, rawHtml } from "./dom.js";
 import { relTime } from "./format.js";
+import { fmtSnoozeUntil } from "./snooze-model.js";
 import { authorTag, pill, iconButton } from "./ui.js";
 import { TYPE_FILTERS, isAwaitingState } from "./inbox-model.js";
 
@@ -70,13 +71,28 @@ const BOOKMARK_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidd
 const BOOKMARK_ICON_FILLED = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 2.5h8v11l-4-3-4 3z" fill="currentColor" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>`;
 const COLLAPSE_ICON = `<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
+/** Clock glyph for the snooze affordances (sidebar filter, row pill, unsnooze button). */
+const SNOOZE_ICON = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><circle cx="8" cy="8.5" r="5.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 5.5v3.2l2 1.3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+/** "Snoozed until …" pill for a hidden row, shown in the Snoozed filter (and on a snoozed
+ *  bookmark). Returns "" when the row isn't snoozed. Yellow — this is a pending state. */
+export function snoozePill(untilAt) {
+  if (!untilAt) return "";
+  return pill(`Back ${fmtSnoozeUntil(untilAt)}`, "state state--snoozed", {
+    title: `Snoozed until ${new Date(untilAt).toLocaleString()}`,
+  });
+}
+
 export function notificationRow(n) {
   const number =
     n.subject_number != null ? html`<span class="n-number">#${n.subject_number}</span> ` : "";
   const badge = stateBadge(n.subject_state);
   const merge = mergeStateBadge(n.subject_mergeable_state, n.subject_type, n.subject_state);
+  const snoozed = snoozePill(n.snoozed_until);
   const stateLine =
-    badge || merge ? html`<div class="n-state">${rawHtml(badge)}${rawHtml(merge)}</div>` : "";
+    badge || merge || snoozed
+      ? html`<div class="n-state">${rawHtml(badge)}${rawHtml(merge)}${rawHtml(snoozed)}</div>`
+      : "";
   // Only rows with a resolved web URL are openable (clickable + hover affordance).
   const url = n.subject_html_url || "";
   const isNew = n.is_new ? " n-row--new" : "";
@@ -85,7 +101,7 @@ export function notificationRow(n) {
   const done = !!n.is_done;
   // A PR/Issue whose state hasn't resolved yet gets a subtle striped cue (unless it's done).
   const awaiting = !done && isAwaitingState(n) ? " n-row--awaiting" : "";
-  const cls = `n-row${url ? " n-row--openable" : ""}${isNew}${awaiting}${bookmarked ? " n-row--bookmarked" : ""}${done ? " n-row--done" : ""}`;
+  const cls = `n-row${url ? " n-row--openable" : ""}${isNew}${awaiting}${bookmarked ? " n-row--bookmarked" : ""}${done ? " n-row--done" : ""}${n.snoozed_until ? " n-row--snoozed" : ""}`;
   const openAttrs = url ? html` data-url="${url}" role="link" tabindex="0"` : "";
   // A done thread (only ever shown in Bookmarks) has no mark-as-done button; render an inert
   // spacer (NOT an .n-done, so it never reveals on hover or handles clicks) to keep the
@@ -105,8 +121,18 @@ export function notificationRow(n) {
     label: `${bookmarked ? "Remove bookmark from" : "Bookmark"} "${n.subject_title}"`,
     attrs: html`aria-pressed="${bookmarked ? "true" : "false"}"`,
   });
+  // A snoozed row (Snoozed filter, or a snoozed bookmark) gets a one-click way out, always
+  // visible rather than hover-revealed — it's the primary action in that view.
+  const unsnoozeBtn = n.snoozed_until
+    ? iconButton({
+        icon: SNOOZE_ICON,
+        className: "n-unsnooze",
+        title: "Unsnooze",
+        label: `Unsnooze "${n.subject_title}"`,
+      })
+    : "";
   return html`
-    <li class="${cls}" data-thread-id="${n.thread_id}"${rawHtml(done ? ' data-done="true"' : "")}>
+    <li class="${cls}" data-thread-id="${n.thread_id}"${rawHtml(done ? ' data-done="true"' : "")}${rawHtml(n.snoozed_until ? html` data-snoozed-until="${n.snoozed_until}"` : "")}>
       <div class="n-open"${rawHtml(openAttrs)}>
         <span class="n-badge-slot">${rawHtml(subjectBadge(n.subject_type))}</span>
         <div class="n-main">
@@ -116,6 +142,7 @@ export function notificationRow(n) {
         </div>
         ${rawHtml(author)}
       </div>
+      ${rawHtml(unsnoozeBtn)}
       ${rawHtml(bookmarkBtn)}
       ${rawHtml(doneBtn)}
     </li>`;
