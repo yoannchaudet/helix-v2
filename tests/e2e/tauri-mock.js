@@ -707,6 +707,7 @@ export function defaultFixtures() {
             subject_number: 12,
             subject_state: "open",
             subject_html_url: "https://github.com/octo/hello/pull/12",
+            subject_author: "octocat",
             reason: "review_requested",
             updated_at: "2026-06-27T10:00:00Z",
           },

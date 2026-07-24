@@ -1923,20 +1923,38 @@ code,
   gap: 5px;
 }
 
-/* Subject author (issue/PR), right-aligned at the end of the openable area. `margin-left:
-   auto` pushes it to the right edge; the padding keeps it clear of the hover-revealed
-   bookmark/done buttons that sit just outside `.n-open`. */
+/* Subject author chip (issue/PR), right-aligned at the end of the openable area. `margin-left:
+   auto` pushes it to the right edge, clear of the hover-revealed bookmark/done buttons that
+   sit just outside `.n-open`. */
 .n-author {
   flex: none;
   margin-left: auto;
-  padding-left: var(--space-10);
+  padding: 2px var(--space-6);
   max-width: 38%;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: var(--space-4);
   min-width: 0;
   color: var(--muted);
   font-size: 0.76rem;
+  font-weight: 600;
+  border-radius: var(--radius-pill, 999px);
+  background: color-mix(in srgb, var(--muted) 12%, transparent);
+}
+
+.n-author-avatar {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--surface);
+}
+
+.n-author-avatar--bot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
 }
 
 /* The login text part can ellipsize; the bot badge stays fully visible. */
@@ -1944,16 +1962,6 @@ code,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-/* Small robot icon appended to bot authors (e.g. dependabot, github-actions). Kept muted
-   and subtle so it reads as a quiet marker rather than a loud chip. */
-.n-bot-icon {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  color: var(--muted);
-  opacity: 0.8;
 }
 
 /* ================================ Settings ================================ */
