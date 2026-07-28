@@ -24,11 +24,14 @@ pub struct StoreOutcome {
 
 /// Does `thread` carry activity the user hasn't already handled?
 ///
-/// Shared by the dismissal and snooze overlays: both hide a thread relative to a watermark —
-/// the remote generation captured when the user acted, floored by the wall-clock time of the
+/// Used by the dismissal overlay, which hides a thread relative to a watermark — the remote
+/// generation captured when the user marked it done, floored by the wall-clock time of the
 /// action itself (`marked_at`) so a thread with no captured generation still can't be woken
 /// by pre-action activity. A new *unread* generation is GitHub's immediate signal that the
 /// thread genuinely re-surfaced; a read-only timestamp bump is not enough.
+///
+/// Snooze deliberately does *not* use this: a snooze is an explicit "remind me later" and
+/// ends only on its deadline.
 ///
 /// GitHub REST and SQLite's clock both emit canonical UTC `...Z` timestamps, so chronological
 /// order matches lexical order.
@@ -85,14 +88,8 @@ pub fn store_notifications(
          FROM notification_dismissals WHERE thread_id = ?1",
     )?;
 
-    // A snooze wakes on the same evidence as a dismissal reactivation: a new unread
-    // generation strictly newer than the watermark captured when the user snoozed. Expiry by
-    // deadline is handled at query time, so this only covers "new activity brought it back".
-    let mut snooze_stmt = tx.prepare(
-        "SELECT notification_updated_at, snoozed_at
-         FROM notification_snoozes WHERE thread_id = ?1",
-    )?;
-
+    // Snoozes are deliberately untouched here: new activity never ends a snooze early. The
+    // only exit is the deadline itself, evaluated at query time.
     for t in threads {
         tx.execute(
             "INSERT OR IGNORE INTO present_threads (thread_id) VALUES (?1)",
@@ -108,28 +105,6 @@ pub fn store_notifications(
             if has_new_generation(t, dismissed_updated_at.as_deref(), &dismissed_at) {
                 tx.execute(
                     "DELETE FROM notification_dismissals WHERE thread_id = ?1",
-                    params![t.id],
-                )?;
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-
-        // An active snooze wakes on the same evidence, and the woken row is flagged `is_new`
-        // through the shared `?10` parameter below so it returns highlighted rather than
-        // silently reappearing mid-list.
-        let snooze: Option<(Option<String>, String)> = snooze_stmt
-            .query_row(params![t.id], |r| {
-                Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?))
-            })
-            .optional()?;
-        let unsnoozed = if let Some((snoozed_updated_at, snoozed_at)) = snooze {
-            if has_new_generation(t, snoozed_updated_at.as_deref(), &snoozed_at) {
-                tx.execute(
-                    "DELETE FROM notification_snoozes WHERE thread_id = ?1",
                     params![t.id],
                 )?;
                 true
@@ -172,8 +147,21 @@ pub fn store_notifications(
                subject_url   = excluded.subject_url,
                reason        = excluded.reason,
                unread        = excluded.unread,
-               is_new        = CASE WHEN ?10 OR excluded.updated_at <> notifications.updated_at
-                                    THEN 1 ELSE 0 END,
+               is_new        = CASE
+                                 WHEN ?10 OR excluded.updated_at <> notifications.updated_at
+                                   THEN 1
+                                 -- A snoozed row is hidden, so nobody can see (and clear) its
+                                 -- highlight. Latch the flag for as long as the snooze is
+                                 -- active so activity that landed while it slept still marks
+                                 -- it new when the deadline finally returns it to the inbox.
+                                 WHEN notifications.is_new AND EXISTS(
+                                     SELECT 1 FROM notification_snoozes s
+                                     WHERE s.thread_id = notifications.thread_id
+                                       AND s.until_at >
+                                           strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                                   THEN 1
+                                 ELSE 0
+                               END,
                updated_at    = excluded.updated_at,
                thread_url    = excluded.thread_url,
                fetched_at    = excluded.fetched_at",
@@ -187,15 +175,14 @@ pub fn store_notifications(
                 t.unread as i64,
                 t.updated_at,
                 t.url,
-                reactivated || unsnoozed,
+                reactivated,
             ],
         )?;
         stored += 1;
     }
 
-    // Release the prepared statements' borrow of the transaction before committing.
+    // Release the prepared statement's borrow of the transaction before committing.
     drop(dismissal_stmt);
-    drop(snooze_stmt);
 
     // Reconcile mirrored notifications no longer returned upstream, then prune repos that
     // ended up with no remote rows. Dismissals are deliberately independent and survive.
@@ -556,24 +543,7 @@ pub fn store_resolved_subject(
         )?;
     }
 
-    // Same verification for an active snooze: a thread read outside Helix never regains its
-    // unread flag, so the subject's own timestamp is the only evidence of real activity.
-    let woken = tx.execute(
-        "DELETE FROM notification_snoozes
-         WHERE thread_id = ?1
-           AND ?2 IS NOT NULL
-           AND ?2 > CASE
-               WHEN subject_updated_at > snoozed_at THEN subject_updated_at
-               ELSE snoozed_at
-           END",
-        params![thread_id, subject.updated_at],
-    )?;
-    if woken > 0 {
-        tx.execute(
-            "UPDATE notifications SET is_new = 1 WHERE thread_id = ?1",
-            params![thread_id],
-        )?;
-    }
+    // Snoozes are deliberately left alone: newer subject activity never ends a snooze early.
 
     // Keep a bookmark's snapshot current too, so a bookmarked thread marked done before the
     // next sync still carries the resolved number/state/url in the Bookmarks filter.
@@ -665,7 +635,7 @@ pub fn mark_done_local(conn: &mut Connection, thread_ids: &[String]) -> rusqlite
             dismissed += 1;
         }
         // Done supersedes snoozed: the thread is already hidden and must not reappear in the
-        // Snoozed filter (or wake later on new activity the user has explicitly dismissed).
+        // Snoozed filter once its deadline passes.
         for id in thread_ids {
             tx.execute(
                 "DELETE FROM notification_snoozes WHERE thread_id = ?1",
@@ -723,24 +693,20 @@ pub fn remove_bookmark(conn: &Connection, thread_id: &str) -> rusqlite::Result<(
 
 /// Hide a thread from the inbox until `until_at` (a UTC `...Z` timestamp).
 ///
-/// Local-only and never synced: nothing is read, done, or unsubscribed on GitHub. The
-/// current notification/subject generations are snapshotted as the wake watermark (mirroring
-/// `notification_dismissals`), so a read-only timestamp bump can't wake the thread early —
-/// only genuinely newer activity can. Re-snoozing an already-snoozed thread refreshes both
-/// the deadline and the watermark. No-op if the thread isn't mirrored locally.
+/// Local-only and never synced: nothing is read, done, or unsubscribed on GitHub. A snooze is
+/// an explicit "remind me about this later", so new activity on the thread never brings it
+/// back early — the only exits are the deadline passing, an explicit unsnooze, marking the
+/// thread done, or the notification being reconciled away. Re-snoozing an already-snoozed
+/// thread refreshes the deadline. No-op if the thread isn't mirrored locally.
 pub fn snooze_thread(conn: &Connection, thread_id: &str, until_at: &str) -> rusqlite::Result<()> {
     conn.execute(
-        "INSERT INTO notification_snoozes (
-             thread_id, until_at, snoozed_at, notification_updated_at, subject_updated_at)
-         SELECT n.thread_id, ?2, strftime('%Y-%m-%dT%H:%M:%SZ','now'),
-                n.updated_at, n.subject_updated_at
+        "INSERT INTO notification_snoozes (thread_id, until_at, snoozed_at)
+         SELECT n.thread_id, ?2, strftime('%Y-%m-%dT%H:%M:%SZ','now')
          FROM notifications n
          WHERE n.thread_id = ?1
          ON CONFLICT(thread_id) DO UPDATE SET
-           until_at                = excluded.until_at,
-           snoozed_at              = excluded.snoozed_at,
-           notification_updated_at = excluded.notification_updated_at,
-           subject_updated_at      = excluded.subject_updated_at",
+           until_at   = excluded.until_at,
+           snoozed_at = excluded.snoozed_at",
         params![thread_id, until_at],
     )?;
     Ok(())
@@ -2327,47 +2293,35 @@ mod tests {
     }
 
     #[test]
-    fn a_read_only_timestamp_bump_does_not_wake_a_snooze() {
+    fn no_activity_wakes_a_snooze_early() {
         let mut conn = mem_conn();
         store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
         snooze_thread(&conn, "1", FUTURE).unwrap();
 
+        // A read-only timestamp bump keeps it hidden…
         let mut bumped = thread("1", 100, "octo/repo-a", "False bump");
         bumped.unread = false;
         bumped.updated_at = "2098-01-01T00:00:00Z".to_string();
         store_notifications(&mut conn, &[bumped]).unwrap();
+        assert!(list_by_repo(&conn).unwrap().is_empty());
+        assert_eq!(snooze_count(&conn), 1);
 
+        // …and so does a genuinely new unread generation: a snooze is an explicit
+        // "remind me later", so only the deadline brings the thread back.
+        let mut newer = thread("1", 100, "octo/repo-a", "Real new activity");
+        newer.updated_at = "2098-02-01T00:00:00Z".to_string();
+        store_notifications(&mut conn, &[newer]).unwrap();
         assert!(list_by_repo(&conn).unwrap().is_empty());
         assert_eq!(snooze_count(&conn), 1);
     }
 
     #[test]
-    fn a_new_unread_generation_wakes_a_snooze_and_flags_it_new() {
+    fn newer_subject_activity_does_not_wake_a_snooze() {
         let mut conn = mem_conn();
         store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
         snooze_thread(&conn, "1", FUTURE).unwrap();
 
-        let mut newer = thread("1", 100, "octo/repo-a", "Real new activity");
-        newer.updated_at = "2098-01-01T00:00:00Z".to_string();
-        store_notifications(&mut conn, &[newer]).unwrap();
-
-        let inbox = list_by_repo(&conn).unwrap();
-        assert_eq!(inbox[0].notifications.len(), 1);
-        assert!(
-            inbox[0].notifications[0].is_new,
-            "a woken thread should be highlighted as new"
-        );
-        assert_eq!(snooze_count(&conn), 0);
-    }
-
-    #[test]
-    fn newer_subject_activity_wakes_a_snoozed_thread_read_elsewhere() {
-        let mut conn = mem_conn();
-        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
-        snooze_thread(&conn, "1", FUTURE).unwrap();
-
-        // Read outside Helix: `unread` never comes back, so only the subject timestamp can
-        // prove the thread genuinely moved on.
+        // Read outside Helix, then real subject-side activity: still no early wake.
         let mut bumped = thread("1", 100, "octo/repo-a", "One");
         bumped.unread = false;
         bumped.updated_at = "2098-01-01T00:00:00Z".to_string();
@@ -2383,8 +2337,38 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(list_by_repo(&conn).unwrap()[0].notifications.len(), 1);
-        assert_eq!(snooze_count(&conn), 0);
+        assert!(list_by_repo(&conn).unwrap().is_empty());
+        assert_eq!(snooze_count(&conn), 1);
+    }
+
+    #[test]
+    fn a_thread_with_activity_while_snoozed_returns_highlighted() {
+        let mut conn = mem_conn();
+        store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
+        snooze_thread(&conn, "1", FUTURE).unwrap();
+
+        let mut newer = thread("1", 100, "octo/repo-a", "Real new activity");
+        newer.updated_at = "2098-01-01T00:00:00Z".to_string();
+        store_notifications(&mut conn, &[newer]).unwrap();
+        assert!(list_by_repo(&conn).unwrap().is_empty());
+
+        // Further polls re-deliver the same generation while the row is still hidden. Nobody
+        // could have seen the highlight yet, so it must survive them.
+        for _ in 0..2 {
+            let mut same = thread("1", 100, "octo/repo-a", "Real new activity");
+            same.updated_at = "2098-01-01T00:00:00Z".to_string();
+            store_notifications(&mut conn, &[same]).unwrap();
+        }
+
+        // Once the deadline passes the row comes back, and the activity it accumulated while
+        // hidden still marks it new so it doesn't reappear silently mid-list.
+        snooze_thread(&conn, "1", PAST).unwrap();
+        let inbox = list_by_repo(&conn).unwrap();
+        assert_eq!(inbox[0].notifications.len(), 1);
+        assert!(
+            inbox[0].notifications[0].is_new,
+            "a thread that moved on while snoozed should return highlighted"
+        );
     }
 
     #[test]
@@ -2437,32 +2421,19 @@ mod tests {
     }
 
     #[test]
-    fn re_snoozing_refreshes_the_deadline_and_the_watermark() {
+    fn re_snoozing_refreshes_the_deadline() {
         let mut conn = mem_conn();
         store_notifications(&mut conn, &[thread("1", 100, "octo/repo-a", "One")]).unwrap();
         snooze_thread(&conn, "1", "2097-01-01T00:00:00Z").unwrap();
-
-        // New activity arrives and wakes it; the user snoozes again against that generation.
-        let mut newer = thread("1", 100, "octo/repo-a", "Newer");
-        newer.updated_at = "2098-01-01T00:00:00Z".to_string();
-        store_notifications(&mut conn, &[newer]).unwrap();
         snooze_thread(&conn, "1", FUTURE).unwrap();
 
-        let (until, watermark): (String, Option<String>) = conn
-            .query_row(
-                "SELECT until_at, notification_updated_at FROM notification_snoozes",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
+        let until: String = conn
+            .query_row("SELECT until_at FROM notification_snoozes", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(until, FUTURE);
-        assert_eq!(watermark.as_deref(), Some("2098-01-01T00:00:00Z"));
-
-        // Re-delivering the same generation must not wake it again.
-        let mut same = thread("1", 100, "octo/repo-a", "Newer");
-        same.updated_at = "2098-01-01T00:00:00Z".to_string();
-        store_notifications(&mut conn, &[same]).unwrap();
-        assert!(list_by_repo(&conn).unwrap().is_empty());
+        assert_eq!(snooze_count(&conn), 1);
     }
 
     #[test]
