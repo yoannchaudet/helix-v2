@@ -443,6 +443,26 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX IF NOT EXISTS idx_notification_snoozes_until
         ON notification_snoozes(until_at);
     "#,
+    // v25 — snooze is a pure deadline. Waking a snoozed thread on new activity contradicted
+    // the explicit "remind me about this later" intent, so the watermark columns added in v24
+    // are now dead weight and are dropped by recreating the table.
+    r#"
+    CREATE TABLE notification_snoozes_new (
+        thread_id  TEXT PRIMARY KEY,
+        until_at   TEXT NOT NULL,
+        snoozed_at TEXT NOT NULL
+    );
+
+    INSERT INTO notification_snoozes_new (thread_id, until_at, snoozed_at)
+        SELECT thread_id, until_at, snoozed_at FROM notification_snoozes;
+
+    DROP INDEX IF EXISTS idx_notification_snoozes_until;
+    DROP TABLE notification_snoozes;
+    ALTER TABLE notification_snoozes_new RENAME TO notification_snoozes;
+
+    CREATE INDEX idx_notification_snoozes_until
+        ON notification_snoozes(until_at);
+    "#,
 ];
 
 /// Open the database at `db_path`, apply any pending migrations, and return the

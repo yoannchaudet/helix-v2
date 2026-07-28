@@ -196,14 +196,12 @@ CREATE TABLE bookmarks (                  -- local-only; snapshot survives done/
   bookmarked_at    TEXT NOT NULL
 );
 
--- Local snooze overlay: hides a thread from the inbox until its deadline passes or genuinely
--- new activity arrives. Same watermark discipline as `notification_dismissals`.
+-- Local snooze overlay: hides a thread from the inbox until its deadline passes. Unlike
+-- `notification_dismissals`, it keeps no watermark — new activity never ends a snooze early.
 CREATE TABLE notification_snoozes (
   thread_id                TEXT PRIMARY KEY,
   until_at                 TEXT NOT NULL,  -- UTC deadline; expiry is evaluated on read
-  snoozed_at               TEXT NOT NULL,  -- local watermark floor
-  notification_updated_at  TEXT,           -- remote notification generation at snooze time
-  subject_updated_at       TEXT            -- resolved subject generation at snooze time
+  snoozed_at               TEXT NOT NULL   -- when the user snoozed (local clock)
 );
 ```
 
@@ -214,14 +212,17 @@ CREATE TABLE notification_snoozes (
 > notification is absent), so a done bookmark simply hides its mark-as-done button.
 
 > **Snooze** is likewise local and never synced. A snoozed thread is hidden from the inbox
-> (and from every smart filter except Bookmarks, where it shows with its deadline) until either
-> `until_at` passes — evaluated at query time, so it works across restarts — or the thread wakes
-> on genuinely new activity, using the same rule as a dismissal reactivation (a new *unread*
-> generation strictly past the watermark, or a newer resolved subject timestamp for a thread
-> read outside Helix). A woken thread is flagged `is_new` so it returns highlighted. Marking a
-> thread done clears its snooze, and snoozes are pruned when their notification is reconciled
-> away. Deadlines come from a fixed set of durations (20 minutes / 1 hour / 3 hours / tomorrow
-> 09:00 / next Monday 09:00) computed in the user's local time by the frontend and stored as UTC.
+> (and from every smart filter except Bookmarks, where it shows with its deadline) until
+> `until_at` passes — evaluated at query time, so it works across restarts. Snoozing is an
+> explicit "remind me about this later", so new activity on the thread deliberately does *not*
+> bring it back early (unlike a dismissal, which reactivates on a new unread generation); the
+> only other exits are an explicit unsnooze, marking the thread done (which clears the snooze),
+> and the notification being reconciled away upstream (which prunes it). A thread whose
+> `updated_at` moved on while it slept keeps `is_new` latched for as long as the snooze is
+> active — nobody could have seen the highlight while the row was hidden — so it returns
+> highlighted rather than silently reappearing mid-list. Deadlines come from a fixed set of
+> durations (20 minutes / 1 hour / 3 hours / tomorrow 09:00 / next Monday 09:00) computed in
+> the user's local time by the frontend and stored as UTC.
 
 > Remote `unread` is synchronization metadata only. It never controls ordinary inbox
 > visibility: Helix still shows read notifications until they are marked *done*. It is retained
