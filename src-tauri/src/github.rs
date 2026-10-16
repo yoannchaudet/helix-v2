@@ -868,14 +868,13 @@ pub async fn resolve_subject(
     url: &str,
     token: &str,
 ) -> Result<ResolveResult, ResolveError> {
-    let resp = authed_get(client, url, token)
-        .send()
-        .await
-        .map_err(|e| ResolveError {
+    let resp = authed_get(client, url, token).send().await.map_err(|e| {
+        ResolveError::new(
             // A transport error before any response carries no rate snapshot.
-            rate: RateLimit::default(),
-            error: GitHubError::Network(e.to_string()),
-        })?;
+            RateLimit::default(),
+            GitHubError::Network(e.to_string()),
+        )
+    })?;
 
     let status = resp.status();
     let mut rate = RateLimit::default();
@@ -889,22 +888,22 @@ pub async fn resolve_subject(
     }
     if status == reqwest::StatusCode::FORBIDDEN {
         let body = resp.text().await.unwrap_or_default();
-        return Err(ResolveError {
+        return Err(ResolveError::new(
             rate,
-            error: GitHubError::Forbidden(body.trim().to_string()),
-        });
+            GitHubError::Forbidden(body.trim().to_string()),
+        ));
     }
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
         // A failed (non-404) request still consumed quota — carry its rate snapshot so the
         // caller's budget accounting stays accurate.
-        return Err(ResolveError {
+        return Err(ResolveError::new(
             rate,
-            error: GitHubError::Status {
+            GitHubError::Status {
                 status,
                 body: body.trim().to_string(),
             },
-        });
+        ));
     }
 
     match resp.json::<SubjectResponse>().await {
@@ -912,13 +911,13 @@ pub async fn resolve_subject(
             subject: raw.into(),
             rate,
         }),
-        Err(e) => Err(ResolveError {
+        Err(e) => Err(ResolveError::new(
             rate,
-            error: GitHubError::Parse {
+            GitHubError::Parse {
                 what: "subject",
                 source: e.to_string(),
             },
-        }),
+        )),
     }
 }
 
@@ -927,10 +926,17 @@ pub async fn resolve_subject(
 /// caller folds this `rate` into its budget accounting.
 pub struct ResolveError {
     pub rate: RateLimit,
-    pub error: GitHubError,
+    pub error: Box<GitHubError>,
 }
 
 impl ResolveError {
+    pub fn new(rate: RateLimit, error: GitHubError) -> Self {
+        Self {
+            rate,
+            error: Box::new(error),
+        }
+    }
+
     /// Whether this failure is GitHub telling us to slow down, so a background resolution
     /// loop should **stop the whole pass** rather than keep firing into the limit (which only
     /// prolongs it) — the remaining work is left for a later sync. True when a `Retry-After`
@@ -951,7 +957,16 @@ impl ResolveError {
 /// count to keep it accurate even when some/all mutations fail.
 pub struct MutationError {
     pub rate: RateLimit,
-    pub error: GitHubError,
+    pub error: Box<GitHubError>,
+}
+
+impl MutationError {
+    pub fn new(rate: RateLimit, error: GitHubError) -> Self {
+        Self {
+            rate,
+            error: Box::new(error),
+        }
+    }
 }
 
 /// Mark a notification thread as **done** (`DELETE /notifications/threads/{thread_id}`).
@@ -969,9 +984,8 @@ pub async fn mark_thread_done(
     let resp = authed(client.delete(&url), token)
         .send()
         .await
-        .map_err(|e| MutationError {
-            rate: RateLimit::default(),
-            error: GitHubError::Network(e.to_string()),
+        .map_err(|e| {
+            MutationError::new(RateLimit::default(), GitHubError::Network(e.to_string()))
         })?;
 
     let status = resp.status();
@@ -982,26 +996,23 @@ pub async fn mark_thread_done(
         return Ok(rate);
     }
     if status == reqwest::StatusCode::UNAUTHORIZED {
-        return Err(MutationError {
-            rate,
-            error: GitHubError::Unauthorized,
-        });
+        return Err(MutationError::new(rate, GitHubError::Unauthorized));
     }
     if status == reqwest::StatusCode::FORBIDDEN {
         let body = resp.text().await.unwrap_or_default();
-        return Err(MutationError {
+        return Err(MutationError::new(
             rate,
-            error: GitHubError::Forbidden(body.trim().to_string()),
-        });
+            GitHubError::Forbidden(body.trim().to_string()),
+        ));
     }
     let body = resp.text().await.unwrap_or_default();
-    Err(MutationError {
+    Err(MutationError::new(
         rate,
-        error: GitHubError::Status {
+        GitHubError::Status {
             status,
             body: body.trim().to_string(),
         },
-    })
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1049,55 +1060,56 @@ pub async fn close_pull_request(
     let response = close_pull_request_request(client, token, repo_full_name, number)
         .send()
         .await
-        .map_err(|error| MutationError {
-            rate: RateLimit::default(),
-            error: GitHubError::Network(error.to_string()),
+        .map_err(|error| {
+            MutationError::new(
+                RateLimit::default(),
+                GitHubError::Network(error.to_string()),
+            )
         })?;
     let status = response.status();
     let mut rate = RateLimit::default();
     rate.update_from(response.headers());
     if status == reqwest::StatusCode::UNAUTHORIZED {
-        return Err(MutationError {
-            rate,
-            error: GitHubError::Unauthorized,
-        });
+        return Err(MutationError::new(rate, GitHubError::Unauthorized));
     }
     if status == reqwest::StatusCode::FORBIDDEN {
         let body = response.text().await.unwrap_or_default();
-        return Err(MutationError {
+        return Err(MutationError::new(
             rate,
-            error: GitHubError::Forbidden(body.trim().to_string()),
-        });
+            GitHubError::Forbidden(body.trim().to_string()),
+        ));
     }
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        return Err(MutationError {
+        return Err(MutationError::new(
             rate,
-            error: GitHubError::Status {
+            GitHubError::Status {
                 status,
                 body: body.trim().to_string(),
             },
-        });
+        ));
     }
-    let pull: ClosePullRequestResponse = response.json().await.map_err(|error| MutationError {
-        rate: rate.clone(),
-        error: GitHubError::Parse {
-            what: "closed pull request",
-            source: error.to_string(),
-        },
+    let pull: ClosePullRequestResponse = response.json().await.map_err(|error| {
+        MutationError::new(
+            rate.clone(),
+            GitHubError::Parse {
+                what: "closed pull request",
+                source: error.to_string(),
+            },
+        )
     })?;
     let outcome = if pull.merged_at.is_some() {
         ClosePullRequestOutcome::Merged
     } else if pull.state.eq_ignore_ascii_case("closed") {
         ClosePullRequestOutcome::Closed
     } else {
-        return Err(MutationError {
+        return Err(MutationError::new(
             rate,
-            error: GitHubError::Parse {
+            GitHubError::Parse {
                 what: "closed pull request",
                 source: format!("GitHub returned unexpected state {:?}", pull.state),
             },
-        });
+        ));
     };
     Ok(ClosePullRequestResult { outcome, rate })
 }
@@ -3573,12 +3585,14 @@ mod tests {
 
     #[test]
     fn resolve_error_backs_off_only_on_rate_limits() {
-        let rl = |retry_after: Option<i64>, err: GitHubError| ResolveError {
-            rate: RateLimit {
-                retry_after,
-                ..RateLimit::default()
-            },
-            error: err,
+        let rl = |retry_after: Option<i64>, err: GitHubError| {
+            ResolveError::new(
+                RateLimit {
+                    retry_after,
+                    ..RateLimit::default()
+                },
+                err,
+            )
         };
         // Secondary/primary rate-limit 403 bodies → back off.
         assert!(rl(

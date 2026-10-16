@@ -2939,10 +2939,10 @@ mod tests {
                             rate: rate("core", 4980, 5000),
                         })
                     } else {
-                        Err(github::MutationError {
-                            rate: rate("core", 4980, 5000),
-                            error: GitHubError::Network("offline".to_string()),
-                        })
+                        Err(github::MutationError::new(
+                            rate("core", 4980, 5000),
+                            GitHubError::Network("offline".to_string()),
+                        ))
                     }
                 },
             ));
@@ -3248,10 +3248,10 @@ mod tests {
             move |_url| {
                 c.fetch_add(1, Ordering::SeqCst);
                 async move {
-                    Err(ResolveError {
-                        rate: rate("core", 4990, 5000),
-                        error: GitHubError::Forbidden("secondary rate limit".into()),
-                    })
+                    Err(ResolveError::new(
+                        rate("core", 4990, 5000),
+                        GitHubError::Forbidden("secondary rate limit".into()),
+                    ))
                 }
             },
         ));
@@ -3323,13 +3323,13 @@ mod tests {
             sink.clone(),
             move |url| async move {
                 if url.ends_with("/11") {
-                    Err(ResolveError {
-                        rate: rate("core", 4980, 5000),
-                        error: GitHubError::Status {
+                    Err(ResolveError::new(
+                        rate("core", 4980, 5000),
+                        GitHubError::Status {
                             status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
                             body: "boom".into(),
                         },
-                    })
+                    ))
                 } else {
                     Ok(ok_merge("clean", 4990))
                 }
