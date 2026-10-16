@@ -231,10 +231,10 @@ async fn resolve_pending_subjects(app: tauri::AppHandle, token: String) {
             .await
             {
                 Ok(result) => result,
-                Err(_) => Err(github::ResolveError {
-                    rate: github::RateLimit::default(),
-                    error: github::GitHubError::Network("subject resolution timed out".into()),
-                }),
+                Err(_) => Err(github::ResolveError::new(
+                    github::RateLimit::default(),
+                    github::GitHubError::Network("subject resolution timed out".into()),
+                )),
             }
         }
     };
@@ -995,13 +995,13 @@ mod tests {
             vec!["ok-1".into(), "bad-2".into(), "ok-3".into()],
             |_token, id| async move {
                 if id.starts_with("bad") {
-                    Err(MutationError {
-                        rate: rate("core", 4800, 5000),
-                        error: GitHubError::Status {
+                    Err(MutationError::new(
+                        rate("core", 4800, 5000),
+                        GitHubError::Status {
                             status: reqwest::StatusCode::NOT_FOUND,
                             body: "gone".into(),
                         },
-                    })
+                    ))
                 } else {
                     Ok(rate("core", 4850, 5000))
                 }
@@ -1271,13 +1271,13 @@ mod tests {
             sink.clone(),
             move |url| async move {
                 if url.contains("bad-2") {
-                    Err(ResolveError {
-                        rate: rate("core", 4980, 5000),
-                        error: GitHubError::Status {
+                    Err(ResolveError::new(
+                        rate("core", 4980, 5000),
+                        GitHubError::Status {
                             status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
                             body: "boom".into(),
                         },
-                    })
+                    ))
                 } else {
                     Ok(ok_subject(4990))
                 }
@@ -1316,10 +1316,10 @@ mod tests {
             move |_url| {
                 c.fetch_add(1, Ordering::SeqCst);
                 async move {
-                    Err(ResolveError {
-                        rate: rate("core", 4990, 5000),
-                        error: GitHubError::Forbidden("secondary rate limit".into()),
-                    })
+                    Err(ResolveError::new(
+                        rate("core", 4990, 5000),
+                        GitHubError::Forbidden("secondary rate limit".into()),
+                    ))
                 }
             },
         ));
