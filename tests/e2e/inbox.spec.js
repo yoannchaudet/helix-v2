@@ -271,6 +271,24 @@ test("marking a single row done removes it and decrements the count", async ({ p
   await expect(page.locator('.source-count[data-count="all"]')).toHaveText("2");
 });
 
+test("marking a row done does not reorder the remaining repositories", async ({ page }) => {
+  const fx = defaultFixtures();
+  fx.inbox[0].notifications[0].updated_at = "2026-06-27T12:00:00Z";
+  fx.inbox[0].notifications[1].updated_at = "2026-06-27T09:00:00Z";
+  fx.inbox[1].notifications[0].updated_at = "2026-06-27T11:00:00Z";
+  await openApp(page, fx);
+
+  await expect(page.locator(".repo-name").first()).toHaveText("octo/hello");
+  await page.locator('.n-row[data-thread-id="t1"]').hover();
+  await page.locator('.n-row[data-thread-id="t1"] .n-done').click();
+
+  // octo/hello's remaining row is now older than acme/widgets, but the section stays put so
+  // the next item in the repository remains directly under the user's cursor and focus.
+  await expect(page.locator('.n-row[data-thread-id="t1"]')).toHaveCount(0);
+  await expect(page.locator(".repo-name").first()).toHaveText("octo/hello");
+  await expect(page.locator(".repo-source .source-label").first()).toHaveText("octo/hello");
+});
+
 test("bulk mark-all confirms, then clears the whole view", async ({ page }) => {
   await openApp(page);
 

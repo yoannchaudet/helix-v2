@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   latestUpdatedAt,
   sortReposByRecency,
+  preservePreferredOrder,
   focusNeighborAfterRemoval,
 } from "../src/js/list-kit-model.js";
 
@@ -87,6 +88,28 @@ test("sortReposByRecency: does not mutate input", () => {
     (r) => r.name,
   );
   assert.deepEqual(repos, original);
+});
+
+/* -------------------------- preservePreferredOrder -------------------------- */
+
+test("preservePreferredOrder: keeps known items pinned and appends new items", () => {
+  const items = [{ id: 3 }, { id: 2 }, { id: 4 }, { id: 1 }];
+  const ordered = preservePreferredOrder(items, [1, 2, 3], (item) => item.id);
+  assert.deepEqual(
+    ordered.map((item) => item.id),
+    [1, 2, 3, 4],
+  );
+});
+
+test("preservePreferredOrder: drops missing ids without mutating input", () => {
+  const items = [{ id: 2 }, { id: 1 }];
+  const original = [...items];
+  const ordered = preservePreferredOrder(items, [1, 3, 2], (item) => item.id);
+  assert.deepEqual(
+    ordered.map((item) => item.id),
+    [1, 2],
+  );
+  assert.deepEqual(items, original);
 });
 
 /* -------------------------- focusNeighborAfterRemoval -------------------------- */
