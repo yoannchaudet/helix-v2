@@ -863,6 +863,7 @@ pub struct ResolveResult {
 /// non-success statuses are surfaced as [`ResolveError`] (carrying the rate snapshot) and
 /// left unresolved for the next sync. The response's rate-limit headers are captured in
 /// every case except a transport error before any response.
+#[allow(clippy::result_large_err)]
 pub async fn resolve_subject(
     client: &reqwest::Client,
     url: &str,
@@ -960,6 +961,7 @@ pub struct MutationError {
 /// entirely. The response's rate-limit snapshot is returned on success and carried in
 /// [`MutationError`] on failure (failed requests still consume quota). A transport error
 /// before any response carries a default (empty) snapshot.
+#[allow(clippy::result_large_err)]
 pub async fn mark_thread_done(
     client: &reqwest::Client,
     token: &str,
@@ -1040,6 +1042,7 @@ fn close_pull_request_request(
 ///
 /// GitHub returns the updated pull request. A non-null `merged_at` means a concurrent merge won
 /// before this close was applied; callers must not report that as a successful discard.
+#[allow(clippy::result_large_err)]
 pub async fn close_pull_request(
     client: &reqwest::Client,
     token: &str,
