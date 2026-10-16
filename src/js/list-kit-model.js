@@ -31,6 +31,27 @@ export function sortReposByRecency(items, getItems, getName) {
     .map((x) => x.item);
 }
 
+/** Keep items with known ids in a preferred order, while leaving any new items in their
+ * existing relative order after them. Returns a new array and never mutates the input. */
+export function preservePreferredOrder(items, preferredIds, getId) {
+  if (!preferredIds?.length) return [...items];
+  const positions = new Map(preferredIds.map((id, index) => [id, index]));
+  return items
+    .map((item, index) => ({
+      item,
+      index,
+      position: positions.get(getId(item)),
+    }))
+    .sort((a, b) => {
+      const aKnown = a.position != null;
+      const bKnown = b.position != null;
+      if (aKnown && bKnown) return a.position - b.position;
+      if (aKnown !== bKnown) return aKnown ? -1 : 1;
+      return a.index - b.index;
+    })
+    .map((x) => x.item);
+}
+
 /** Given a flat, visible item list and a set of removed ids, pick the nearest surviving
  *  neighbor after the first removed item (else before it). Returns `null` when no removed id
  *  is visible or when the view has no surviving items. */

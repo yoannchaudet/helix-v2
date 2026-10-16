@@ -32,7 +32,7 @@ import {
   createRowNavigator,
   createListFocusRetainer,
 } from "./list-kit.js";
-import { focusNeighborAfterRemoval } from "./list-kit-model.js";
+import { focusNeighborAfterRemoval, preservePreferredOrder } from "./list-kit-model.js";
 import {
   applyRepoCollapseState,
   setRepoCollapsed,
@@ -64,6 +64,11 @@ let activeRepo = null;
 let selectedTypes = new Set(TYPE_FILTERS.map((t) => t.id));
 /** Whether notifications should be reloaded next time the module becomes active. */
 let inboxStale = true;
+/** Repository order pinned while the user processes notifications. Removing a repo's newest
+ *  row must not move the whole section out from under them. Explicit view changes reset it. */
+let pinnedRepoOrder = null;
+/** Repository order from the last main-list render, captured before a mark-done mutation. */
+let lastRenderedRepoOrder = [];
 
 /** The dataset the active filter draws from: bookmarks and snoozed rows come from their own
  *  snapshots (so hidden/done ones still show); every other filter draws from the live inbox.
@@ -85,7 +90,16 @@ function currentGroups() {
 /** Apply the active filter, then the optional repo refinement, to the active dataset,
  *  ordering the repos most-recent-first. Thin wrapper binding the pure `filterGroups`. */
 function filteredGroups() {
-  return filterGroups(currentGroups(), activeFilter, activeRepo);
+  const groups = filterGroups(currentGroups(), activeFilter, activeRepo);
+  return preservePreferredOrder(groups, pinnedRepoOrder, (group) => group.repo_id);
+}
+
+function resetPinnedRepoOrder() {
+  pinnedRepoOrder = null;
+}
+
+function pinRenderedRepoOrder() {
+  pinnedRepoOrder = [...lastRenderedRepoOrder];
 }
 
 /** Current toolbar breadcrumb: the filter label, plus the repo when refined. */
@@ -242,6 +256,7 @@ function renderInbox() {
   const focusTarget = pendingInboxFocus ?? preserved;
   pendingInboxFocus = null;
   const groups = filteredGroups();
+  lastRenderedRepoOrder = groups.map((group) => group.repo_id);
   // The rows/headers we tracked for hover are about to be replaced — drop the markers so a
   // background re-render under a stationary cursor can't leave controls stuck-visible.
   hoverManager.clear();
@@ -353,6 +368,11 @@ function renderSidebar() {
     (x) => x.matches,
     (x) => x.group.full_name,
   );
+  visibleRepos = preservePreferredOrder(
+    visibleRepos,
+    pinnedRepoOrder,
+    (item) => item.group.repo_id,
+  );
   if (!visibleRepos.length) {
     repoList.innerHTML = html`<li class="source-empty">No repositories yet.</li>`;
   } else {
@@ -394,6 +414,7 @@ function renderSidebar() {
 /** Choose the notification-type filter. Drops a repo refinement that no longer has
  *  any matching notifications under the new filter (per the agreed UX). */
 function selectFilter(filterId, kbd = false) {
+  resetPinnedRepoOrder();
   activeFilter = filterId;
   if (activeRepo != null) {
     const group = currentGroups().find((g) => g.repo_id === activeRepo);
@@ -438,6 +459,7 @@ function toggleType(typeId) {
     if (selectedTypes.size === 1) return; // Keep at least one type selected.
     selectedTypes.delete(typeId);
   }
+  resetPinnedRepoOrder();
   if (activeRepo != null) {
     const group = currentGroups().find((g) => g.repo_id === activeRepo);
     if (!group || !repoMatches(group, activeFilter).length) activeRepo = null;
@@ -450,6 +472,7 @@ function toggleType(typeId) {
 
 /** Toggle the repository refinement: select it, or clear it if already active. */
 function selectRepo(repoId, kbd = false) {
+  resetPinnedRepoOrder();
   activeRepo = activeRepo === repoId ? null : repoId;
   showSettings(false);
   renderSidebar();
@@ -680,6 +703,9 @@ async function markDone(threadIds) {
   }
   const ids = [...new Set(threadIds)];
   if (!ids.length) return;
+  // Keep the repository sections and sidebar stable while rows are removed. Without this,
+  // removing a repo's newest row can immediately move that repo below another one.
+  pinRenderedRepoOrder();
   // Where should focus go once these rows vanish? Compute against the current view before
   // we mutate it, so keyboard users aren't dropped to <body> when their row is removed.
   // Exception: in the Bookmarks filter the row doesn't vanish (it stays as a now-done
