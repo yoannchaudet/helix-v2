@@ -43,7 +43,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUxQ0FDNDlDOTFDQTQ2NTgKUldSWVJzcVJuTVRLNFptVGxQbnEyZ0dKSWt4ZURvcTEwTkx2NE5RbmNMOWdFLzc3ZTh6b2pvV08K",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVGRjU1MDdERURBNkQ4NUMKUldSYzJLYnRmVkQxWC81YpielIwNUhtbVlFajVSMHprWXg0bUNKVmRlUnUzeDd2c0RPMlhwcFIK",
       "endpoints": ["https://github.com/yoannchaudet/helix-v2/releases/latest/download/latest.json"]
     }
   }
