@@ -18,90 +18,43 @@ How we build, sign, and ship Helix, and how in-app auto-update works.
 - The app auto-updates from those release assets using the Tauri updater plugin (see
   [App-side wiring](#app-side-wiring)).
 
-## One-time setup
+## Signing configuration
 
-### 1. Updater signing keypair (minisign)
+The
+[Apple signing workflows repository](https://github.com/yoannchaudet/apple-signing-workflows)
+owns the reusable workflow and all signing operations. Use its documentation instead of
+maintaining signing procedures here:
 
-The updater verifies every update against a public key baked into the app. Generate the
-keypair once:
+- Follow the
+  [operator quick start](https://github.com/yoannchaudet/apple-signing-workflows#operator-quick-start)
+  to provision Azure, register a caller, hydrate credentials, and verify them.
+- Follow
+  [caller registration](https://github.com/yoannchaudet/apple-signing-workflows/blob/main/docs/azure-setup.md#register-a-caller)
+  to configure GitHub OpenID Connect (OIDC) and the protected `release` environment.
+- Follow
+  [credential hydration and verification](https://github.com/yoannchaudet/apple-signing-workflows/blob/main/docs/credentials.md#hydration)
+  to load credentials or confirm Helix can use them. Use `yoannchaudet/helix-v2` as the
+  repository and the Helix repository root as the Tauri project path.
+- Follow
+  [credential rotation](https://github.com/yoannchaudet/apple-signing-workflows/blob/main/docs/credentials.md#rotation)
+  to replace or roll back vault values.
+- Read the
+  [updater-key warning](https://github.com/yoannchaudet/apple-signing-workflows/blob/main/docs/credentials.md#updater-key-warning)
+  before replacing a Tauri updater key.
+- Follow the
+  [backup and incident guidance](https://github.com/yoannchaudet/apple-signing-workflows/blob/main/docs/security.md#backups-and-incidents)
+  for offline backups and credential exposure.
 
-```sh
-npm run tauri -- signer generate -w ~/.tauri/helix-v2.key
-```
+Helix keeps only its caller-specific configuration:
 
-This writes the **private** key to `~/.tauri/helix-v2.key` and the **public** key to
-`~/.tauri/helix-v2.key.pub`.
-
-- Copy the **public** key (the contents of `~/.tauri/helix-v2.key.pub`) into
-  [`src-tauri/tauri.conf.json`](../src-tauri/tauri.conf.json) under
-  `plugins.updater.pubkey`. The app embeds it to verify every update.
-- Store the **private** key and its password in Azure Key Vault. **Never commit the private
-  key. If you lose it, existing installs can't install future updates.**
-- To rotate the key, first release an app signed with the old private key that embeds the new
-  public key. Existing installations must install this bridge release before subsequent
-  releases use the new private key.
-
-### 2. Apple Developer ID certificate
-
-In your Apple Developer account, create a **Developer ID Application** certificate, then
-export it from Keychain Access as a password-protected `.p12`. Store the certificate and
-password in the shared Apple signing vault. You'll also need:
-
-- the signing identity string, for example, `Developer ID Application: Your Name (TEAMID)`
-  (`security find-identity -v -p codesigning`),
-- your Apple ID email, an **app-specific password** for notarization (see step 3),
-  and your **Team ID** (the `TEAMID` in the identity string above).
-
-### 3. App-specific password (for notarization)
-
-Notarization signs in to Apple's notary service with an **app-specific password**. This
-single-purpose password lets the shared workflow authenticate without your Apple Account
-password or an interactive two-factor authentication prompt.
-
-1. Sign in at <https://appleid.apple.com>.
-2. Go to **Sign-In and Security → App-Specific Passwords**.
-3. Click **Generate an app-specific password** (the **+**), name it `helix-notarize`, and
-   confirm with your Apple Account password.
-4. Copy the generated value, which looks like `abcd-efgh-ijkl-mnop`, and store it as
-   `apple-notarization-password` in the shared vault. Apple shows it only once.
-
-> This value isn't your Apple Account password. It is also separate from the `.p12` export
-> password. If it leaks, revoke it from the same page and generate a replacement.
-
-### 4. GitHub Actions environment and Azure OIDC
-
-The reusable workflow authenticates to Azure through OpenID Connect (OIDC). It doesn't use
-an Azure client secret. The protected `release` environment supplies nonsecret identifiers,
-and Azure Key Vault supplies the signing credentials.
-
-1. **Settings → Environments → New environment** → name it **`release`**.
-2. Under **Deployment branches and tags**, choose **Selected branches and tags** and add a
-   rule **`v*`** of type **Tag**. Optionally add a **required reviewer**.
-3. Configure these `release` environment variables:
-
-| Variable | Purpose |
-| ------ | ------- |
-| `AZURE_CLIENT_ID` | Entra application client ID for this repository |
-| `AZURE_TENANT_ID` | Entra tenant ID |
-| `AZURE_KEY_VAULT_URI` | Shared signing vault URI |
-| `APPLE_ID` | Apple Account email used for notarization |
-| `APPLE_TEAM_ID` | Apple Developer Team ID |
-| `APPLE_SIGNING_IDENTITY` | Full `Developer ID Application` certificate identity |
-
-The Entra application accepts only the
-`repo:yoannchaudet/helix-v2:environment:release` OIDC subject. The shared workflow reads
-these Key Vault secrets:
-
-| Vault secret | Purpose |
-| ------ | ------- |
-| `apple-developer-id-certificate` | Base64-encoded Developer ID `.p12` |
-| `apple-developer-id-password` | `.p12` export password |
-| `apple-notarization-password` | Apple app-specific password |
-| `repo-yoannchaudet-helix-v2-tauri-private-key` | Base64-encoded updater private key |
-| `repo-yoannchaudet-helix-v2-tauri-private-key-password` | Updater-key password |
-
-The release workflow pins the shared workflow to an immutable commit SHA. Review and update
-that SHA explicitly when adopting a newer shared-workflow revision.
+- [`.github/workflows/release.yml`](../.github/workflows/release.yml) pins the reusable
+  workflow to an immutable commit SHA.
+- The protected `release` environment permits `v*` tags and contains the Azure and Apple
+  identifiers required by the shared workflow.
+- [`src-tauri/tauri.conf.json`](../src-tauri/tauri.conf.json) contains the updater public
+  key under `plugins.updater.pubkey`.
+- The Entra federated credential uses the exact
+  `repo:yoannchaudet/helix-v2:environment:release` subject.
 
 ## Cutting a release
 
@@ -177,18 +130,3 @@ Implemented in [`src-tauri/src/lib.rs`](../src-tauri/src/lib.rs) and
 - The UI auto-checks on launch (release only) and shows an update banner; Settings →
   **Updates** has the version and a **Check for updates** button. Dev builds show
   "Updates are disabled in dev builds".
-
-## Credential validation
-
-From the shared-workflow repository, verify that Azure contains a usable Apple certificate
-and matching Tauri updater key:
-
-```powershell
-./scripts/manage-vault.ps1 `
-  -Action Verify `
-  -Repository yoannchaudet/helix-v2 `
-  -TauriProjectPath ~/personal-repos/helix-v2
-```
-
-Run `npm ci` in the Helix repository before this command. Verification signs a disposable
-payload with Helix's pinned Tauri CLI; it doesn't create a release.
