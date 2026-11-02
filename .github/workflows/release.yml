@@ -1,112 +1,25 @@
 name: Release
 
-# Dispatched at the new version tag by the auto-tag workflow after a bump PR merges, or triggered
-# by a manual version-tag push. The app version in `src-tauri/tauri.conf.json` must match the tag
-# (without the leading `v`). This builds a universal (Intel + Apple Silicon) macOS app, signs +
-# notarizes it with the Apple Developer ID, signs the updater bundle with the minisign key, and
-# publishes a DRAFT GitHub Release with the .dmg + updater assets (latest.json, .app.tar.gz, .sig)
-# and an auto-generated changelog. Review the draft, then publish it — the in-app updater only
-# sees published releases.
+# Dispatched at the new version tag by the auto-tag workflow, or triggered by a manual
+# version-tag push. The shared workflow loads Apple and Tauri signing credentials from Azure
+# Key Vault through GitHub OIDC, builds a universal macOS app, and creates a draft release.
 on:
   push:
     tags:
       - "v*"
-  # A manual dispatch must select a v* tag so the release environment permits the run.
   workflow_dispatch:
 
 permissions:
   contents: write
+  id-token: write
 
 concurrency:
   group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
-  validate:
-    name: Validate version tag
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Require a version tag
-        run: |
-          if [[ "$GITHUB_REF" != refs/tags/v* ]]; then
-            echo "::error::Release workflow must run at a v* tag; received $GITHUB_REF."
-            exit 1
-          fi
-
   release:
-    name: Build, sign, notarize & publish
-    needs: validate
-    runs-on: macos-latest
-    # Signing + notarization secrets live in the protected `release` environment (restricted
-    # to version tags), so only a tagged release can read them — routine CI never can.
-    environment: release
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: 26
-          cache: npm
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          # Both arches are needed to link the universal binary.
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: release-src-tauri
-          workspaces: src-tauri -> target
-
-      - name: Install JavaScript dependencies
-        run: npm ci
-
-      - name: Generate release notes
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          NOTES=$(gh api repos/${{ github.repository }}/releases/generate-notes \
-            -f tag_name="${{ github.ref_name }}" \
-            --jq '.body')
-
-          # Use a unique delimiter to avoid collisions with generated content.
-          DELIM="RELEASE_NOTES_$(uuidgen)"
-
-          # Combine a fixed header with the auto-generated changelog.
-          {
-            echo "RELEASE_NOTES<<${DELIM}"
-            echo "Download the \`.dmg\` below to install. Existing installs update automatically."
-            echo ""
-            echo "$NOTES"
-            echo "${DELIM}"
-          } >> "$GITHUB_ENV"
-
-      - name: Build, sign, notarize & publish
-        uses: tauri-apps/tauri-action@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Updater signing (minisign keypair — public key lives in tauri.conf.json).
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # Apple Developer ID code signing.
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          # Apple notarization (app-specific password + team).
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: Helix ${{ github.ref_name }}
-          releaseBody: ${{ env.RELEASE_NOTES }}
-          releaseDraft: true
-          prerelease: false
-          # One universal binary for both Intel and Apple Silicon.
-          args: --target universal-apple-darwin
+    uses: yoannchaudet/apple-signing-workflows/.github/workflows/release-macos-tauri.yml@403e40644f71c78edc241ac68cc4fc89d427974c
+    with:
+      release-name: Helix ${{ github.ref_name }}
+      release-body: Download the `.dmg` below to install. Existing installs update automatically.
