@@ -26,75 +26,82 @@ The updater verifies every update against a public key baked into the app. Gener
 keypair once:
 
 ```sh
-npm run tauri -- signer generate -w ~/.tauri/helix.key
+npm run tauri -- signer generate -w ~/.tauri/helix-v2.key
 ```
 
-This writes the **private** key to `~/.tauri/helix.key` and prints/​writes the **public** key
-to `~/.tauri/helix.key.pub`.
+This writes the **private** key to `~/.tauri/helix-v2.key` and the **public** key to
+`~/.tauri/helix-v2.key.pub`.
 
-- Copy the **public** key (the contents of `~/.tauri/helix.key.pub`) into
+- Copy the **public** key (the contents of `~/.tauri/helix-v2.key.pub`) into
   [`src-tauri/tauri.conf.json`](../src-tauri/tauri.conf.json) under
-  `plugins.updater.pubkey` (it's committed there — replace it whenever you regenerate the
-  keypair). The app embeds it to verify every update.
-- The **private** key is a CI secret (below). **Never commit it. If you lose it, existing
-  installs can never be updated again** — back it up (e.g. a password manager).
+  `plugins.updater.pubkey`. The app embeds it to verify every update.
+- Store the **private** key and its password in Azure Key Vault. **Never commit the private
+  key. If you lose it, existing installs can't install future updates.**
+- To rotate the key, first release an app signed with the old private key that embeds the new
+  public key. Existing installations must install this bridge release before subsequent
+  releases use the new private key.
 
 ### 2. Apple Developer ID certificate
 
 In your Apple Developer account, create a **Developer ID Application** certificate, then
-export it from Keychain Access as a `.p12` (with a password). You'll need:
+export it from Keychain Access as a password-protected `.p12`. Store the certificate and
+password in the shared Apple signing vault. You'll also need:
 
-- the `.p12` file (base64-encode it for the secret: `base64 -i cert.p12 | pbcopy`),
-- the certificate password,
-- the signing identity string, e.g. `Developer ID Application: Your Name (TEAMID)`
+- the signing identity string, for example, `Developer ID Application: Your Name (TEAMID)`
   (`security find-identity -v -p codesigning`),
-- your Apple ID email, an **app-specific password** for notarization (see step 3 below),
+- your Apple ID email, an **app-specific password** for notarization (see step 3),
   and your **Team ID** (the `TEAMID` in the identity string above).
 
 ### 3. App-specific password (for notarization)
 
-Notarization signs in to Apple's notary service with your Apple ID via an **app-specific
-password** — a single-purpose password Apple issues so a tool can authenticate without your
-real password (and without triggering a 2FA prompt on every run). It becomes the
-`APPLE_PASSWORD` secret.
+Notarization signs in to Apple's notary service with an **app-specific password**. This
+single-purpose password lets the shared workflow authenticate without your Apple Account
+password or an interactive two-factor authentication prompt.
 
 1. Sign in at <https://appleid.apple.com>.
 2. Go to **Sign-In and Security → App-Specific Passwords**.
-3. Click **Generate an app-specific password** (the **+**), give it a name (e.g.
-   `helix-notarize`), and confirm with your Apple ID password.
-4. Copy the generated value — it looks like `abcd-efgh-ijkl-mnop`. **Store it now**, Apple
-   only shows it once. This is the `APPLE_PASSWORD` secret.
+3. Click **Generate an app-specific password** (the **+**), name it `helix-notarize`, and
+   confirm with your Apple Account password.
+4. Copy the generated value, which looks like `abcd-efgh-ijkl-mnop`, and store it as
+   `apple-notarization-password` in the shared vault. Apple shows it only once.
 
-> It is **not** your Apple ID login password, and it's separate from the certificate's
-> `.p12` export password (`APPLE_CERTIFICATE_PASSWORD`). If it ever leaks, revoke it from the
-> same page and generate a new one.
+> This value isn't your Apple Account password. It is also separate from the `.p12` export
+> password. If it leaks, revoke it from the same page and generate a replacement.
 
-### 4. GitHub Actions secrets (a protected `release` environment)
+### 4. GitHub Actions environment and Azure OIDC
 
-The signing/notarization secrets are sensitive, so keep them out of routine CI: store them
-in a **GitHub Environment** named `release` (not repository secrets), readable only by the
-release workflow.
+The reusable workflow authenticates to Azure through OpenID Connect (OIDC). It doesn't use
+an Azure client secret. The protected `release` environment supplies nonsecret identifiers,
+and Azure Key Vault supplies the signing credentials.
 
 1. **Settings → Environments → New environment** → name it **`release`**.
 2. Under **Deployment branches and tags**, choose **Selected branches and tags** and add a
-   rule **`v*`** of type **Tag** — so the environment (and its secrets) is only usable on a
-   version tag. Optionally add a **required reviewer** to approve each release.
-3. Add these as **environment secrets** of `release` (Environment → *Add secret*):
+   rule **`v*`** of type **Tag**. Optionally add a **required reviewer**.
+3. Configure these `release` environment variables:
 
-| Secret | Purpose |
+| Variable | Purpose |
 | ------ | ------- |
-| `TAURI_SIGNING_PRIVATE_KEY` | Contents of `~/.tauri/helix.key` (the minisign private key) |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for that key (empty if you set none) |
-| `APPLE_CERTIFICATE` | base64 of the `.p12` Developer ID cert |
-| `APPLE_CERTIFICATE_PASSWORD` | Password for the `.p12` |
-| `APPLE_SIGNING_IDENTITY` | `Developer ID Application: Your Name (TEAMID)` |
-| `APPLE_ID` | Your Apple ID email |
-| `APPLE_PASSWORD` | App-specific password for notarization |
-| `APPLE_TEAM_ID` | Your Apple Developer Team ID |
+| `AZURE_CLIENT_ID` | Entra application client ID for this repository |
+| `AZURE_TENANT_ID` | Entra tenant ID |
+| `AZURE_KEY_VAULT_URI` | Shared signing vault URI |
+| `APPLE_ID` | Apple Account email used for notarization |
+| `APPLE_TEAM_ID` | Apple Developer Team ID |
+| `APPLE_SIGNING_IDENTITY` | Full `Developer ID Application` certificate identity |
 
-The release workflow declares `environment: release`, so it can read these; CI builds with
-`--no-bundle` and never needs the signing key. (If you previously added these as
-*repository* secrets, delete those copies so they're only in the `release` environment.)
+The Entra application accepts only the
+`repo:yoannchaudet/helix-v2:environment:release` OIDC subject. The shared workflow reads
+these Key Vault secrets:
+
+| Vault secret | Purpose |
+| ------ | ------- |
+| `apple-developer-id-certificate` | Base64-encoded Developer ID `.p12` |
+| `apple-developer-id-password` | `.p12` export password |
+| `apple-notarization-password` | Apple app-specific password |
+| `repo-yoannchaudet-helix-v2-tauri-private-key` | Base64-encoded updater private key |
+| `repo-yoannchaudet-helix-v2-tauri-private-key-password` | Updater-key password |
+
+The release workflow pins the shared workflow to an immutable commit SHA. Review and update
+that SHA explicitly when adopting a newer shared-workflow revision.
 
 ## Cutting a release
 
@@ -171,17 +178,17 @@ Implemented in [`src-tauri/src/lib.rs`](../src-tauri/src/lib.rs) and
   **Updates** has the version and a **Check for updates** button. Dev builds show
   "Updates are disabled in dev builds".
 
-## Local validation
+## Credential validation
 
-You can produce signed-by-updater (but not Apple-notarized) artifacts locally.
-`TAURI_SIGNING_PRIVATE_KEY` accepts either the key's **path** (handy locally, shown here)
-or its **contents** (the form used for the CI secret):
+From the shared-workflow repository, verify that Azure contains a usable Apple certificate
+and matching Tauri updater key:
 
-```sh
-export TAURI_SIGNING_PRIVATE_KEY="$HOME/.tauri/helix.key"
-export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
-npm run tauri -- build
+```powershell
+./scripts/manage-vault.ps1 `
+  -Action Verify `
+  -Repository yoannchaudet/helix-v2 `
+  -TauriProjectPath ~/personal-repos/helix-v2
 ```
 
-This yields the `.dmg`, `Helix.app.tar.gz`, and `.sig` under
-`src-tauri/target/release/bundle/`.
+Run `npm ci` in the Helix repository before this command. Verification signs a disposable
+payload with Helix's pinned Tauri CLI; it doesn't create a release.
