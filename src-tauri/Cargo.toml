@@ -18,7 +18,7 @@ tauri = { version = "2", features = ["macos-private-api"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Bundled SQLite: no system dependency, reproducible builds (see AGENT.md "lightweight first").
-rusqlite = { version = "0.41", features = ["bundled"] }
+rusqlite = { version = "0.42", features = ["bundled"] }
 # Secret storage in the macOS login Keychain for release builds (keyring v4 split the
 # library into keyring-core plus per-platform store crates). Debug builds store the PAT
 # unencrypted in SQLite instead (see auth.rs), so the Keychain isn't touched in dev.
